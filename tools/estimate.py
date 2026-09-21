@@ -15,15 +15,21 @@ from datetime import datetime, timezone
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def load(name):
-    with open(os.path.join(ROOT, "data", name), encoding="utf-8") as f:
+def load(name, default=None):
+    """Собираемые файлы могут отсутствовать на первом запуске — это не ошибка."""
+    p = os.path.join(ROOT, "data", name)
+    if not os.path.exists(p):
+        if default is None:
+            raise SystemExit("Нет data/%s. Сначала: py tools/pm.py refresh" % name)
+        return default
+    with open(p, encoding="utf-8") as f:
         return json.load(f)
 
 
 def main():
     proj = load("projects.json")
-    usage = load("usage.json")["projects"]
-    repos = load("repos.json")["repos"]
+    usage = load("usage.json", {"projects": {}})["projects"]
+    repos = load("repos.json", {"repos": {}})["repos"]
     cal = proj["size_calibration"]
 
     # ключ проекта -> ключ в usage.json (usage строится по имени каталога, в нижнем регистре)

@@ -29,8 +29,15 @@ def check(name):
     return deco
 
 
+class Missing(Exception):
+    """Файла данных нет — проверка сообщает об этом, а не падает трассировкой."""
+
+
 def load(name):
-    with open(os.path.join(DATA, name), encoding="utf-8") as f:
+    p = os.path.join(DATA, name)
+    if not os.path.exists(p):
+        raise Missing("нет data/%s — запустите py tools/pm.py refresh" % name)
+    with open(p, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -243,6 +250,8 @@ def main():
     for t in TESTS:
         try:
             problems = t() or []
+        except Missing as e:
+            problems = [str(e)]
         except Exception as e:
             problems = ["проверка упала: %r" % e]
         if not problems:

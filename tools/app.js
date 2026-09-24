@@ -7,6 +7,8 @@ const E = D.estimates.projects, C = D.competitors.projects;
 const Q = (D.quality && D.quality.projects) || {};
 const SIG = (D.quality && D.quality.portfolio_signals) || [];
 const SN = D.snapshots || [];
+const TREE = D.tree || {}, MEM = D.memory || {records: [], totals: {}};
+const INBOX = (D.inbox || {}).items || [];
 
 const nf = n => (n == null || isNaN(n)) ? '—' : Math.round(n).toLocaleString('ru-RU').replace(/ /g, ' ');
 const money = n => (n == null || isNaN(n)) ? '—' : '$' + Math.round(n).toLocaleString('ru-RU').replace(/ /g, ' ');
@@ -441,18 +443,137 @@ document.getElementById('foot').innerHTML =
   `Обновление: <code>py tools/pm.py refresh</code>. Конкуренты исследованы ${esc(D.competitors.researched)}. ` +
   `Деньги — эквивалент по прайсу Anthropic API, а не счёт подписки. Время — активная работа ассистента из журналов сессий, паузы длиннее 15 минут отброшены.`;
 
+/* ======================= память системы =======================
+   Ради этого блока память и вынесена из контекста ассистента: видно, сколько
+   знания хранится и во сколько обходится вход в работу. */
+(function memoryBlock() {
+  const el = document.getElementById('memWrap');
+  const recs = (MEM.records || []).filter(r => r.status === 'активна');
+  const t = MEM.totals || {}, cx = D.context || {};
+  if (!recs.length) {
+    el.innerHTML = `<div class="section-h">Память системы</div><div class="note">
+      Память пуста. Она заменяет «держать всё в контексте»: заметки раскладываются
+      командой <code>py tools/pm.py ingest файл.md</code>, знание пишется через
+      <code>py tools/pm.py remember проект "заголовок" --text "…"</code>,
+      а ассистент читает не данные, а брифинг — <code>py tools/pm.py context</code>.</div>`;
+    return;
+  }
+  const byKind = {};
+  recs.forEach(r => byKind[r.kind] = (byKind[r.kind] || 0) + 1);
+  const top = recs.slice().sort((a, b) => (b.tokens || 0) - (a.tokens || 0)).slice(0, 8);
+  el.innerHTML = `<div class="section-h">Память системы — ${recs.length} записей</div>
+   <div class="kpis" style="margin-bottom:12px">
+     ${[['Записей', recs.length, Object.entries(byKind).sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => k + ' ' + v).join(' · ')],
+        ['Хранится', tok(t.stored_tokens || 0) + ' т.', 'знание на диске, а не в окне контекста'],
+        ['Брифинг сессии', tok(cx.brief_tokens || 0) + ' т.', 'столько читает ассистент на старте'],
+        ['Не читается', tok(Math.max(0, (cx.full_tokens || 0) - (cx.brief_tokens || 0))) + ' т.',
+          cx.saved_pct != null ? cx.saved_pct + '% от полного чтения data/' : 'экономия контекста']]
+       .map(([l, v, n]) => `<div class="kpi"><div class="v">${v}</div><div class="l">${esc(String(l))}</div><div class="n">${esc(String(n))}</div></div>`).join('')}
+   </div>
+   <div class="note" style="margin-bottom:11px">Записи лежат в <code>data/memory/*.md</code> —
+     это готовый формат Obsidian. Ассистент видит только заголовки и достаёт нужное целиком:
+     <code>py tools/pm.py recall id</code>.</div>
+   <div class="memgrid">${top.map(r => `<div class="memcard">
+     <div class="t"><span class="chip">${esc(r.kind)}</span> ${esc(r.title)}</div>
+     <div class="d">${esc((r.digest || '').slice(0, 170))}</div>
+     <div class="m">${esc(r.project)} · ${tok(r.tokens || 0)} т. · ${esc(r.id)}</div></div>`).join('')}</div>
+   ${recs.length > top.length ? `<div style="color:var(--ink3);font-size:12.5px;margin-top:9px">
+     Показаны 8 самых крупных из ${recs.length}. Остальные — в <code>data/memory/</code>.</div>` : ''}`;
+})();
+
+/* ======================= входящие из заметок ======================= */
+(function inboxBlock() {
+  const el = document.getElementById('inboxWrap');
+  const rows = INBOX.filter(i => i.status === 'new');
+  if (!rows.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="section-h">Входящие из заметок — ${rows.length}</div>
+   <div class="alerts" style="border-left-color:var(--warn)">${rows.map(i => `<div class="alert">
+     <span class="sev sev-warn">${esc(i.size || '')}</span>
+     <div class="txt">${esc(i.priority || '')} ${esc(i.title)}
+       <div class="who">${esc(i.project)} · ${esc(i.why || '')}${i.source ? ' · ' + esc(String(i.source).slice(0, 70)) : ''}
+       · принять: <code>py tools/pm.py apply ${esc(i.id)}</code></div></div></div>`).join('')}</div>`;
+})();
+
+/* ======================= обновление данных =======================
+   Под сервером (py tools/pm.py serve) кнопка действительно запускает сбор.
+   Открытый файлом дашборд запускать ничего не может — тогда показываем команду. */
+(function refreshBtn() {
+  const btn = document.getElementById('refresh'), mode = document.getElementById('rmode'),
+    wrap = document.getElementById('rlogWrap');
+  const served = location.protocol === 'http:' || location.protocol === 'https:';
+  const CMD = {fast: 'py tools/pm.py refresh --fast', full: 'py tools/pm.py refresh',
+               vault: 'py tools/pm.py vault sync'};
+  if (!served) {
+    btn.title = 'Дашборд открыт файлом: страница не может запускать команды';
+    btn.onclick = () => {
+      const cmd = CMD[mode.value];
+      wrap.innerHTML = `<div class="rlog">Дашборд открыт как файл, поэтому кнопка не может запустить сбор сама.
+Выполните в каталоге системы:
+
+    ${esc(cmd)}
+
+Чтобы кнопка работала прямо отсюда, запустите дашборд под локальным сервером:
+
+    py tools/pm.py serve
+</div>`;
+      if (navigator.clipboard) navigator.clipboard.writeText(cmd).then(() => {
+        wrap.firstChild.insertAdjacentText('beforeend', '\n(команда скопирована в буфер обмена)');
+      }, () => {});
+    };
+    return;
+  }
+  btn.onclick = async () => {
+    const m = mode.value, label = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span>Обновляю…';
+    wrap.innerHTML = `<div class="rlog">Запущено: ${esc(CMD[m])}
+Это может занять от нескольких секунд до нескольких минут — сканирование репозиториев самое долгое.</div>`;
+    try {
+      const r = await fetch('/api/refresh', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
+        body: JSON.stringify({mode: m}),
+      });
+      const j = await r.json();
+      wrap.innerHTML = `<div class="rlog ${j.ok ? 'ok' : 'bad'}">${esc(j.log || j.error || '')}
+${j.ok ? 'Готово за ' + j.seconds + ' с. Перезагружаю страницу…' : 'Обновление не прошло — данные остались прежними.'}</div>`;
+      if (j.ok) setTimeout(() => location.reload(), 1200);
+    } catch (e) {
+      wrap.innerHTML = `<div class="rlog bad">Сервер не ответил: ${esc(String(e))}
+Похоже, py tools/pm.py serve больше не запущен.</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  };
+})();
+
 /* ======================= вкладки и тема ======================= */
+const PAGES = ['dash', 'tree', 'proj'];
 function showTab(which) {
-  const isDash = which !== 'proj';
-  document.getElementById('page-dash').hidden = !isDash;
-  document.getElementById('page-proj').hidden = isDash;
-  document.getElementById('tab-dash').setAttribute('aria-selected', String(isDash));
-  document.getElementById('tab-proj').setAttribute('aria-selected', String(!isDash));
-  try { history.replaceState(null, '', '#' + (isDash ? 'dash' : 'proj')); } catch (e) {}
+  const cur = PAGES.includes(which) ? which : 'dash';
+  PAGES.forEach(p => {
+    document.getElementById('page-' + p).hidden = (p !== cur);
+    document.getElementById('tab-' + p).setAttribute('aria-selected', String(p === cur));
+  });
+  // Дерево строится при первом показе: у скрытого блока нулевой размер,
+  // и вписать в него дерево нельзя.
+  if (cur === 'tree') {
+    TREEVIEW.ensure(document.getElementById('treeWrap'), TREE, {
+      esc, tok,
+      onProject: k => {
+        if (!P[k]) return;
+        showTab('proj');
+        const d = document.getElementById('p-' + k);
+        if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+      },
+    });
+  }
+  try { history.replaceState(null, '', '#' + cur); } catch (e) {}
 }
-document.getElementById('tab-dash').onclick = () => showTab('dash');
-document.getElementById('tab-proj').onclick = () => showTab('proj');
-showTab(location.hash === '#proj' ? 'proj' : 'dash');
+PAGES.forEach(p => document.getElementById('tab-' + p).onclick = () => showTab(p));
+showTab((location.hash || '').replace('#', ''));
 
 const t = document.getElementById('theme');
 t.onclick = () => {

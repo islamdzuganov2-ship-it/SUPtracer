@@ -239,13 +239,90 @@ table.bl tr:last-child td{border-bottom:none}
 
 .foot{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);color:var(--ink3);font-size:12.5px}
 .foot code{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-family:var(--mono);font-size:12px}
+
+/* ---------- обновление данных ---------- */
+.refresh{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{filter:brightness(1.07);color:#fff}
+.btn[disabled]{opacity:.55;cursor:progress}
+select.sel{background:var(--panel);border:1px solid var(--line);color:var(--ink2);border-radius:8px;
+  padding:7px 9px;font-size:13px;font-family:inherit}
+.rlog{margin:10px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:11px 13px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;max-height:230px;
+  overflow:auto;color:var(--ink2);box-shadow:var(--shadow)}
+.rlog.bad{border-left:3px solid var(--bad)}
+.rlog.ok{border-left:3px solid var(--ok)}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);border-top-color:var(--accent);
+  border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* ---------- дерево роста ---------- */
+.treebox{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
+  overflow:hidden;position:relative}
+.ttools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 13px;
+  border-bottom:1px solid var(--line2);background:var(--panel2)}
+.ttools .grow{flex:1;min-width:20px}
+.ttools input[type="search"]{background:var(--panel);border:1px solid var(--line);color:var(--ink);
+  border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;min-width:150px}
+.ttools input[type="range"]{width:190px;accent-color:var(--accent)}
+.ttools label{font-size:12px;color:var(--ink3);display:flex;align-items:center;gap:6px;white-space:nowrap}
+.tstage{position:relative;height:620px;overflow:hidden;background:
+  radial-gradient(circle at 12% 50%, rgba(47,109,246,.05), transparent 62%)}
+.tstage svg{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
+.tstage svg.drag{cursor:grabbing}
+.tt-link{fill:none;stroke-linecap:round;opacity:.75;transition:opacity .35s}
+.tt-n{cursor:pointer}
+.tt-n text{font-size:12px;fill:var(--ink);dominant-baseline:middle;paint-order:stroke;
+  stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}
+.tt-n .dot{transition:r .2s,opacity .35s}
+.tt-n:hover text{fill:var(--accent)}
+.tt-n.dim{opacity:.22}
+.tt-n.hit text{font-weight:700}
+.tt-n .kid{font-size:9.5px;fill:var(--panel);stroke:none;font-weight:700;text-anchor:middle}
+.tt-fade{opacity:0}
+.ttip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);
+  border-radius:9px;padding:9px 11px;font-size:12.5px;max-width:330px;box-shadow:0 6px 22px rgba(16,24,40,.18);
+  opacity:0;transition:opacity .12s;z-index:5;line-height:1.45}
+.ttip b{font-weight:650}
+.ttip .k{color:var(--ink3);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+.tlegend2{display:flex;gap:13px;flex-wrap:wrap;padding:9px 13px;border-top:1px solid var(--line2);
+  font-size:11.5px;color:var(--ink2);background:var(--panel2)}
+.tlegend2 span{display:flex;align-items:center;gap:5px}
+.tlegend2 i{width:9px;height:9px;border-radius:50%;display:inline-block}
+.tstat{position:absolute;right:11px;top:11px;background:var(--panel);border:1px solid var(--line);
+  border-radius:9px;padding:7px 11px;font-size:11.5px;color:var(--ink2);box-shadow:var(--shadow);
+  font-variant-numeric:tabular-nums}
+.memgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.memcard{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 14px;
+  box-shadow:var(--shadow)}
+.memcard .t{font-size:13px;font-weight:600;margin-bottom:3px}
+.memcard .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+.memcard .m{font-size:11px;color:var(--ink3);margin-top:6px;font-family:var(--mono)}
+.tnote{padding:9px 13px;border-top:1px solid var(--line2);font-size:12px;color:var(--ink3)}
 @media(max-width:720px){
   .wrap{padding:16px 16px 60px}
   table.pf{display:block;overflow-x:auto}
   h1{font-size:21px}
   .grid-viz{grid-template-columns:1fr}
+  .tstage{height:440px}
+  .ttools input[type="range"]{width:120px}
 }
 """
+
+
+def context_stats():
+    """Во что обходится вход в работу: брифинг против чтения всех данных подряд.
+    Цифра попадает на дашборд, потому что ради неё вся память и вынесена из контекста."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import context as ctx
+        import mdparse as md
+        brief = ctx.build(budget=4000)
+        b, full = md.est_tokens(brief), ctx.full_size()
+        return {"brief_tokens": b, "full_tokens": full,
+                "saved_pct": int(100 - 100 * b / full) if full else None}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def main():
@@ -259,6 +336,10 @@ def main():
         "comments": load("comments.json", {"comments": []}),
         "quality": load("quality.json", {"projects": {}, "portfolio_signals": []}),
         "snapshots": load_snapshots(),
+        "tree": load("tree.json", {}),
+        "memory": load(os.path.join("memory", "index.json"), {"records": [], "totals": {}}),
+        "inbox": load("inbox.json", {"items": []}),
+        "context": context_stats(),
     }
     blob = json.dumps(payload, ensure_ascii=False).replace("</script>", "<\\/script>")
 
@@ -269,6 +350,7 @@ def main():
         + read_tool("shell.html")
         + "\n<script id=\"DATA\" type=\"application/json\">" + blob + "</script>\n"
         + "<script>\n" + read_tool("charts.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("tree.js") + "\n</script>\n"
         + "<script>\n" + read_tool("app.js") + "\n</script>\n"
         + "</body>\n</html>\n"
     )

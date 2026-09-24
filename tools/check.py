@@ -178,14 +178,94 @@ def t_no_secrets():
         r"sk-ant-[A-Za-z0-9\-_]{20,}", r"AKIA[0-9A-Z]{16}",
         r"ghp_[A-Za-z0-9]{30,}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----")]
     bad = []
-    for fn in sorted(os.listdir(DATA)):
-        if not fn.endswith(".json"):
+    files = [os.path.join(DATA, fn) for fn in sorted(os.listdir(DATA)) if fn.endswith(".json")]
+    mem = os.path.join(DATA, "memory")
+    if os.path.isdir(mem):
+        # Память набивается из чужих заметок, поэтому её проверяем наравне с данными.
+        files += [os.path.join(mem, fn) for fn in sorted(os.listdir(mem)) if fn.endswith((".md", ".json"))]
+    for path in files:
+        try:
+            with open(path, encoding="utf-8") as f:
+                txt = f.read()
+        except OSError:
             continue
-        with open(os.path.join(DATA, fn), encoding="utf-8") as f:
-            txt = f.read()
         for r in rx:
             if r.search(txt):
-                bad.append("%s: найдено совпадение с %s" % (fn, r.pattern))
+                bad.append("%s: найдено совпадение с %s" % (os.path.relpath(path, DATA), r.pattern))
+    return bad
+
+
+@check("память: у записей есть вид, проект и непустое тело")
+def t_memory():
+    mem_dir = os.path.join(DATA, "memory")
+    if not os.path.isdir(mem_dir):
+        return []
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import memory as mem
+    projects = set(load("projects.json")["projects"]) | {"портфель"}
+    bad, ids = [], {}
+    for rec in mem.load_all():
+        if rec["kind"] not in mem.KINDS:
+            bad.append("%s: вид %r вне %s" % (rec["id"], rec["kind"], list(mem.KINDS)))
+        if not (rec.get("body") or "").strip():
+            bad.append("%s: пустое тело — запись ни о чём" % rec["id"])
+        if rec["project"] not in projects:
+            bad.append("%s: проект %r не из projects.json" % (rec["id"], rec["project"]))
+        if rec.get("parent") and rec["parent"] == rec["id"]:
+            bad.append("%s: запись объявлена родителем самой себе" % rec["id"])
+        ids[rec["id"]] = ids.get(rec["id"], 0) + 1
+    for rid, n in ids.items():
+        if n > 1:
+            bad.append("%s: идентификатор встречается %d раз" % (rid, n))
+    # Осиротевшие ссылки на родителя ломают дерево — ветвь повисает в воздухе.
+    known = set(ids)
+    for rec in mem.load_all():
+        if rec.get("parent") and rec["parent"] not in known:
+            bad.append("%s: родитель %s не найден" % (rec["id"], rec["parent"]))
+    return bad
+
+
+@check("индекс памяти и дерево собраны по текущим записям")
+def t_memory_index():
+    mem_dir = os.path.join(DATA, "memory")
+    if not os.path.isdir(mem_dir) or not os.listdir(mem_dir):
+        return []
+    bad = []
+    idx_path = os.path.join(mem_dir, "index.json")
+    if not os.path.exists(idx_path):
+        return ["нет data/memory/index.json — запустите py tools/pm.py refresh"]
+    with open(idx_path, encoding="utf-8") as f:
+        idx = json.load(f)
+    on_disk = {fn[:-3] for fn in os.listdir(mem_dir) if fn.endswith(".md")}
+    in_index = {r["id"] for r in idx.get("records", [])}
+    if on_disk - in_index:
+        bad.append("нет в индексе: %s" % ", ".join(sorted(on_disk - in_index)[:5]))
+    if in_index - on_disk:
+        bad.append("в индексе есть, а файла нет: %s" % ", ".join(sorted(in_index - on_disk)[:5]))
+    tree_path = os.path.join(DATA, "tree.json")
+    if not os.path.exists(tree_path):
+        bad.append("нет data/tree.json — дерево на дашборде будет пустым")
+    return bad
+
+
+@check("входящие: у принятых предложений есть задача в бэклоге")
+def t_inbox():
+    p = os.path.join(DATA, "inbox.json")
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8") as f:
+        items = json.load(f).get("items", [])
+    P = load("projects.json")["projects"]
+    bad = []
+    for it in items:
+        if it.get("status") != "applied":
+            continue
+        ref = it.get("applied_to") or ""
+        proj, _, tid = ref.partition("/")
+        if proj not in P:
+            bad.append("%s: принято в неизвестный проект %r" % (it.get("id"), proj))
+        elif not any(b.get("id") == tid for b in P[proj].get("backlog", [])):
+            bad.append("%s: задачи %s в бэклоге %s нет" % (it.get("id"), tid, proj))
     return bad
 
 
@@ -273,7 +353,8 @@ def t_git_clean():
 
 TESTS = [t_json_parses, t_required_fields, t_readiness, t_backlog, t_paths,
          t_usage_mapping, t_estimates, t_comments, t_competitors, t_no_secrets,
-         t_pricing_fresh, t_quality, t_dashboard_builds, t_git_clean]
+         t_pricing_fresh, t_quality, t_memory, t_memory_index, t_inbox,
+         t_dashboard_builds, t_git_clean]
 
 SOFT = {t_git_clean}  # предупреждение, а не провал
 

@@ -4,11 +4,21 @@
     <h1>Портфель проектов</h1>
     <div class="sub" id="sub"></div>
   </div>
-  <button class="btn" id="theme">Тема</button>
+  <div class="refresh">
+    <select class="sel" id="rmode" title="Что пересобрать">
+      <option value="fast">Быстро — без репозиториев</option>
+      <option value="full">Полностью — со сканированием кода</option>
+      <option value="vault">Обмен с Obsidian</option>
+    </select>
+    <button class="btn primary" id="refresh">Обновить данные</button>
+    <button class="btn" id="theme">Тема</button>
+  </div>
 </header>
+<div id="rlogWrap"></div>
 
 <div class="tabs" role="tablist">
   <button class="tab" role="tab" id="tab-dash" aria-controls="page-dash" aria-selected="true">Дашборд</button>
+  <button class="tab" role="tab" id="tab-tree" aria-controls="page-tree" aria-selected="false">Дерево</button>
   <button class="tab" role="tab" id="tab-proj" aria-controls="page-proj" aria-selected="false">Проекты</button>
 </div>
 
@@ -47,6 +57,13 @@
 
   <div class="section-h">Расход по месяцам</div>
   <div class="card-viz" id="c-months"></div>
+
+  <div id="memWrap"></div>
+</section>
+
+<section class="page" id="page-tree" role="tabpanel" aria-labelledby="tab-tree" hidden>
+  <div class="section-h">Дерево роста — из чего выросло и куда растёт</div>
+  <div id="treeWrap"></div>
 </section>
 
 <section class="page" id="page-proj" role="tabpanel" aria-labelledby="tab-proj" hidden>
@@ -55,6 +72,7 @@
   <div id="tableWrap"></div>
   <div class="section-h">Проекты подробно</div>
   <div id="cards"></div>
+  <div id="inboxWrap"></div>
   <div id="commentsWrap"></div>
 </section>
 

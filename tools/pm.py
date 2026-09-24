@@ -1,15 +1,33 @@
 # -*- coding: utf-8 -*-
 """TaskTreker — командная строка системы проектного управления.
 
+Работа с портфелем
   py tools/pm.py init                 первый запуск: разложить примеры в рабочие файлы
-  py tools/pm.py refresh              пересобрать всё: токены, репозитории, оценки, дашборд
+  py tools/pm.py refresh              пересобрать всё: токены, репозитории, оценки, дерево, дашборд
   py tools/pm.py refresh --fast       без пересканирования репозиториев (быстро)
+  py tools/pm.py status [проект]      сводка в терминал
   py tools/pm.py comment <проект> "текст" [--kind техдолг|идея|баг|вопрос]
   py tools/pm.py comments             показать комментарии
-  py tools/pm.py status [проект]      сводка в терминал
   py tools/pm.py snapshot             сохранить снимок для истории трендов
   py tools/pm.py check                проверки перед слиянием в тестирование и main
-  py tools/pm.py open                 открыть дашборд в браузере
+
+Память системы — знание лежит здесь, а не в контексте ассистента
+  py tools/pm.py context              брифинг сессии: что происходит, без содержимого
+  py tools/pm.py recall <id|слова>    достать запись памяти целиком
+  py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]
+  py tools/pm.py forget <id> --why "почему устарела"
+
+Входящие
+  py tools/pm.py ingest <файл|каталог>  разобрать Markdown и разложить по проектам
+  py tools/pm.py inbox                  предложения задач из заметок
+  py tools/pm.py apply <IN-1> [...]     принять предложение в бэклог
+  py tools/pm.py reject <IN-2> --why    отклонить
+
+Obsidian и дашборд
+  py tools/pm.py vault init <путь> | pull | push | sync | status
+  py tools/pm.py tree                 пересобрать дерево работ
+  py tools/pm.py serve                дашборд с работающей кнопкой обновления
+  py tools/pm.py open                 открыть собранный дашборд файлом
 """
 import json
 import os
@@ -56,12 +74,28 @@ def cmd_refresh(args):
         run("collect_repos.py")
     else:
         print("\n→ репозитории пропущены (--fast)")
+
+    auto = jload("obsidian.json", {}).get("auto") or {}
+    if auto.get("pull_on_refresh") and "--no-vault" not in args:
+        print("\n→ заметки из Obsidian")
+        run("obsidian.py", "pull")
+
+    print("\n→ индекс памяти")
+    run("memory.py", "index")
     print("\n→ оценка оставшихся задач")
     run("estimate.py")
+    print("\n→ индексы качества и портфельные сигналы")
+    run("quality.py")
+    print("\n→ дерево работ")
+    run("tree.py")
     print("\n→ сборка дашборда")
     run("build_dashboard.py")
     cmd_snapshot([])
-    print("\nГотово. Открыть: py tools/pm.py open")
+
+    if auto.get("push_on_refresh") and "--no-vault" not in args:
+        print("\n→ выгрузка портфеля в Obsidian")
+        run("obsidian.py", "push")
+    print("\nГотово. Открыть: py tools/pm.py open · с кнопкой обновления: py tools/pm.py serve")
 
 
 def cmd_comment(args):
@@ -216,7 +250,9 @@ def cmd_init(args):
     """Разложить примеры в рабочие файлы — первый запуск после клонирования."""
     pairs = [("projects.example.json", "projects.json"),
              ("comments.example.json", "comments.json"),
-             ("competitors.example.json", "competitors.json")]
+             ("competitors.example.json", "competitors.json"),
+             ("obsidian.example.json", "obsidian.json")]
+    os.makedirs(os.path.join(DATA, "memory"), exist_ok=True)
     made = []
     for src, dst in pairs:
         s, d = os.path.join(DATA, src), os.path.join(DATA, dst)
@@ -235,6 +271,9 @@ def cmd_init(args):
     if made:
         print("\nТеперь впишите свои проекты в data/projects.json — главное поле `path`,")
         print("по нему собираются и код, и расход токенов. Затем: py tools/pm.py refresh")
+        print("\nНеобязательно, но полезно:")
+        print("  py tools/pm.py vault init <путь к хранилищу Obsidian>   двусторонний обмен заметками")
+        print("  py tools/pm.py ingest <файл.md|каталог>                 разложить готовые заметки по проектам")
     else:
         print("\nВсё на месте. Обновить: py tools/pm.py refresh")
     return 0
@@ -244,9 +283,80 @@ def cmd_check(args):
     return run("check.py", *args)
 
 
+# ---------------------------------------------------------------- память
+
+def cmd_context(args):
+    """Брифинг сессии. С него начинается работа ассистента с системой."""
+    return run("context.py", *args)
+
+
+def cmd_recall(args):
+    return run("memory.py", "recall", *args)
+
+
+def cmd_remember(args):
+    """py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]"""
+    # Первые два аргумента без дефисов — проект и заголовок; остальное уходит как есть.
+    pos_idx = [i for i, a in enumerate(args) if not a.startswith("--")
+               and (i == 0 or not args[i - 1].startswith("--"))]
+    if len(pos_idx) < 2:
+        print('Использование: py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]')
+        print("Виды: запрос, решение, факт, требование, риск, итог, источник, заметка")
+        return 1
+    project, title = args[pos_idx[0]], args[pos_idx[1]]
+    known = set(jload("projects.json").get("projects", {})) | {"портфель"}
+    if project not in known:
+        print("Нет такого проекта: %s. Доступны: %s" % (project, ", ".join(sorted(known))))
+        return 1
+    rest = [a for i, a in enumerate(args) if i not in pos_idx[:2]]
+    return run("memory.py", "add", "--project", project, "--title", title, *rest)
+
+
+def cmd_forget(args):
+    return run("memory.py", "forget", *args)
+
+
+# ---------------------------------------------------------------- входящие
+
+def cmd_ingest(args):
+    return run("ingest.py", *args)
+
+
+def cmd_inbox(args):
+    return run("inbox.py", "list", *args)
+
+
+def cmd_apply(args):
+    return run("inbox.py", "apply", *args)
+
+
+def cmd_reject(args):
+    return run("inbox.py", "reject", *args)
+
+
+# ---------------------------------------------------------------- прочее
+
+def cmd_vault(args):
+    if not args:
+        print("py tools/pm.py vault <init <путь>|pull|push|sync|status>")
+        return 1
+    return run("obsidian.py", *args)
+
+
+def cmd_tree(args):
+    return run("tree.py", *args)
+
+
+def cmd_serve(args):
+    return run("serve.py", *args)
+
+
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
-            "open": cmd_open}
+            "open": cmd_open, "context": cmd_context, "recall": cmd_recall,
+            "remember": cmd_remember, "forget": cmd_forget, "ingest": cmd_ingest,
+            "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
+            "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve}
 
 
 def main():

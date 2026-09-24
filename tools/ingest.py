@@ -17,7 +17,7 @@
 оценка затрат и гейт слияния, поэтому решение «это задача проекта» принимает человек
 или ассистент командой apply, а не разборщик текста.
 
-  py tools/ingest.py <файл|каталог> [...] [--project X] [--dry-run] [--quiet]
+  py tools/ingest.py <файл|каталог> [...] [--project X] [--root <id запроса>] [--dry-run] [--quiet]
 """
 import json
 import os
@@ -30,7 +30,7 @@ import mdparse as md
 import memory as mem
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 INBOX = os.path.join(DATA, "inbox.json")
 
 SKIP_DIRS = {".git", ".obsidian", ".trash", "node_modules", "__pycache__", ".venv",
@@ -261,8 +261,11 @@ def rel(path):
 
 
 def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
-                source_label=None, dry=False):
-    """Один файл -> записи памяти и предложения задач. Отчёт — что куда легло."""
+                source_label=None, dry=False, attach_root=None):
+    """Один файл -> записи памяти и предложения задач. Отчёт — что куда легло.
+
+    attach_root подвешивает документ под существующий запрос (ПРМ-04): так ТЗ,
+    написанное в ответ на запрос, растёт в дереве из этого запроса, а не отдельно."""
     try:
         with open(path, encoding="utf-8") as f:
             raw = f.read()
@@ -304,9 +307,11 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
         links=[l for l in links if l], source=src,
         created=str(fm.get("created") or fm.get("date") or "")[:10] or mem.today(),
         confidence="%.2f" % conf,
+        parent=attach_root or "", root=attach_root or "",
         id=mem.make_id(file_title, proj, src))
     root["routing"] = why
     records = [root]
+    tree_root = attach_root or root["id"]
 
     for s in secs:
         if s is intro_sec or not s["title"] or not s["body"].strip():
@@ -326,7 +331,7 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
             s["title"], s["body"], project=sproj, kind=skind,
             tags=sorted(set(stags) | set(all_tags)),
             links=md.wikilinks(s["body"]), source="%s#%s" % (src, s["title"]),
-            parent=root["id"], root=root["id"], confidence="%.2f" % sconf,
+            parent=root["id"], root=tree_root, confidence="%.2f" % sconf,
             id=mem.make_id(s["title"], sproj, src))
         rec["routing"] = swhy
         records.append(rec)
@@ -397,7 +402,8 @@ def _proposal(text, project, holder, src, section, origin):
     }
 
 
-def run(paths, default_project=None, dry=False, quiet=False, source_label=None):
+def run(paths, default_project=None, dry=False, quiet=False, source_label=None,
+        attach_root=None):
     projects = load_projects()
     vocab, weight = build_vocab(projects)
     box = load_inbox()
@@ -405,7 +411,7 @@ def run(paths, default_project=None, dry=False, quiet=False, source_label=None):
     reports = []
     for f in iter_files(paths):
         r = ingest_file(f, projects, vocab, weight, box, seen, default_project,
-                        source_label, dry)
+                        source_label, dry, attach_root)
         reports.append(r)
         if quiet:
             continue
@@ -433,7 +439,13 @@ def main():
         if i + 1 < len(args):
             default = args[i + 1]
             paths = [p for p in paths if p != default]
-    reports = run(paths, default, "--dry-run" in args, "--quiet" in args)
+    attach = None
+    if "--root" in args:
+        i = args.index("--root")
+        if i + 1 < len(args):
+            attach = args[i + 1]
+            paths = [p for p in paths if p != attach]
+    reports = run(paths, default, "--dry-run" in args, "--quiet" in args, attach_root=attach)
     ok = [r for r in reports if not r.get("error")]
     print("\nФайлов принято: %d · записей %d · предложений в inbox %d" % (
         len(ok), sum(len(r["records"]) for r in ok), sum(len(r["proposals"]) for r in ok)))

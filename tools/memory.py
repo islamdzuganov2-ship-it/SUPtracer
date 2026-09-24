@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mdparse as md
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 MEM = os.path.join(DATA, "memory")
 INDEX = os.path.join(MEM, "index.json")
 
@@ -187,7 +187,7 @@ def build_index(records=None):
             "source": r["source"], "pin": r["pin"],
             "chars": len(r["body"]), "tokens": t, "digest": digest,
             "keywords": md.keywords(r["title"] + " " + r["body"], 14),
-            "file": os.path.relpath(r.get("path") or record_path(r["id"]), ROOT).replace("\\", "/"),
+            "file": "memory/" + os.path.basename(r.get("path") or record_path(r["id"])),
         })
         by_project[r["project"]] = by_project.get(r["project"], 0) + 1
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1

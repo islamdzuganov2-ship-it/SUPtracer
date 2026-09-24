@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pricing import cost_usd  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 
 
@@ -212,7 +213,7 @@ def main():
         "sessions": sum(p["sessions"] for p in out["projects"].values()),
     }
 
-    dest = os.path.join(ROOT, "data", "usage.json")
+    dest = os.path.join(DATA, "usage.json")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)

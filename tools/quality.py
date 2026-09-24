@@ -14,10 +14,11 @@ import sys
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
 
 def load(name, default=None):
-    p = os.path.join(ROOT, "data", name)
+    p = os.path.join(DATA, name)
     if not os.path.exists(p):
         if default is None:
             raise SystemExit("Нет data/%s. Сначала: py tools/pm.py refresh" % name)
@@ -383,7 +384,7 @@ def main():
 
     out["portfolio_signals"] = portfolio_signals(P, R, U, E, usage_of)
 
-    dest = os.path.join(ROOT, "data", "quality.json")
+    dest = os.path.join(DATA, "quality.json")
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 

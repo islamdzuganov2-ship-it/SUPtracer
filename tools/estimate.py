@@ -13,11 +13,12 @@ import statistics
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
 
 def load(name, default=None):
     """Собираемые файлы могут отсутствовать на первом запуске — это не ошибка."""
-    p = os.path.join(ROOT, "data", name)
+    p = os.path.join(DATA, name)
     if not os.path.exists(p):
         if default is None:
             raise SystemExit("Нет data/%s. Сначала: py tools/pm.py refresh" % name)
@@ -106,7 +107,7 @@ def main():
 
     out["totals"] = {"remaining_tokens": round(grand_tok), "remaining_usd": round(grand_usd, 2)}
 
-    dest = os.path.join(ROOT, "data", "estimates.json")
+    dest = os.path.join(DATA, "estimates.json")
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 

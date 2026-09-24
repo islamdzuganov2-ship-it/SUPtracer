@@ -13,6 +13,7 @@ from collections import Counter
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache",
@@ -275,10 +276,10 @@ def scan_repo(key, meta):
 
 
 def main():
-    with open(os.path.join(ROOT, "data", "projects.json"), encoding="utf-8") as f:
+    with open(os.path.join(DATA, "projects.json"), encoding="utf-8") as f:
         projects = json.load(f)["projects"]
     only = sys.argv[1:] or None
-    out_path = os.path.join(ROOT, "data", "repos.json")
+    out_path = os.path.join(DATA, "repos.json")
     out = {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "repos": {}}
     if only and os.path.exists(out_path):
         with open(out_path, encoding="utf-8") as f:

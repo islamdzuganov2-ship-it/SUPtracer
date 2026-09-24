@@ -52,7 +52,12 @@ def slug_to_key(slug):
 
 
 FIELDS = ("input", "output", "cache_write", "cache_write_5m", "cache_write_1h",
-          "cache_read", "thinking", "web_search", "web_fetch", "requests", "sessions", "usd")
+          "cache_read", "thinking", "web_search", "web_fetch", "requests", "sessions",
+          "usd", "active_seconds")
+
+# Пауза длиннее этого порога считается перерывом, а не работой: иначе забытая
+# на ночь сессия даёт восемь часов «работы» там, где её не было.
+IDLE_GAP_SECONDS = 15 * 60
 
 
 def zero():
@@ -70,6 +75,9 @@ def main():
     by_month = defaultdict(lambda: defaultdict(zero))
     sess = defaultdict(set)
     span = {}
+    # (проект, сессия) -> отсортированные отметки времени ответов
+    beats = defaultdict(list)
+    days = defaultdict(set)
     files_scanned = rows_total = rows_used = 0
 
     for slug in sorted(os.listdir(SESSIONS_DIR)):
@@ -135,7 +143,11 @@ def main():
                     add(projects[key], rec)
                     add(by_model[key][model], rec)
                     add(by_month[key][month], rec)
-                    sess[key].add(d.get("sessionId") or fname)
+                    sid = d.get("sessionId") or fname
+                    sess[key].add(sid)
+                    if ts:
+                        beats[(key, sid)].append(ts)
+                        days[key].add(ts[:10])
                     if ts:
                         s = span.setdefault(key, [ts, ts])
                         if ts < s[0]:
@@ -145,6 +157,28 @@ def main():
 
     for key, ids in sess.items():
         projects[key]["sessions"] = len(ids)
+
+    # Активное время: сумма промежутков между соседними ответами внутри сессии,
+    # промежутки длиннее порога отбрасываются как перерыв.
+    from datetime import datetime as _dt
+
+    def _parse(t):
+        try:
+            return _dt.fromisoformat(t.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+
+    active = defaultdict(float)
+    active_month = defaultdict(lambda: defaultdict(float))
+    for (key, _sid), stamps in beats.items():
+        pts = sorted(p for p in (_parse(t) for t in stamps) if p)
+        for a, b in zip(pts, pts[1:]):
+            gap = b - a
+            if 0 < gap <= IDLE_GAP_SECONDS:
+                active[key] += gap
+                active_month[key][_dt.fromtimestamp(b, timezone.utc).strftime("%Y-%m")] += gap
+    for key in projects:
+        projects[key]["active_seconds"] = round(active.get(key, 0.0))
 
     def billable(p):
         return p["input"] + p["output"] + p["cache_write"] + p["cache_read"]
@@ -161,10 +195,17 @@ def main():
         p["usd"] = round(p["usd"], 2)
         p["first_seen"], p["last_seen"] = span.get(key, ["", ""])
         p["by_model"] = {m: dict(v, usd=round(v["usd"], 2)) for m, v in sorted(by_model[key].items())}
-        p["by_month"] = {m: dict(v, usd=round(v["usd"], 2)) for m, v in sorted(by_month[key].items())}
+        p["by_month"] = {m: dict(v, usd=round(v["usd"], 2),
+                                 active_seconds=round(active_month[key].get(m, 0.0)))
+                         for m, v in sorted(by_month[key].items())}
+        p["active_hours"] = round(p["active_seconds"] / 3600.0, 1)
+        p["calendar_days"] = len(days.get(key, ()))
+        p["hours_per_day"] = round(p["active_hours"] / p["calendar_days"], 1) if p["calendar_days"] else 0.0
         out["projects"][key] = p
 
     out["total"] = {
+        "active_hours": round(sum(p["active_hours"] for p in out["projects"].values()), 1),
+        "calendar_days": len(set().union(*days.values())) if days else 0,
         "tokens": sum(p["billable"] for p in out["projects"].values()),
         "usd": round(sum(p["usd"] for p in out["projects"].values()), 2),
         "output_tokens": sum(p["output"] for p in out["projects"].values()),
@@ -178,11 +219,12 @@ def main():
 
     fmt = lambda n: "{:,}".format(int(n)).replace(",", " ")
     print("файлов %d · строк %d · после дедупа %d" % (files_scanned, rows_total, rows_used))
-    print("проектов %d · токенов %s · по прайсу API $%s" % (
-        len(out["projects"]), fmt(out["total"]["tokens"]), fmt(out["total"]["usd"])))
+    print("проектов %d · токенов %s · $%s · активной работы %.0f ч за %d календарных дней" % (
+        len(out["projects"]), fmt(out["total"]["tokens"]), fmt(out["total"]["usd"]),
+        out["total"]["active_hours"], out["total"]["calendar_days"]))
     for k, p in out["projects"].items():
-        print("  %-22s %14s  вывод %10s  $%9.2f  сессий %3d" % (
-            k, fmt(p["billable"]), fmt(p["output"]), p["usd"], p["sessions"]))
+        print("  %-22s %14s  $%9.2f  %7.1f ч  дней %3d  сессий %3d" % (
+            k, fmt(p["billable"]), p["usd"], p["active_hours"], p["calendar_days"], p["sessions"]))
     print("-> " + dest)
 
 

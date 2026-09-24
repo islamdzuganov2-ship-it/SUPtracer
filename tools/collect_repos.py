@@ -42,6 +42,29 @@ SECRET_SCAN_EXT = {".py", ".ts", ".tsx", ".js", ".kt", ".java", ".cs", ".go",
                    ".yml", ".yaml", ".json", ".env", ".ini", ".cfg", ".toml",
                    ".sh", ".ps1", ".properties", ".xml"}
 
+# Коды требований: латиница и кириллица, «ТЗ-05», «УК-42», «SEC-01», «БТ-123», «D-037».
+# Ищем в документах — чтобы посчитать требования, и в коде — чтобы посчитать трассируемость.
+REQ_CODE = re.compile(r"\b([A-ZА-ЯЁ]{1,5}[-‑–]\d{1,3})\b")
+
+# Не требования, а внешние стандарты, форматы и обозначения — их коды выглядят так же.
+NOT_REQUIREMENTS = {
+    "ISO", "IEC", "ГОСТ", "RFC", "CVE", "CWE", "ITU", "P", "R", "EN", "DIN", "ANSI",
+    "IEEE", "UTF", "SHA", "MD", "AES", "RSA", "ECDSA", "HTTP", "HTTPS", "TLS", "SSL",
+    "API", "UI", "UX", "CSS", "HTML", "JSON", "XML", "SQL", "USB", "PCI", "GPU", "CPU",
+    "RAM", "SSD", "HDD", "LTE", "NR", "GSM", "UMTS", "CDMA", "WCAG", "ARIA", "NDA",
+    "ПП", "ФЗ", "СП", "СНиП", "ТУ", "ОКВЭД", "ИНН", "КПП",
+}
+
+# Признаки незакрытых мест в документации: вопрос не решён, решение не принято.
+OPEN_QUESTION = re.compile(
+    r"(?i)(\bTBD\b|\bTODO\b|\[\?\]|\bно пока\b|требует уточнени|требует подтвержд|"
+    r"требует проверк|остаётся открыт|остается открыт|открытый вопрос|не решен|не решён|"
+    r"не определен|не определён|под вопросом|уточнить)")
+
+# Структура документа: заголовки и таблицы отличают спецификацию от потока мыслей.
+HEADING = re.compile(r"^#{1,6}\s+\S", re.M)
+TABLE_ROW = re.compile(r"^\|.+\|\s*$", re.M)
+
 
 def sh(args, cwd=None):
     try:
@@ -98,6 +121,12 @@ def scan_repo(key, meta):
     docs = doc_lines = test_files = total_files = todo = 0
     secrets = []
     weird = []
+    # ТЗ: коды требований в документах и в коде, структура, незакрытые вопросы
+    req_in_docs = Counter()
+    req_in_code = set()
+    headings = tables = open_questions = 0
+    doc_mtimes = []
+    code_mtimes = []
     for fp in walk(path):
         total_files += 1
         ext = os.path.splitext(fp)[1].lower()
@@ -124,7 +153,19 @@ def scan_repo(key, meta):
                     txt = f.read(3_000_000)
             except OSError:
                 continue
+            try:
+                mt = os.path.getmtime(fp)
+                (code_mtimes if is_code else doc_mtimes).append(mt)
+            except OSError:
+                pass
             todo += len(re.findall(r"\b(TODO|FIXME|HACK|XXX|ЗАГЛУШКА)\b", txt))
+            if is_code:
+                req_in_code.update(REQ_CODE.findall(txt))
+            else:
+                req_in_docs.update(REQ_CODE.findall(txt))
+                headings += len(HEADING.findall(txt))
+                tables += len(TABLE_ROW.findall(txt))
+                open_questions += len(OPEN_QUESTION.findall(txt))
             if ext in SECRET_SCAN_EXT:
                 for label, rx in SECRET_RX:
                     if rx.search(txt):
@@ -143,6 +184,63 @@ def scan_repo(key, meta):
     }
     res["secrets_suspect"] = secrets[:40]
     res["weird_paths"] = weird[:20]
+
+    # --- ТЗ: количество, структура и трассируемость ---
+    # Схемой нумерации считаем префикс, встретившийся не меньше трёх раз: одиночное
+    # «A-1» — это опечатка или ссылка на стандарт, а не система требований.
+    def family(code):
+        return re.split(r"[-‑–]", code, 1)[0]
+
+    fams = Counter(family(c) for c in req_in_docs)
+    real_fams = {f for f, n in fams.items() if n >= 3 and f not in NOT_REQUIREMENTS}
+    reqs = {c for c in req_in_docs if family(c) in real_fams}
+    traced = reqs & req_in_code
+
+    # Свежесть — по git, а не по mtime: checkout переписывает время файлов,
+    # и на свежеклонированном репозитории всё выглядит одинаково новым.
+    if res["git"]:
+        # --no-merges обязателен: коммит слияния затрагивает и доки, и код одновременно,
+        # и без него обе даты всегда совпадают.
+        newest_doc = sh(["git", "log", "-1", "--no-merges", "--format=%at", "--",
+                         "*.md", "*.rst", "*.adoc"], path)
+        newest_code = sh(["git", "log", "-1", "--no-merges", "--format=%at", "--",
+                          "*.py", "*.ts", "*.tsx", "*.js", "*.kt", "*.java", "*.cs", "*.go"], path)
+        newest_doc = int(newest_doc) if newest_doc.isdigit() else 0
+        newest_code = int(newest_code) if newest_code.isdigit() else 0
+        # Дисциплина документирования: доля содержательных коммитов, в которых
+        # документация менялась вместе с кодом. Отвечает на вопрос, живут ли ТЗ
+        # вместе с разработкой или дописываются задним числом.
+        doc_commits = set(sh(["git", "log", "--no-merges", "--format=%H", "--",
+                              "*.md", "*.rst", "*.adoc"], path).split())
+        code_commits = set(sh(["git", "log", "--no-merges", "--format=%H", "--",
+                               "*.py", "*.ts", "*.tsx", "*.js", "*.kt", "*.java",
+                               "*.cs", "*.go"], path).split())
+        both = doc_commits & code_commits
+        doc_discipline = round(100.0 * len(both) / len(code_commits)) if code_commits else None
+    else:
+        newest_doc = max(doc_mtimes) if doc_mtimes else 0
+        newest_code = max(code_mtimes) if code_mtimes else 0
+        code_commits = both = ()
+        doc_discipline = None
+    res["spec"] = {
+        "doc_files": docs,
+        "doc_lines": doc_lines,
+        "requirements": len(reqs),
+        "requirement_families": sorted(real_fams),
+        "traced_in_code": len(traced),
+        "traceability_pct": round(100.0 * len(traced) / len(reqs)) if reqs else None,
+        "headings": headings,
+        "table_rows": tables,
+        "open_questions": open_questions,
+        "doc_to_code_ratio": round(doc_lines / max(1, sum(loc.values())), 3),
+        "code_commits": len(code_commits),
+        "commits_with_docs": len(both),
+        "doc_discipline_pct": doc_discipline,
+        "newest_doc": datetime.fromtimestamp(newest_doc, timezone.utc).strftime("%Y-%m-%d") if newest_doc else "",
+        "newest_code": datetime.fromtimestamp(newest_code, timezone.utc).strftime("%Y-%m-%d") if newest_code else "",
+        # Документация отстаёт от кода на столько дней. Отрицательное — доки свежее кода.
+        "docs_lag_days": round((newest_code - newest_doc) / 86400) if (newest_doc and newest_code) else None,
+    }
 
     def has(*names):
         return any(os.path.exists(os.path.join(path, n)) for n in names)

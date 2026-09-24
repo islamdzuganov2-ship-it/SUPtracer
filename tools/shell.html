@@ -1,0 +1,62 @@
+<div class="wrap">
+<header class="top">
+  <div>
+    <h1>Портфель проектов</h1>
+    <div class="sub" id="sub"></div>
+  </div>
+  <button class="btn" id="theme">Тема</button>
+</header>
+
+<div class="tabs" role="tablist">
+  <button class="tab" role="tab" id="tab-dash" aria-controls="page-dash" aria-selected="true">Дашборд</button>
+  <button class="tab" role="tab" id="tab-proj" aria-controls="page-proj" aria-selected="false">Проекты</button>
+</div>
+
+<section class="page" id="page-dash" role="tabpanel" aria-labelledby="tab-dash">
+  <div class="kpis" id="kpis"></div>
+  <div class="section-h">За чем следить — портфельные сигналы</div>
+  <div class="signals" id="signals"></div>
+
+  <div class="section-h">Готовность</div>
+  <div class="card-viz" id="c-ready"></div>
+
+  <div class="section-h">Прогресс производства</div>
+  <div class="grid-viz">
+    <div class="card-viz" id="c-progress"></div>
+    <div class="card-viz" id="c-costpoint"></div>
+  </div>
+
+  <div class="section-h">Затраченное время</div>
+  <div class="grid-viz">
+    <div class="card-viz" id="c-hours"></div>
+    <div class="card-viz" id="c-intensity"></div>
+  </div>
+
+  <div class="section-h">Техническое задание: количество и качество</div>
+  <div class="card-viz" id="c-spec"></div>
+  <div class="grid-viz">
+    <div class="card-viz" id="c-specidx"></div>
+    <div class="card-viz" id="c-specparts"></div>
+  </div>
+
+  <div class="section-h">Качество проработки</div>
+  <div class="grid-viz">
+    <div class="card-viz" id="c-eng"></div>
+    <div class="card-viz" id="c-engparts"></div>
+  </div>
+
+  <div class="section-h">Расход по месяцам</div>
+  <div class="card-viz" id="c-months"></div>
+</section>
+
+<section class="page" id="page-proj" role="tabpanel" aria-labelledby="tab-proj" hidden>
+  <div id="alertsWrap"></div>
+  <div class="section-h">Сводка</div>
+  <div id="tableWrap"></div>
+  <div class="section-h">Проекты подробно</div>
+  <div id="cards"></div>
+  <div id="commentsWrap"></div>
+</section>
+
+<div class="foot" id="foot"></div>
+</div>

@@ -343,6 +343,28 @@ def t_quality():
     return bad
 
 
+@check("юнит-тесты проходят")
+def t_unit_tests():
+    """КАЧ-02: гейт падает при провале тестов. Тесты работают на своих временных
+    каталогах данных (ИНТ-01), поэтому рабочий портфель они не трогают."""
+    tests = os.path.join(ROOT, "tests")
+    if not os.path.isdir(tests):
+        return ["нет каталога tests/ — тесты потеряны"]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    env.pop("TASKTREKER_DATA", None)
+    try:
+        r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", tests, "-p", "test_*.py"],
+                           cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=600, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return ["тесты не уложились в 10 минут"]
+    tail = (r.stderr or r.stdout).strip().splitlines()
+    if r.returncode != 0:
+        fails = [l for l in tail if l.startswith(("FAIL:", "ERROR:"))]
+        return (fails[:10] or tail[-5:]) + [tail[-1] if tail else "код возврата %d" % r.returncode]
+    return []
+
+
 @check("рабочее дерево чистое")
 def t_git_clean():
     r = subprocess.run(["git", "status", "--short"], cwd=ROOT, capture_output=True,
@@ -354,7 +376,7 @@ def t_git_clean():
 TESTS = [t_json_parses, t_required_fields, t_readiness, t_backlog, t_paths,
          t_usage_mapping, t_estimates, t_comments, t_competitors, t_no_secrets,
          t_pricing_fresh, t_quality, t_memory, t_memory_index, t_inbox,
-         t_dashboard_builds, t_git_clean]
+         t_dashboard_builds, t_unit_tests, t_git_clean]
 
 SOFT = {t_git_clean}  # предупреждение, а не провал
 

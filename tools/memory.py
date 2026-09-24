@@ -266,7 +266,7 @@ def get(rid):
 
 # ------------------------------------------------------------------ брифинг
 
-def brief(budget=1500, project=None, index=None, kinds=None):
+def brief(budget=1500, project=None, index=None, kinds=None, recall_cmd="py tools/pm.py recall <id>"):
     """Упаковка памяти в бюджет токенов: заголовки и идентификаторы, без тел.
 
     Это и есть «чтение из системы вместо чтения в контекст»: ассистент видит,
@@ -303,10 +303,11 @@ def brief(budget=1500, project=None, index=None, kinds=None):
             lines += block
     total = idx["totals"].get("stored_tokens", 0)
     header = ("ПАМЯТЬ TASKTREKER · записей %d · на диске ~%s токенов · в брифинге ~%s\n"
-              "Тела записей не загружены. Прочитать целиком: py tools/pm.py recall <id>" % (
-                  len(recs), fmt(total), fmt(used)))
+              "Тела записей не загружены. Прочитать целиком: %s" % (
+                  len(recs), fmt(total), fmt(used), recall_cmd))
     if skipped:
-        header += "\nНе поместилось в бюджет: %d записей — py tools/pm.py recall <слова>" % skipped
+        header += "\nНе поместилось в бюджет: %d записей — поиск: %s" % (
+            skipped, recall_cmd.replace("<id>", "<слова>"))
     return header + "\n\n" + "\n".join(lines) if lines else header + "\n\n(память пуста)"
 
 

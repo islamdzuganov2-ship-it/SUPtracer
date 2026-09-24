@@ -13,6 +13,8 @@ import statistics
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CLOSED = {"done", "cancelled", "dropped"}   # статусы, которые не стоят денег
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
 
@@ -86,14 +88,19 @@ def main():
             tok = rate["tokens"] * commits
             usd = rate["usd"] * commits
             blocked = b.get("status") in ("blocked",)
+            closed = b.get("status") in CLOSED
             items.append({
                 "id": b.get("id"), "title": b.get("title"), "size": size,
                 "priority": b.get("priority", ""), "status": b.get("status", ""),
                 "days": b.get("days", ""), "why": b.get("why", ""),
                 "est_tokens": round(tok), "est_usd": round(usd, 2), "blocked": blocked,
+                "closed": closed,
             })
-            tok_sum += tok
-            usd_sum += usd
+            # КАЧ-05: закрытая задача остаётся в списке (история и дерево), но в остаток
+            # не входит — иначе галочка в бэклоге не уменьшала бы прогноз.
+            if not closed:
+                tok_sum += tok
+                usd_sum += usd
         out["projects"][key] = {
             "rate_basis": rate["basis"],
             "tokens_per_commit": round(rate["tokens"]),

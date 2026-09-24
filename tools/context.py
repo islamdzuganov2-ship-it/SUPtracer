@@ -186,11 +186,15 @@ def build(budget=4000, project=None, with_memory=True):
             put(ln)
 
     body = "\n".join(lines)
-    total = full_size()
-    tail = ("\n\nБрифинг ~%s токенов вместо ~%s, если читать data/ целиком (%d%% экономии). "
-            "Недостающее берётся точечно: recall, status, inbox." % (
-                fmt(md.est_tokens(body)), fmt(total),
-                int(100 - 100 * md.est_tokens(body) / max(1, total))))
+    total, mine = full_size(), md.est_tokens(body)
+    if total > mine:
+        tail = ("\n\nБрифинг ~%s токенов вместо ~%s, если читать data/ целиком (%d%% экономии). "
+                "Недостающее берётся точечно: recall, status, inbox." % (
+                    fmt(mine), fmt(total), int(100 - 100 * mine / total)))
+    else:
+        # Данных в системе пока меньше, чем в самом брифинге, — сравнивать нечего.
+        tail = ("\n\nБрифинг ~%s токенов. Данных в системе пока мало: экономия появится, "
+                "когда наберутся проекты и записи памяти." % fmt(mine))
     return body + tail
 
 

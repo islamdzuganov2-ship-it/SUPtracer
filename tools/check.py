@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import date, datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
@@ -229,6 +230,39 @@ def t_dashboard_builds():
     return bad
 
 
+@check("прайс моделей сверялся недавно")
+def t_pricing_fresh():
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import pricing
+    try:
+        checked = datetime.strptime(pricing.CHECKED, "%Y-%m-%d").date()
+    except Exception:
+        return ["в tools/pricing.py нет разбираемой даты CHECKED"]
+    age = (date.today() - checked).days
+    if age > pricing.STALE_DAYS:
+        return ["прайс сверялся %d дней назад (%s), порог %d. Спросите у skill claude-api "
+                "актуальные цены, поправьте таблицу и передвиньте CHECKED — на этом прайсе "
+                "держится весь денежный счёт портфеля." % (age, pricing.CHECKED, pricing.STALE_DAYS)]
+    return []
+
+
+@check("индексы качества собраны для всех живых проектов")
+def t_quality():
+    P = load("projects.json")["projects"]
+    R = load("repos.json")["repos"]
+    Q = load("quality.json")["projects"]
+    bad = []
+    for k in P:
+        if not (R.get(k) or {}).get("exists"):
+            continue
+        q = Q.get(k)
+        if not q:
+            bad.append("%s: нет записи в quality.json — пересоберите quality.py" % k)
+        elif q.get("spec") and q["spec"].get("score") is None:
+            bad.append("%s: индекс ТЗ не посчитался ни по одной компоненте" % k)
+    return bad
+
+
 @check("рабочее дерево чистое")
 def t_git_clean():
     r = subprocess.run(["git", "status", "--short"], cwd=ROOT, capture_output=True,
@@ -239,7 +273,7 @@ def t_git_clean():
 
 TESTS = [t_json_parses, t_required_fields, t_readiness, t_backlog, t_paths,
          t_usage_mapping, t_estimates, t_comments, t_competitors, t_no_secrets,
-         t_dashboard_builds, t_git_clean]
+         t_pricing_fresh, t_quality, t_dashboard_builds, t_git_clean]
 
 SOFT = {t_git_clean}  # предупреждение, а не провал
 

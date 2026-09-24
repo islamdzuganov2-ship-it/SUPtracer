@@ -187,9 +187,13 @@ const TREEVIEW = (function () {
 
     function apply() { cam.setAttribute('transform', `translate(${view.x},${view.y}) scale(${view.k})`); }
 
-    function fit() {
+    function fit(retry) {
       const b = cam.getBBox(), r = stage.getBoundingClientRect();
-      if (!b.width || !b.height || !r.width) return;
+      if (!b.width || !b.height || !r.width) {
+        // Блок мог ещё не получить размер — пробуем один раз на следующем кадре.
+        if (retry !== false) requestAnimationFrame(() => fit(false));
+        return;
+      }
       view.k = Math.max(.18, Math.min((r.width - 70) / b.width, (r.height - 40) / b.height, 1.15));
       view.x = 28 - b.x * view.k;
       view.y = (r.height - b.height * view.k) / 2 - b.y * view.k;

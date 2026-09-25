@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "size_calibration": {
+    "S": {
+      "commits": 1
+    },
+    "M": {
+      "commits": 3
+    },
+    "L": {
+      "commits": 8
+    },
+    "XL": {
+      "commits": 20
+    }
+  },
+  "projects": {
+    "shop-api": {
+      "name": "Магазин API",
+      "aliases": [
+        "Магазин"
+      ],
+      "path": "C:/work/shop-api",
+      "tagline": "Бэкенд интернет-магазина: заказы, оплата, склад",
+      "goal": "Принимать заказы и оплату",
+      "architecture": {
+        "stack": "Python FastAPI PostgreSQL Redis"
+      },
+      "backlog": [
+        {
+          "id": "SH-01",
+          "title": "Возврат заказа",
+          "size": "M"
+        }
+      ],
+      "done": [
+        "Каталог товаров",
+        "Корзина"
+      ]
+    },
+    "courier-app": {
+      "name": "Курьер",
+      "aliases": [
+        "Курьерское приложение"
+      ],
+      "path": "C:/work/courier-app",
+      "tagline": "Мобильное приложение курьера: маршруты и доставки",
+      "goal": "Доставлять вовремя",
+      "architecture": {
+        "stack": "Kotlin Android, карты, GPS"
+      },
+      "backlog": [],
+      "done": [
+        "Список доставок на день"
+      ]
+    },
+    "voice-notes": {
+      "name": "Голосовые заметки",
+      "aliases": [
+        "Voice Notes"
+      ],
+      "path": "C:/work/voice-notes",
+      "tagline": "Расшифровка голосовых заметок локальной моделью",
+      "goal": "Текст из голоса без облака",
+      "architecture": {
+        "stack": "Python whisper CUDA"
+      },
+      "backlog": [],
+      "done": [
+        "Расшифровка файла целиком"
+      ]
+    },
+    "trading-bot": {
+      "name": "Торговый бот",
+      "aliases": [
+        "Скальпер"
+      ],
+      "path": "C:/work/trading-bot",
+      "tagline": "Скальпинг на бирже по стакану",
+      "goal": "Стабильная прибыль малыми сделками",
+      "architecture": {
+        "stack": "Python asyncio WebSocket биржи"
+      },
+      "backlog": [],
+      "done": [
+        "Чтение стакана"
+      ]
+    },
+    "portfolio-tracker": {
+      "name": "Учёт портфеля",
+      "aliases": [
+        "Трекер"
+      ],
+      "path": "C:/work/portfolio-tracker",
+      "tagline": "Панель по проектам: готовность, затраты токенов, бэклог",
+      "goal": "Видеть портфель",
+      "architecture": {
+        "stack": "Python stdlib, HTML-дашборд"
+      },
+      "backlog": [],
+      "done": [
+        "Дашборд с диаграммами"
+      ]
+    },
+    "sat-calc": {
+      "name": "Спутниковый калькулятор",
+      "aliases": [
+        "SatLink",
+        "Линк-бюджет"
+      ],
+      "path": "C:/work/sat-calc",
+      "tagline": "Расчёт бюджета радиолинии спутника",
+      "goal": "Точный линк-бюджет",
+      "architecture": {
+        "stack": "Python numpy, антенны, частоты, дБ"
+      },
+      "backlog": [],
+      "done": [
+        "Расчёт затухания в свободном пространстве"
+      ]
+    }
+  }
+}

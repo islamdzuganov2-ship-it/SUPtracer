@@ -20,6 +20,7 @@ SKIP_DIRS = {
     ".pytest_cache", "dist", "build", ".gradle", ".idea", ".vscode", "Library",
     "Temp", "Logs", "obj", "bin", "target", "archive", "site-packages",
     ".next", ".nuxt", "coverage", "htmlcov", "Obj", "Build", "UserSettings",
+    "fixtures",       # тестовые данные — не код и не документация, метрики ТЗ они искажают
 }
 CODE_EXT = {
     ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript",

@@ -105,6 +105,49 @@ class Vault(DataCase):
         backlog = self.jread("projects.json")["projects"]["alpha-api"]["backlog"]
         self.assertEqual([(b["id"], b["status"]) for b in backlog], [("AL-01", "done"), ("AL-02", "done")])
 
+    PAGE = "TaskTreker/Проекты/Сервис Альфа.md"
+
+    def edit_page(self, fn):
+        p = os.path.join(self.vault, *self.PAGE.split("/"))
+        with open(p, encoding="utf-8") as f:
+            text = fn(f.read())
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def copies(self):
+        d = os.path.join(self.vault, "TaskTreker", "Проекты")
+        return [n for n in os.listdir(d) if "— правка" in n]
+
+    def test_human_edit_survives_push_as_copy(self):                    # ОБС-07
+        self.push()
+        self.edit_page(lambda t: t + "\nМоя мысль про кеш, которую нельзя терять.\n")
+        # Бэклог изменился — страница будет перерисована.
+        def m(d):
+            d["projects"]["alpha-api"]["backlog"][0]["title"] = "Добавить кеш ответов и роли"
+        self.projects(m)
+        out = self.push()
+        self.assertIn("ваш текст сохранён копиями", out)
+        [copy] = self.copies()
+        with open(os.path.join(self.vault, "TaskTreker", "Проекты", copy), encoding="utf-8") as f:
+            kept = f.read()
+        self.assertIn("Моя мысль про кеш", kept)
+        self.assertNotIn("tasktreker: generated", kept)                # копия — уже заметка человека
+        self.assertNotIn("Моя мысль про кеш", self.read(self.PAGE))     # страница перерисована
+
+    def test_ticks_are_not_a_text_edit_and_are_not_lost(self):          # ОБС-07, ОБС-05
+        self.push()
+        self.edit_page(lambda t: t.replace("- [ ] **AL-01**", "- [x] **AL-01**"))
+        out = self.push()                                               # без pull
+        self.assertEqual(self.copies(), [])
+        self.assertIn("alpha-api/AL-01: queued -> done", out)
+        self.assertIn("- [x] **AL-01**", self.read(self.PAGE))
+
+    def test_repeated_push_makes_no_copies(self):                       # ОБС-07
+        self.push()
+        self.push()
+        self.push()
+        self.assertEqual(self.copies(), [])
+
     def test_user_notes_are_never_changed(self):                        # ОБС-08
         def snapshot():
             out = {}

@@ -311,7 +311,9 @@ def load(name, default=None):
         return {} if default is None else default
 
 
-def write_note(path, fm, body, written, dry=False):
+def write_note(path, fm, body, written, dry=False, ledger=None, copies=None):
+    """Записать выгружаемую заметку. ledger — {путь: отпечаток того, что система
+    записала сюда в прошлый раз}; по нему видно, правил ли файл человек (ОБС-07)."""
     # ОБС-08: обмен пишет только в свою папку. Заметки пользователя он читает,
     # но не меняет — даже если вызывающий код ошибся путём.
     own = os.path.abspath(export_root())
@@ -321,6 +323,7 @@ def write_note(path, fm, body, written, dry=False):
     fm[MARK] = "generated"
     fm.setdefault("updated", mem.today())
     text = md.dump_frontmatter(fm) + "\n" + body.rstrip() + "\n"
+    rel = os.path.relpath(path, vault_path()).replace("\\", "/")
     if not dry:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         old = None
@@ -330,20 +333,53 @@ def write_note(path, fm, body, written, dry=False):
                     old = f.read()
             except OSError:
                 old = None
+        changed = old is None or _without_updated(old) != _without_updated(text)
+        # ОБС-07: файл отличается от того, что система записала в прошлый раз, не только
+        # галочками — значит, его правил человек. Правка не пропадает: копия рядом.
+        if changed and old is not None and ledger is not None and ledger.get(rel) \
+                and _print(old) != ledger[rel]:
+            keep = _keep_copy(path, old)
+            if copies is not None:
+                copies.append(os.path.relpath(keep, vault_path()).replace("\\", "/"))
         # Перезаписываем только при изменении: иначе Obsidian считает заметку
         # тронутой при каждом обновлении и засоряет свою историю.
-        if old is None or _without_updated(old) != _without_updated(text):
+        if changed:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
-            written.append(os.path.relpath(path, vault_path()).replace("\\", "/"))
-            return True
-    else:
-        written.append(os.path.relpath(path, vault_path()).replace("\\", "/"))
+            written.append(rel)
+        if ledger is not None:
+            ledger[rel] = _print(text)
+        return changed
+    written.append(rel)
     return False
 
 
 def _without_updated(t):
     return re.sub(r"^updated:.*$", "", t or "", flags=re.M)
+
+
+def _print(text):
+    """Отпечаток заметки без даты обновления и без состояния галочек: галочки —
+    законный ввод человека, их переносит в бэклог sync_task_status (ОБС-05)."""
+    t = _without_updated(text).replace("\r\n", "\n")
+    t = re.sub(r"^(\s*[-*+]\s+)\[[^\]]\]", r"\1[ ]", t, flags=re.M)
+    return md.digest_of(t)
+
+
+def _keep_copy(path, old):
+    """Копия правленой заметки рядом с ней. Метка выгрузки снимается: если человек
+    перенесёт копию из папки выгрузки, приём заметок прочитает её как обычную."""
+    stamp = datetime.now().strftime("%Y-%m-%d %H%M")
+    stem = os.path.splitext(os.path.basename(path))[0]
+    dest = os.path.join(os.path.dirname(path), "%s — правка %s.md" % (stem, stamp))
+    fm, body = md.parse_frontmatter(old)
+    fm.pop(MARK, None)
+    fm["copy_of"] = stem
+    note = ("> [!warning] Система перезаписала «%s» при выгрузке %s. Ваш текст сохранён здесь — "
+            "перенесите нужное в свою заметку: папку выгрузки система считает своей.\n\n" % (stem, stamp))
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(md.dump_frontmatter(fm) + "\n" + note + body.lstrip())
+    return dest
 
 
 def cmd_push(args):
@@ -357,6 +393,9 @@ def cmd_push(args):
         return 0
     dry = "--dry-run" in args
     exp = export_root(c)
+    # Галочки, поставленные в хранилище, сначала переносятся в бэклог (ОБС-05):
+    # иначе выгрузка без забора стёрла бы их, перерисовав страницы проектов.
+    ticks = sync_task_status(c, dry=dry) if c.get("status_sync") else []
     P = load("projects.json").get("projects", {})
     U = load("usage.json", {"projects": {}}).get("projects", {})
     R = load("repos.json", {"repos": {}}).get("repos", {})
@@ -364,7 +403,9 @@ def cmd_push(args):
     T = load("tree.json", {})
     idx = mem.load_index()
     by_id = {y["id"]: y for y in idx.get("records", [])}
-    written = []
+    written, copies = [], []
+    state = jload(STATE, {"files": {}})
+    ledger = state.setdefault("pushed", {})           # ОБС-07: что система записала в прошлый раз
 
     def usage_for(k):
         path = (P[k].get("path") or "").lower().replace("\\", "/").rstrip("/")
@@ -447,7 +488,7 @@ def cmd_push(args):
             if len(roots) > PAGE_ROOTS:
                 body.append("- … ещё %d — [[Дерево работ]]" % (len(roots) - PAGE_ROOTS))
         body += ["", "---", "", "Собрано %s · `py tools/pm.py vault push`" % mem.today()]
-        write_note(os.path.join(exp, "Проекты", names[k] + ".md"), fm, "\n".join(body), written, dry)
+        write_note(os.path.join(exp, "Проекты", names[k] + ".md"), fm, "\n".join(body), written, dry, ledger, copies)
 
     # --- записи памяти. Пришедшие из хранилища не выгружаются: их оригинал уже там,
     # копия раздвоила бы заметки и граф. Выгружается то, чего в хранилище нет, —
@@ -481,7 +522,7 @@ def cmd_push(args):
                 links.append("Ветви: " + ", ".join(note_link(y) for y in kids))
             body = "\n".join(links + ["", rec.get("body") or "", "",
                                       "---", "", "Запись памяти TaskTreker · `%s`" % rec["id"]])
-            write_note(os.path.join(exp, "Память", memory_note_name(x) + ".md"), fm, body, written, dry)
+            write_note(os.path.join(exp, "Память", memory_note_name(x) + ".md"), fm, body, written, dry, ledger, copies)
 
     # --- дерево
     if c["export"].get("tree", True) and T.get("root"):
@@ -517,7 +558,7 @@ def cmd_push(args):
         st = T.get("stats", {})
         fm = {"title": "Дерево работ", "tags": ["tasktreker", "дерево"],
               "узлов": st.get("nodes"), "глубина": st.get("depth")}
-        write_note(os.path.join(exp, "Дерево работ.md"), fm, "\n".join(lines), written, dry)
+        write_note(os.path.join(exp, "Дерево работ.md"), fm, "\n".join(lines), written, dry, ledger, copies)
 
     # --- портфель
     spent = sum(usage_for(k).get("usd", 0) for k in P)
@@ -541,13 +582,20 @@ def cmd_push(args):
              "- `py tools/pm.py vault pull` — забрать заметки и галочки обратно в систему"]
     write_note(os.path.join(exp, "Портфель TaskTreker.md"),
                {"title": "Портфель TaskTreker", "tags": ["tasktreker", "портфель"]},
-               "\n".join(body), written, dry)
+               "\n".join(body), written, dry, ledger, copies)
 
     if not dry:                                   # ОБН-05: свежесть выгрузки видна на дашборде
-        state = jload(STATE, {"files": {}})
         state["pushed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         jsave(STATE, state)
     print("Хранилище: %s" % root)
+    if ticks:
+        print("Отметки в Obsidian перенесены в бэклог до выгрузки:")
+        for t in ticks:
+            print("  ✓ " + t)
+    if copies:
+        print("Правки в выгруженных заметках (%d) — страницы перерисованы, ваш текст сохранён копиями:" % len(copies))
+        for cp in copies:
+            print("  ! " + cp)
     print("Записано заметок: %d%s" % (len(written), " (пробный прогон)" if dry else ""))
     for w in written[:20]:
         print("  " + w)

@@ -61,7 +61,7 @@ def usage_for(key, projects, usage):
     return None
 
 
-def build():
+def build(write=True):
     projects = load("projects.json").get("projects", {})
     usage = load("usage.json", {"projects": {}}).get("projects", {})
     repos = load("repos.json", {"repos": {}}).get("repos", {})
@@ -180,6 +180,8 @@ def build():
                 "фактических затрат проекта, это оценка, а не измерение.",
     }
     dest = os.path.join(DATA, "tree.json")
+    if not write:                 # для чтения по запросу (MCP): без побочного эффекта на диске
+        return out, None
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
     return out, dest
@@ -259,6 +261,48 @@ def _walk(n):
     yield n
     for c in n["children"]:
         yield from _walk(c)
+
+
+MARK = {"проект": "▣", "запрос": "◆", "решение": "✓", "требование": "≡", "риск": "!",
+        "итог": "■", "факт": "#", "источник": "↗", "заметка": "·", "фундамент": "▤",
+        "сделано": "▪", "бэклог": "▷", "задача": "○", "почки": "◌", "предложение": "◌"}
+
+
+def render_text(project=None, depth=4, max_lines=150):
+    """Ветвь дерева текстом — для ассистента, которому не нужна картинка, а нужно
+    понять, что из чего выросло. Строится в памяти, на диск ничего не пишет."""
+    out, _ = build(write=False)
+    root = out["root"]
+    if project:
+        root = next((c for c in root["children"] if c.get("project") == project), None)
+        if root is None:
+            return "Проекта «%s» в дереве нет." % project
+    lines = []
+
+    def walk(n, d):
+        if len(lines) >= max_lines:
+            return
+        extra = []
+        if n.get("task"):
+            extra.append(n["task"])
+        if n.get("status") and n["kind"] == "задача":
+            extra.append(n["status"])
+        if n.get("memory"):
+            extra.append(n["memory"])
+        lines.append("%s%s %s%s" % ("  " * d, MARK.get(n["kind"], "·"), n.get("label", "")[:100],
+                                   (" [%s]" % ", ".join(extra)) if extra else ""))
+        if d >= depth:
+            if n["children"]:
+                lines.append("%s  … ещё %d узлов" % ("  " * d, n["count"] - 1))
+            return
+        for c in n["children"]:
+            walk(c, d + 1)
+
+    walk(root, 0)
+    if len(lines) >= max_lines:
+        lines.append("… дерево обрезано на %d строках" % max_lines)
+    legend = "◆ запрос · ✓ решение · ≡ требование · ! риск · ■ итог · ▤ фундамент · ○ задача · ◌ почка"
+    return "\n".join(lines) + "\n\n" + legend
 
 
 def main():

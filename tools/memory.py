@@ -326,6 +326,11 @@ def render(rec, budget=None):
     head = "[%s] %s · %s · проект %s · обновлено %s" % (
         rec["id"], rec["title"], rec["kind"], rec["project"], rec["updated"])
     meta = []
+    if rec.get("status") and rec["status"] != "активна":
+        meta.append("статус: %s%s" % (rec["status"], (" — заменена записью %s" % rec["superseded_by"])
+                                      if rec.get("superseded_by") else ""))
+    if rec.get("supersedes"):
+        meta.append("заменила: " + str(rec["supersedes"]))
     if rec.get("tags"):
         meta.append("теги: " + ", ".join(rec["tags"]))
     if rec.get("root"):
@@ -384,37 +389,47 @@ def cmd_brief(args):
     return 0
 
 
-def cmd_recall(args):
-    q = " ".join(a for a in args if not a.startswith("--"))
-    budget = int(_opt(args, "--budget", 4000))
+def recall_text(query, budget=4000, full=False, limit=6, project=None,
+                cmd="py tools/pm.py recall <id>"):
+    """ПАМ-07: по id — запись целиком, по словам — совпадения с дайджестами.
+    Возвращает (найдено ли, текст). Один источник ответа для командной строки и MCP."""
+    q = (query or "").strip()
     if not q:
-        print("Что вспомнить? py tools/pm.py recall <id|слова>")
-        return 1
-    rec = get(q.strip())
+        return False, "Что вспомнить? Укажите id записи или слова из неё."
+    rec = get(q)
     if rec:
-        print(render(rec, budget))
-        return 0
-    hits = search(q, limit=int(_opt(args, "--limit", 6)))
+        return True, render(rec, budget)
+    hits = search(q, project=project, limit=limit)
     if not hits:
-        print("Ничего не найдено по «%s». Индекс: py tools/pm.py refresh" % q)
-        return 1
-    if "--full" in args:
-        left = budget
+        return False, "Ничего не найдено по «%s»." % q
+    if full:
+        out, left = [], budget
         for h in hits:
             r = get(h["id"])
             if not r:
                 continue
             chunk = render(r, max(300, left // max(1, len(hits))))
             left -= md.est_tokens(chunk)
-            print(chunk + "\n" + "-" * 60)
+            out.append(chunk + "\n" + "-" * 60)
             if left <= 0:
-                print("(бюджет исчерпан)")
+                out.append("(бюджет исчерпан)")
                 break
-        return 0
-    print("Найдено %d — прочитать целиком: py tools/pm.py recall <id>\n" % len(hits))
+        return True, "\n".join(out)
+    lines = ["Найдено %d — прочитать целиком: %s\n" % (len(hits), cmd)]
     for h in hits:
-        print("[%s] %-9s %s\n    %s" % (h["id"], h["kind"], h["title"], h["digest"][:150]))
-    return 0
+        lines.append("[%s] %-9s %s%s\n    %s" % (
+            h["id"], h["kind"], h["title"],
+            "" if h.get("status") == "активна" else " (%s)" % h.get("status"), h["digest"][:150]))
+    return True, "\n".join(lines)
+
+
+def cmd_recall(args):
+    q = " ".join(a for a in args if not a.startswith("--") and a not in
+                 (_opt(args, "--budget"), _opt(args, "--limit"), _opt(args, "--project")))
+    ok, text = recall_text(q, budget=int(_opt(args, "--budget", 4000)), full="--full" in args,
+                           limit=int(_opt(args, "--limit", 6)), project=_opt(args, "--project"))
+    print(text)
+    return 0 if ok else 1
 
 
 def retire(rid, why="", by=None, manual=True):

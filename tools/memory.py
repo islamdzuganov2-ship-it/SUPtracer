@@ -95,12 +95,15 @@ def new_record(title, body, project="портфель", kind="заметка", *
     return rec
 
 
+RUNTIME_FIELDS = {"body", "path"}      # живут только в памяти процесса, в файл не пишутся
+
+
 def dump_record(rec):
     fm = {k: rec.get(k) for k in ("id", "kind", "project", "title", "status", "created",
                                   "updated", "tags", "links", "parent", "root", "source",
                                   "confidence", "pin")}
     for k, v in rec.items():
-        if k not in fm and k != "body":
+        if k not in fm and k not in RUNTIME_FIELDS:
             fm[k] = v
     return md.dump_frontmatter({k: v for k, v in fm.items() if v not in ("", None, [], {}, False)}) \
         + "\n" + (rec.get("body") or "").strip() + "\n"
@@ -414,23 +417,54 @@ def cmd_recall(args):
     return 0
 
 
+def retire(rid, why="", by=None, manual=True):
+    """Вывести запись из оборота, не удаляя файл (ПАМ-09, ПАМ-10).
+
+    by — id записи-преемника: тогда статус «заменена», у старой поле superseded_by,
+    у новой — supersedes, и цепочка замен читается по самим записям.
+    manual отличает решение человека от автоматики жизненного цикла: запись, выведенную
+    вручную, повторный приём той же заметки не оживляет (ПРМ-11)."""
+    rec = get(rid)
+    if not rec:
+        return None
+    status = "заменена" if by else "устарела"
+    if rec.get("status") == status and rec.get("superseded_by", None) == by:
+        return rec
+    rec["status"] = status
+    rec["updated"] = today()
+    rec["retired"] = "вручную" if manual else "автоматически"
+    if by:
+        rec["superseded_by"] = by
+    if why:
+        rec["body"] = (rec.get("body") or "").rstrip() + "\n\n> %s %s: %s" % (
+            "Заменена" if by else "Устарела", today(), why)
+    save(rec)
+    if by:
+        new = get(by)
+        if new and new.get("supersedes") != rid:
+            new["supersedes"] = rid
+            save(new)
+    return rec
+
+
 def cmd_forget(args):
     rid = next((a for a in args if not a.startswith("--")), None)
     if not rid:
-        print("Что забыть? memory.py forget <id> --why «почему»")
+        print("Что забыть? memory.py forget <id> --why «почему» [--by <id преемника>]")
         return 1
-    rec = get(rid)
+    by = _opt(args, "--by")
+    if by and not get(by):
+        print("нет записи-преемника %s" % by)
+        return 1
+    rec = retire(rid, _opt(args, "--why", ""), by=by)
     if not rec:
         print("нет записи %s" % rid)
         return 1
-    rec["status"] = "устарела"
-    rec["updated"] = today()
-    why = _opt(args, "--why", "")
-    if why:
-        rec["body"] = (rec.get("body") or "") + "\n\n> Устарела %s: %s" % (today(), why)
-    save(rec)
     build_index()
-    print("%s помечена устаревшей (файл не удалён — история важна)" % rec["id"])
+    if by:
+        print("%s заменена записью %s (файл не удалён — история важна)" % (rec["id"], by))
+    else:
+        print("%s помечена устаревшей (файл не удалён — история важна)" % rec["id"])
     return 0
 
 

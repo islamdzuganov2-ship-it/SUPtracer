@@ -190,6 +190,71 @@ def first_paragraph(body, limit=400):
     return re.sub(r"\s+", " ", strip_code(body or "")).strip()[:limit]
 
 
+# ---------------------------------------------------------------- секреты
+
+# БЕЗ-05: заметки пишут люди, и ключи в них попадают целиком — в блоках кода,
+# в строках «пароль: …», в адресах подключения. Приём вычищает их до записи в память:
+# иначе ключ уедет дальше — в индекс, в брифинг, в выгрузку и в её копии.
+# Порядок важен: сначала узнаваемые форматы, потом общее «имя: значение».
+_SECRET_RX = [
+    ("приватный ключ", re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?")),
+    ("ключ Anthropic", re.compile(r"sk-ant-[A-Za-z0-9\-_]{20,}")),
+    ("ключ OpenRouter", re.compile(r"sk-or-[A-Za-z0-9\-_]{20,}")),
+    ("ключ OpenAI", re.compile(r"sk-(?:proj-)?[A-Za-z0-9\-_]{20,}")),
+    ("токен GitHub", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{40,}")),
+    ("токен HuggingFace", re.compile(r"\bhf_[A-Za-z0-9]{30,}")),
+    ("ключ Groq", re.compile(r"\bgsk_[A-Za-z0-9]{30,}")),
+    ("ключ Google", re.compile(r"\bAIza[0-9A-Za-z\-_]{35}")),
+    ("ключ AWS", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("токен Slack", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+    ("токен Telegram", re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b")),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("bearer-токен", re.compile(r"(?i)(?<=bearer )[A-Za-z0-9\-._~+/]{20,}=*")),
+]
+# Пароль в адресе подключения: схема://пользователь:ПАРОЛЬ@хост — имя оставляем.
+_URL_CRED = re.compile(r"(\b[a-z][a-z0-9+.\-]*://[^\s:/@\[\]]+:)([^\s@/]+)(@)", re.I)
+# «имя: значение». Для пароля берётся любое значение от 4 символов, для остальных
+# имён — только похожее на ключ: с цифрой или знаком, либо длинное. Иначе «ключ: значение»
+# в обычной прозе превращался бы в «[скрыто]».
+_KV = re.compile(
+    r"(?i)\b(password|passwd|pwd|пароль|secret|секрет|token|токен|api[_\- ]?key|access[_\- ]?key|"
+    r"client[_\- ]?secret|ключ(?: api| доступа)?)(\s*[:=]\s*)([\"'`]?)([^\s\"'`]{4,})\3")
+
+
+def _looks_secret(name, value):
+    if value.startswith("[скрыто"):
+        return False
+    if re.match(r"(?i)pass|pwd|пароль", name):
+        return True
+    return bool(re.search(r"[\d_\-+/=]", value)) or len(value) >= 20
+
+
+def redact_secrets(text):
+    """Текст -> (текст без секретов, список найденных видов). Вместо секрета —
+    пометка «[скрыто: вид]»: по ней видно, что здесь было и почему вырезано."""
+    found = []
+    s = text or ""
+    for label, rx in _SECRET_RX:
+        def sub(m, label=label):
+            found.append(label)
+            return "[скрыто: %s]" % label
+        s = rx.sub(sub, s)
+
+    def url_sub(m):
+        found.append("пароль в адресе")
+        return m.group(1) + "[скрыто]" + m.group(3)
+    s = _URL_CRED.sub(url_sub, s)
+
+    def kv_sub(m):
+        if not _looks_secret(m.group(1), m.group(4)):
+            return m.group(0)
+        found.append("значение «%s»" % m.group(1).lower())
+        return m.group(1) + m.group(2) + "[скрыто]"
+    s = _KV.sub(kv_sub, s)
+    return s, found
+
+
 # ---------------------------------------------------------------- измерения
 
 def est_tokens(text):

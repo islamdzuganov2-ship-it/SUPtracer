@@ -129,18 +129,23 @@ def load_projects():
         return json.load(f).get("projects", {})
 
 
+def _base(p):
+    return os.path.basename((p.get("path") or "").replace("\\", "/").rstrip("/"))
+
+
 def build_vocab(projects):
     """Словарь проекта — по чему его узнать в тексте. Слова, встречающиеся почти
     у всех проектов («система», «данные»), веса почти не дают: они ничего не различают."""
     vocab, df = {}, {}
     for key, p in projects.items():
+        aliases = [str(a) for a in (p.get("aliases") or [])]
         parts = [key, key.replace("-", " "), p.get("name", ""), p.get("tagline", ""),
-                 p.get("goal", ""), p.get("goal_long", "")]
+                 p.get("goal", ""), p.get("goal_long", "")] + aliases
         arch = p.get("architecture") or {}
         parts += [str(v) for v in arch.values()]
         parts += [b.get("title", "") for b in p.get("backlog", [])]
         parts += list(p.get("done", []) or [])[:12]
-        base = os.path.basename((p.get("path") or "").replace("\\", "/").rstrip("/"))
+        base = _base(p)
         parts += [base, base.replace("-", " ").replace("_", " ")]
         words = md.word_set(" ".join(parts))
         words |= {md.stem(key.lower()), md.stem(base.lower())}
@@ -149,41 +154,96 @@ def build_vocab(projects):
             df[w] = df.get(w, 0) + 1
     n = max(1, len(projects))
     weight = {w: 1.0 if c == 1 else max(0.1, 1.0 - (c - 1) / n) for w, c in df.items()}
-    # Ключ проекта и имя каталога — опознавательные знаки, их вес не размывается
+    # Ключ, имя каталога и псевдонимы — опознавательные знаки, их вес не размывается
     for key, p in projects.items():
-        base = os.path.basename((p.get("path") or "").replace("\\", "/").rstrip("/"))
-        for w in (md.stem(key.lower()), md.stem(base.lower())):
-            if w:
-                weight[w] = 3.0
+        marks = [key.lower(), _base(p).lower()] + [str(a).lower() for a in (p.get("aliases") or [])]
+        for w in marks:
+            for s in md.word_set(w) | {md.stem(w)}:
+                if s and len(s) >= 3 and df.get(s, 0) <= 1:
+                    weight[s] = 3.0
     return vocab, weight
 
 
-def route(text, fm, tags, links, projects, vocab, weight, default=None):
-    """Куда положить кусок. Возвращает (ключ проекта, уверенность 0..1, обоснование)."""
+def name_index(projects):
+    """Все написания проекта: ключ, имя, псевдонимы (поле aliases), имя каталога —
+    в нижнем регистре и слагом. Одно место, чтобы фронтматтер, теги, ссылки и путь
+    в хранилище узнавали проект одинаково."""
+    idx = {}
+    for k, p in projects.items():
+        for n in [k, p.get("name") or "", _base(p)] + list(p.get("aliases") or []):
+            n = str(n).strip()
+            if not n:
+                continue
+            idx.setdefault(n.lower(), k)
+            s = md.slugify(n)
+            if s and s != "zapis":
+                idx.setdefault(s, k)
+    return idx
+
+
+def by_name(value, idx):
+    v = str(value or "").strip()
+    return (idx.get(v.lower()) or idx.get(md.slugify(v))) if v else None
+
+
+def by_prefix(text, idx):
+    """Имя проекта в начале названия папки или файла: «CashMash Scalper — стратегия»,
+    «SatLink - ТЗ». Совпадение только целым словом и только для имён от 4 символов,
+    иначе «Гамма-лучи» ушли бы в проект «Гамма»."""
+    s = md.slugify(text)
+    best = None
+    for name, k in idx.items():
+        if len(name) < 4 or not re.fullmatch(r"[a-z0-9-]+", name):
+            continue
+        if s == name or s.startswith(name + "-"):
+            if best is None or len(name) > len(best[0]):
+                best = (name, k)
+    return best[1] if best else None
+
+
+def by_path(parts, idx):
+    """ПРМ-08: путь заметки в хранилище. Глубокая папка точнее верхней:
+    «Проекты/CellWatch/Итоги.md» говорит о CellWatch, а не о «Проектах»."""
+    parts = [p for p in (parts or []) if p]
+    if not parts:
+        return None
+    for f in reversed(parts[:-1]):
+        k = by_name(f, idx) or by_prefix(f, idx)
+        if k:
+            return k, 0.95, "папка «%s» в хранилище" % f
+    stem = os.path.splitext(parts[-1])[0]
+    k = by_name(stem, idx) or by_prefix(stem, idx)
+    if k:
+        return k, 0.9, "имя файла «%s»" % stem
+    return None
+
+
+def route(text, fm, tags, links, projects, vocab, weight, default=None, path_parts=None, idx=None):
+    """Куда положить кусок. Возвращает (ключ проекта, уверенность 0..1, обоснование).
+
+    ПРМ-03: признаки по убыванию силы — аргумент, фронтматтер, путь в хранилище,
+    тег, викиссылка, словарь проекта."""
     if default and default in projects:
         return default, 1.0, "проект задан аргументом"
-    names = {k.lower(): k for k in projects}
-    names.update({md.slugify(k): k for k in projects})
-    for k, p in projects.items():
-        names[(p.get("name") or "").lower()] = k
-        names[md.slugify(p.get("name") or "")] = k
+    idx = idx if idx is not None else name_index(projects)
 
     for field in ("project", "проект", "проекты"):
         v = (fm or {}).get(field)
         for cand in ([v] if isinstance(v, str) else list(v or [])):
-            c = str(cand).strip().lower()
-            if c in names:
-                return names[c], 1.0, "проект указан во фронтматтере"
-            if md.slugify(c) in names:
-                return names[md.slugify(c)], 1.0, "проект указан во фронтматтере"
+            k = by_name(cand, idx)
+            if k:
+                return k, 1.0, "проект указан во фронтматтере"
+    hit = by_path(path_parts, idx)
+    if hit:
+        return hit
     for t in tags:
-        t = t.lower()
-        if t in names or md.slugify(t) in names:
-            return names.get(t) or names[md.slugify(t)], 0.9, "проект указан тегом #%s" % t
+        k = by_name(t, idx)
+        if k:
+            return k, 0.9, "проект указан тегом #%s" % t
     for l in links or ():
-        l = str(l).strip().lower()
-        if l in names or md.slugify(l) in names:
-            return names.get(l) or names[md.slugify(l)], 0.85, "ссылка на заметку проекта"
+        k = by_name(l, idx)
+        if k:
+            return k, 0.85, "ссылка на заметку проекта"
 
     words = md.word_set(text)
     scores = {}
@@ -238,16 +298,79 @@ def known_titles(projects, box):
 # --------------------------------------------------------------- приём файла
 
 def iter_files(paths):
+    """(полный путь, путь относительно переданного каталога). Относительный путь
+    нужен раскладке: папки внутри каталога заметок — признак проекта (ПРМ-08)."""
     for p in paths:
         p = os.path.abspath(p)
         if os.path.isfile(p) and p.lower().endswith((".md", ".markdown", ".txt")):
-            yield p
+            yield p, os.path.basename(p)
         elif os.path.isdir(p):
             for dirpath, dirnames, filenames in os.walk(p):
-                dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")]
+                dirnames[:] = sorted(d for d in dirnames
+                                     if d.lower() not in SKIP_DIRS and not d.startswith("."))
                 for fn in sorted(filenames):
                     if fn.lower().endswith((".md", ".markdown")):
-                        yield os.path.join(dirpath, fn)
+                        full = os.path.join(dirpath, fn)
+                        yield full, os.path.relpath(full, p).replace("\\", "/")
+
+
+MAX_RECORD_TOKENS = 1500     # ПРМ-10: записи одного порядка по размеру
+
+
+def _blocks(text):
+    """Абзацы с учётом блоков кода: блок кода неделим, пустая строка внутри него
+    абзац не разрывает."""
+    out, cur, fence = [], [], None
+    for line in (text or "").splitlines():
+        m = md.CODE_FENCE_RE.match(line)
+        if m:
+            fence = None if fence and line.strip().startswith(fence) else (fence or m.group(1))
+        if not line.strip() and fence is None:
+            if cur:
+                out.append("\n".join(cur))
+                cur = []
+            continue
+        cur.append(line)
+    if cur:
+        out.append("\n".join(cur))
+    return out
+
+
+def _pack(units, limit, sep):
+    out, cur = [], []
+    for u in units:
+        if cur and md.est_tokens(sep.join(cur + [u])) > limit:
+            out.append(sep.join(cur))
+            cur = []
+        cur.append(u)
+    if cur:
+        out.append(sep.join(cur))
+    return out
+
+
+def split_body(body, limit=MAX_RECORD_TOKENS):
+    """ПРМ-10: раздел длиннее limit токенов -> части. Сначала по подзаголовкам 4–6
+    уровня, внутри — по абзацам, абзац длиннее limit — по строкам (таблица, список).
+    Неделимое — одна строка или блок кода — остаётся целым. Возвращает [(подзаголовок, текст)]."""
+    if md.est_tokens(body) <= limit:
+        return [("", body)]
+    out = []
+    for part in re.split(r"(?m)^(?=#{4,6}\s)", body):
+        if not part.strip():
+            continue
+        m = re.match(r"#{4,6}\s+(.+)", part)
+        sub = m.group(1).strip() if m else ""
+        if md.est_tokens(part) <= limit:
+            out.append((sub, part.strip()))
+            continue
+        units = []
+        for b in _blocks(part):
+            if md.est_tokens(b) > limit and not md.CODE_FENCE_RE.match(b):
+                units += _pack(b.splitlines(), limit, "\n")
+            else:
+                units.append(b)
+        out += [(sub, chunk) for chunk in _pack(units, limit, "\n\n")]
+    return out
 
 
 def rel(path):
@@ -261,17 +384,23 @@ def rel(path):
 
 
 def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
-                source_label=None, dry=False, attach_root=None):
+                source_label=None, dry=False, attach_root=None, rel_path=None, prior=None):
     """Один файл -> записи памяти и предложения задач. Отчёт — что куда легло.
 
     attach_root подвешивает документ под существующий запрос (ПРМ-04): так ТЗ,
-    написанное в ответ на запрос, растёт в дереве из этого запроса, а не отдельно."""
+    написанное в ответ на запрос, растёт в дереве из этого запроса, а не отдельно.
+    rel_path — путь заметки внутри хранилища или каталога заметок (ПРМ-08)."""
+    idx = name_index(projects)
+    path_parts = (rel_path or os.path.basename(path)).replace("\\", "/").split("/")
     try:
         with open(path, encoding="utf-8") as f:
             raw = f.read()
     except (OSError, UnicodeDecodeError) as e:
         return {"file": rel(path), "error": str(e), "records": [], "proposals": []}
 
+    # БЕЗ-05: секреты вычищаются до разбора — ни запись, ни предложение, ни индекс
+    # не должны их увидеть. Исходную заметку не трогаем: это файл пользователя.
+    raw, secrets = md.redact_secrets(raw)
     fm, body = md.parse_frontmatter(raw)
     all_tags = md.tags(body, fm)
     links = md.wikilinks(body) + list(fm.get("links") or [])
@@ -298,10 +427,13 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
     gist = "\n".join([intro] + [s["title"] for s in secs if s["title"]])
 
     proj, conf, why = route(file_title + "\n" + body, fm, all_tags, links,
-                            projects, vocab, weight, default_project)
+                            projects, vocab, weight, default_project, path_parts, idx)
 
     kind, kconf, kwhy = classify(file_title, gist, fm, all_tags)
-    root_body = (intro or md.first_paragraph(body, 900) or file_title)[:1200]
+    # Вступление длиннее предела не обрезается молча: первая часть — тело корня,
+    # остальные — продолжения под ним (ПРМ-10).
+    intro_parts = split_body(intro) if intro else [("", md.first_paragraph(body, 900) or file_title)]
+    root_body = intro_parts[0][1]
     root = mem.new_record(
         file_title, root_body, project=proj, kind=kind, tags=all_tags,
         links=[l for l in links if l], source=src,
@@ -312,6 +444,12 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
     root["routing"] = why
     records = [root]
     tree_root = attach_root or root["id"]
+    for i, (sub, text) in enumerate(intro_parts[1:], 2):
+        t = "%s — вступление (часть %d из %d)" % (file_title, i, len(intro_parts))
+        records.append(mem.new_record(
+            t, text, project=proj, kind=kind, tags=all_tags, source=src,
+            parent=root["id"], root=tree_root, confidence="%.2f" % conf,
+            id=mem.make_id(t, proj, src)))
 
     for s in secs:
         if s is intro_sec or not s["title"] or not s["body"].strip():
@@ -324,17 +462,27 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
         skind, _, _ = classify(s["title"], s["body"], None, stags)
         sproj, sconf, swhy = route(s["title"] + "\n" + s["body"], None, stags,
                                    md.wikilinks(s["body"]), projects, vocab, weight,
-                                   default_project or (proj if conf >= 0.8 else None))
+                                   default_project or (proj if conf >= 0.8 else None), None, idx)
         if sconf < 0.5:
             sproj, swhy = proj, "унаследован от файла"
-        rec = mem.new_record(
-            s["title"], s["body"], project=sproj, kind=skind,
-            tags=sorted(set(stags) | set(all_tags)),
-            links=md.wikilinks(s["body"]), source="%s#%s" % (src, s["title"]),
-            parent=root["id"], root=tree_root, confidence="%.2f" % sconf,
-            id=mem.make_id(s["title"], sproj, src))
-        rec["routing"] = swhy
-        records.append(rec)
+        parts = split_body(s["body"])
+        for i, (sub, text) in enumerate(parts, 1):
+            if len(parts) == 1:
+                title = s["title"]
+            elif sub:
+                title = "%s — %s" % (s["title"], sub)
+                if sum(1 for x, _ in parts if x == sub) > 1:
+                    title += " (ч. %d)" % i
+            else:
+                title = "%s (часть %d из %d)" % (s["title"], i, len(parts))
+            rec = mem.new_record(
+                title, text, project=sproj, kind=skind,
+                tags=sorted(set(stags) | set(all_tags)),
+                links=md.wikilinks(text), source="%s#%s" % (src, s["title"]),
+                parent=root["id"], root=tree_root, confidence="%.2f" % sconf,
+                id=mem.make_id(title, sproj, src))
+            rec["routing"] = swhy
+            records.append(rec)
 
     proposals = []
     for s in secs + ([{"title": "", "body": body}] if not secs else []):
@@ -362,16 +510,28 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
         seen.add(k)
         fresh.append(p)
 
+    kept_manual, retired = [], []
     if not dry:
         for r in records:
+            old = mem.get(r["id"]) if os.path.exists(mem.record_path(r["id"])) else None
+            if old and old.get("status") != "активна" and old.get("retired") == "вручную":
+                kept_manual.append(r["id"])   # решение человека повторный приём не отменяет
+                continue
             mem.save(r)
+        # ПРМ-11: разделы, которых в заметке больше нет, устаревают — но не удаляются.
+        new_ids = {r["id"] for r in records}
+        for rid in (prior or {}).get(src, []):
+            if rid not in new_ids and mem.retire(rid, "раздела больше нет в заметке", manual=False):
+                retired.append(rid)
         for p in fresh:
             p["id"] = "IN-%d" % box.get("next_id", 1)
             box["next_id"] = box.get("next_id", 1) + 1
             box.setdefault("items", []).append(p)
 
     return {"file": rel(path), "project": proj, "confidence": conf, "why": why,
-            "kind": kind, "kind_why": kwhy, "records": records, "proposals": fresh}
+            "kept_manual": kept_manual, "retired": retired,
+            "kind": kind, "kind_why": kwhy, "records": records, "proposals": fresh,
+            "redacted": secrets}
 
 
 def _is_task_list(sec):
@@ -402,16 +562,59 @@ def _proposal(text, project, holder, src, section, origin):
     }
 
 
+def source_base(source):
+    """Источник записи без раздела: «заметка.md#Раздел» -> «заметка.md»."""
+    return str(source or "").split("#", 1)[0]
+
+
+def active_by_source():
+    """Активные записи, сгруппированные по файлу-источнику, — снимок до приёма.
+    По нему видно, какие разделы исчезли из заметки (ПРМ-11)."""
+    out = {}
+    for r in mem.load_index().get("records", []):
+        if r.get("status") == "активна" and r.get("source"):
+            out.setdefault(source_base(r["source"]), []).append(r["id"])
+    return out
+
+
+def retire_sources(srcs, why):
+    """Все активные записи перечисленных файлов-источников -> «устарела».
+    Файлы записей остаются. Так obsidian.py снимает записи заметок, которые
+    удалили или переименовали в хранилище. Возвращает {источник: [id]}."""
+    prior = active_by_source()
+    done = {}
+    for src in srcs:
+        for rid in prior.get(src, []):
+            if mem.retire(rid, why, manual=False):
+                done.setdefault(src, []).append(rid)
+    if done:
+        mem.build_index()
+    return done
+
+
 def run(paths, default_project=None, dry=False, quiet=False, source_label=None,
-        attach_root=None):
+        attach_root=None, rel_hint=None):
+    """Файлы и каталоги -> приём. rel_hint — путь заметки внутри хранилища, когда
+    файл передан по одному: без него раскладка не увидела бы папку проекта."""
+    items = [(f, rel_hint or rel_path, source_label) for f, rel_path in iter_files(paths)]
+    return run_items(items, default_project, dry, quiet, attach_root)
+
+
+def run_items(items, default_project=None, dry=False, quiet=False, attach_root=None):
+    """Пакетный приём: [(путь, путь в хранилище, метка источника)].
+
+    Словарь проектов, входящие и снимок памяти готовятся один раз, индекс памяти
+    перестраивается один раз в конце. Хранилище на сотни заметок иначе стоило бы
+    сотни полных перестроений индекса."""
     projects = load_projects()
     vocab, weight = build_vocab(projects)
     box = load_inbox()
     seen = known_titles(projects, box)
+    prior = active_by_source()
     reports = []
-    for f in iter_files(paths):
+    for f, rel_path, label in items:
         r = ingest_file(f, projects, vocab, weight, box, seen, default_project,
-                        source_label, dry, attach_root)
+                        label, dry, attach_root, rel_path, prior)
         reports.append(r)
         if quiet:
             continue
@@ -421,6 +624,13 @@ def run(paths, default_project=None, dry=False, quiet=False, source_label=None,
         print("  %s -> %s (%.0f%%, %s)" % (r["file"], r["project"], r["confidence"] * 100, r["why"]))
         print("      записей %d · вид корня «%s» · задач предложено %d" % (
             len(r["records"]), r["kind"], len(r["proposals"])))
+        if r.get("redacted"):
+            print("      вычищено секретов: %d (%s) — в самой заметке они остались" % (
+                len(r["redacted"]), ", ".join(sorted(set(r["redacted"])))))
+        if r.get("retired"):
+            print("      устарело записей: %d — этих разделов в заметке больше нет" % len(r["retired"]))
+        if r.get("kept_manual"):
+            print("      оставлено выведенными вручную: %d" % len(r["kept_manual"]))
     if not dry and reports:
         save_inbox(box)
         mem.build_index()
@@ -453,6 +663,10 @@ def main():
     if weak:
         print("Проект определён неуверенно (%d) — проверь: %s" % (
             len(weak), ", ".join(r["file"] for r in weak[:5])))
+    leaky = [r for r in ok if r.get("redacted")]
+    if leaky:
+        print("Ключи и пароли в заметках (%d) — в память не попали, но из заметок их стоит убрать: %s" % (
+            len(leaky), ", ".join(r["file"] for r in leaky[:5])))
     if "--dry-run" in sys.argv:
         print("Пробный прогон: ничего не записано.")
     else:

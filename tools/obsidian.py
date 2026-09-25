@@ -178,28 +178,50 @@ def cmd_pull(args):
     if c.get("status_sync") and "--no-status" not in args:
         status_changes = sync_task_status(c, dry="--dry-run" in args)
 
+    dry = "--dry-run" in args
     if not changed:
         print("Новых и изменившихся заметок нет.")
     else:
-        reports = []
-        for rel in sorted(changed):
-            rep = ingest.run([os.path.join(root, rel)], dry="--dry-run" in args,
-                             quiet=True, source_label="obsidian:" + rel)
-            reports += rep
-            r = rep[0] if rep else {}
+        order = sorted(changed)
+        # Один пакетный приём: индекс памяти перестраивается один раз, а не на каждую заметку.
+        reports = ingest.run_items(
+            [(os.path.join(root, rel), rel, "obsidian:" + rel) for rel in order],
+            dry=dry, quiet=True)
+        for rel, r in zip(order, reports):
             if r.get("error"):
                 print("  ! %s — %s" % (rel, r["error"]))
                 continue
-            print("  %s -> %s (%.0f%%) · записей %d · задач %d" % (
+            extra = []
+            if r.get("redacted"):
+                extra.append("вычищено секретов %d" % len(r["redacted"]))
+            if r.get("retired"):
+                extra.append("устарело %d" % len(r["retired"]))
+            print("  %s -> %s (%.0f%%) · записей %d · задач %d%s" % (
                 rel, r.get("project"), (r.get("confidence") or 0) * 100,
-                len(r.get("records", [])), len(r.get("proposals", []))))
-            if "--dry-run" not in args:
+                len(r.get("records", [])), len(r.get("proposals", [])),
+                (" · " + ", ".join(extra)) if extra else ""))
+            if not dry:
                 known[rel] = dict(files[rel], ingested_at=mem.today(),
                                   project=r.get("project"),
                                   records=[x["id"] for x in r.get("records", [])])
-        weak = [r for r in reports if not r.get("error") and (r.get("confidence") or 0) < 0.5]
+        weak = [(rel, r) for rel, r in zip(order, reports)
+                if not r.get("error") and (r.get("confidence") or 0) < 0.5]
         if weak:
-            print("  Неуверенная раскладка (%d) — проверить проект вручную." % len(weak))
+            print("  Неуверенная раскладка (%d) — проверить проект вручную: %s" % (
+                len(weak), ", ".join(rel for rel, _ in weak[:8])))
+        leaky = [rel for rel, r in zip(order, reports) if r.get("redacted")]
+        if leaky:
+            print("  Ключи и пароли в заметках (%d) — в память не попали, из заметок их стоит убрать: %s" % (
+                len(leaky), ", ".join(leaky[:8])))
+
+    # ПРМ-11: заметка удалена или переименована — её записи устаревают, файлы остаются.
+    if gone and not dry:
+        retired = ingest.retire_sources(["obsidian:" + rel for rel in gone],
+                                        "заметка удалена или переименована в хранилище")
+        for rel in gone:
+            n = len(retired.get("obsidian:" + rel, []))
+            print("  − %s — исчезла из хранилища, записей устарело: %d" % (rel, n))
+            known.pop(rel, None)
 
     if status_changes:
         print("\nОтметки в Obsidian перенесены в бэклог:")

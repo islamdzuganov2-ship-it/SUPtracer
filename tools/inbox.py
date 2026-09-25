@@ -38,21 +38,71 @@ def jsave(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-def next_task_id(project_key, backlog):
-    """Продолжаем нумерацию проекта, а не заводим свою: id задач читают люди."""
-    prefixes = {}
-    for b in backlog:
-        m = re.match(r"^([A-ZА-Я]{1,6})-(\d+)$", str(b.get("id") or ""))
-        if m:
-            prefixes.setdefault(m.group(1), []).append(int(m.group(2)))
-    if prefixes:
-        pref = max(prefixes, key=lambda p: len(prefixes[p]))
-        return "%s-%02d" % (pref, max(prefixes[pref]) + 1)
-    letters = re.sub(r"[^A-Za-z]", "", md.slugify(project_key)).upper()
-    pref = (letters[:2] or "TK")
-    used = [int(m.group(1)) for b in backlog
-            for m in [re.match(r"^%s-(\d+)$" % pref, str(b.get("id") or ""))] if m]
+ID_RE = re.compile(r"\b([A-ZА-ЯЁ]{1,6})-(\d{1,4})\b")
+
+
+def _codes(texts):
+    out = []
+    for t in texts:
+        out += [(m.group(1), int(m.group(2))) for m in ID_RE.finditer(str(t or ""))]
+    return out
+
+
+def _series(pool):
+    """Префикс, который больше всего похож на серию задач: нумерация задач идёт
+    подряд с единицы, а коды требований в тексте обоснования разбросаны."""
+    by = {}
+    for p, n in pool:
+        by.setdefault(p, set()).add(n)
+
+    def run_from_one(ns):
+        k = 0
+        while k + 1 in ns:
+            k += 1
+        return k
+    return max(by, key=lambda p: (run_from_one(by[p]), len(by[p]), -len(p))) if by else None
+
+
+def next_task_id(project_key, backlog, project=None, trusted=()):
+    """ПРМ-07: продолжаем нумерацию проекта, а не заводим свою — номера задач читают люди.
+
+    Закрытые задачи из бэклога убирают, поэтому пустой бэклог не значит «задач не было».
+    Префикс по убыванию надёжности: поле id_prefix проекта, номера в бэклоге, номера
+    из разобранных комментариев и принятых предложений (trusted), затем серия в сделанном
+    и в обосновании готовности. Номер — следующий после самого большого из всех источников."""
+    project = project or {}
+    own = _codes(b.get("id") for b in backlog)
+    known = _codes(trusted)
+    history = _codes(list(project.get("done") or []) +
+                     [(project.get("readiness") or {}).get("basis", "")] +
+                     list(project.get("next_actions") or []))
+    pref = str(project.get("id_prefix") or "").strip().upper() or None
+    if not pref:
+        for pool in (own, known, history):
+            pref = _series(pool)
+            if pref:
+                break
+    if not pref:
+        letters = re.sub(r"[^A-Za-z]", "", md.slugify(project_key)).upper()
+        pref = letters[:2] or "TK"
+    used = [n for p, n in own + known + history if p == pref]
     return "%s-%02d" % (pref, (max(used) + 1) if used else 1)
+
+
+def trusted_ids(key, box):
+    """Номера задач проекта, которые точно были: куда разнесены комментарии и
+    куда приняты предложения."""
+    out = []
+    comments = jload(os.path.join(DATA, "comments.json"), {"comments": []}).get("comments", [])
+    for c in comments:
+        mt = str(c.get("moved_to") or "")
+        if mt.split("/")[0].strip() == key:
+            out.append(mt)
+    for it in box.get("items", []):
+        at = str(it.get("applied_to") or "")
+        if at.split("/")[0] == key:
+            out.append(at)
+    return out
 
 
 def cmd_list(args):
@@ -119,7 +169,7 @@ def cmd_apply(args):
             it["why_rejected"] = "такая задача уже есть в бэклоге"
             skipped.append("%s: такая задача в бэклоге уже есть" % it["id"])
             continue
-        tid = next_task_id(key, backlog)
+        tid = next_task_id(key, backlog, projects[key], trusted_ids(key, box))
         task = {
             "id": tid, "title": it.get("title"), "size": it.get("size", "M"),
             "priority": it.get("priority", "🟡"), "status": "queued",

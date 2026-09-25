@@ -21,6 +21,7 @@
 """
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -99,26 +100,28 @@ def build(write=True):
         done = list(p.get("done") or [])
         if done:
             share = spent // max(1, len(done))
+            first, last = (g.get("first_commit") or "")[:10], (g.get("last_commit") or "")[:10]
             fnode = node("f:" + key, "Фундамент — сделано %d" % len(done), "фундамент",
-                         project=key, date=(g.get("first_commit") or "")[:10],
+                         project=key, date=first,
                          detail="То, на что опирается всё остальное в проекте")
             for i, d in enumerate(done):
+                date, estimated = _done_date(d, i, len(done), first, last)
                 fnode["children"].append(node(
                     "d:%s:%d" % (key, i), d[:160], "сделано", project=key,
                     weight=share, weight_basis="равная доля фактических затрат проекта",
-                    date=(g.get("last_commit") or g.get("first_commit") or "")[:10],
-                    detail=d))
+                    date=date, date_estimated=estimated, detail=d))
             pn["children"].append(fnode)
 
         # --- корневые запросы из памяти и то, что из них выросло
         est_items = {b.get("id"): b for b in e.get("items", [])}
+        commits = g.get("task_commits") or {}
         attached = set()
         roots = [r for r in records if r["project"] == key and not r.get("parent")]
         for r in sorted(roots, key=lambda r: r.get("created", "")):
             rn = _memory_node(r, kids, by_id, key)
             for b in p.get("backlog", []):
                 if (b.get("root") or b.get("memory") or "") in _subtree_ids(r, kids):
-                    rn["children"].append(_task_node(key, b, est_items))
+                    rn["children"].append(_task_node(key, b, est_items, commits.get(b.get("id"))))
                     attached.add(b.get("id"))
             pn["children"].append(rn)
 
@@ -129,7 +132,7 @@ def build(write=True):
                       date=today(), future=True,
                       detail="Задачи бэклога без связи с исходным запросом")
             for b in loose:
-                bn["children"].append(_task_node(key, b, est_items))
+                bn["children"].append(_task_node(key, b, est_items, commits.get(b.get("id"))))
             pn["children"].append(bn)
 
         # --- почки: предложения из входящих
@@ -178,6 +181,7 @@ def build(write=True):
             "фундамент": "сделанное", "сделано": "готовая часть основания",
             "бэклог": "задачи без связи с запросом", "задача": "запланированная работа",
             "почки": "предложения из входящих", "предложение": "ещё не задача",
+            "коммит": "реализация задачи — коммит с её номером",
         },
         "note": "Толщина ветви — вес поддерева в токенах. Вес узлов «сделано» — равная доля "
                 "фактических затрат проекта, это оценка, а не измерение.",
@@ -211,14 +215,39 @@ def _memory_node(r, kids, by_id, project):
     return n
 
 
-def _task_node(key, b, est_items):
+def _task_node(key, b, est_items, commits=None):
+    """ДРВ-05: коммиты, где назван номер задачи, — листья под ней; дата задачи —
+    дата первого такого коммита: так дерево показывает, когда работа началась."""
     e = est_items.get(b.get("id"), {})
-    return node("t:%s:%s" % (key, b.get("id")), b.get("title", "")[:160], "задача",
-                project=key, weight=int(e.get("est_tokens") or 0),
-                usd=e.get("est_usd"), size=b.get("size", ""),
-                status=b.get("status", ""), priority=b.get("priority", ""),
-                future=b.get("status") != "done", date=b.get("created", "") or today(),
-                detail=b.get("why", ""), task=b.get("id"))
+    commits = list(commits or [])
+    n = node("t:%s:%s" % (key, b.get("id")), b.get("title", "")[:160], "задача",
+             project=key, weight=int(e.get("est_tokens") or 0),
+             usd=e.get("est_usd"), size=b.get("size", ""),
+             status=b.get("status", ""), priority=b.get("priority", ""),
+             future=b.get("status") != "done",
+             date=commits[0]["date"] if commits else (b.get("created", "") or today()),
+             detail=b.get("why", ""), task=b.get("id"))
+    for c in commits:
+        n["children"].append(node("c:%s:%s:%s" % (key, b.get("id"), c["sha"]), c["subject"][:160],
+                                  "коммит", project=key, date=c["date"], sha=c["sha"],
+                                  detail="коммит %s" % c["sha"]))
+    return n
+
+
+def _done_date(text, i, n, first, last):
+    """ДРВ-06: дата пункта «сделано». Своя дата в тексте — она; иначе оценка по месту
+    в списке между первым и последним коммитом. Признак оценки хранится в узле."""
+    own = re.search(r"\b(20\d\d-\d\d-\d\d)\b", text or "")
+    if own:
+        return own.group(1), False
+    if not first:
+        return "", False
+    try:
+        a = datetime.strptime(first, "%Y-%m-%d")
+        b = datetime.strptime(last or first, "%Y-%m-%d")
+    except ValueError:
+        return first, True
+    return (a + (b - a) * ((i + 1) / float(n))).strftime("%Y-%m-%d"), True
 
 
 def _rollup(n):
@@ -270,7 +299,8 @@ WIDE = 25        # ДРВ-07: сколько записей памяти пок�
 
 MARK = {"проект": "▣", "запрос": "◆", "решение": "✓", "требование": "≡", "риск": "!",
         "итог": "■", "факт": "#", "источник": "↗", "заметка": "·", "фундамент": "▤",
-        "сделано": "▪", "бэклог": "▷", "задача": "○", "почки": "◌", "предложение": "◌"}
+        "сделано": "▪", "бэклог": "▷", "задача": "○", "почки": "◌", "предложение": "◌",
+        "коммит": "•"}
 
 
 def render_text(project=None, depth=4, max_lines=150):
@@ -294,6 +324,8 @@ def render_text(project=None, depth=4, max_lines=150):
             extra.append(n["status"])
         if n.get("memory"):
             extra.append(n["memory"])
+        if n.get("sha"):
+            extra.append(n["sha"])
         lines.append("%s%s %s%s" % ("  " * d, MARK.get(n["kind"], "·"), n.get("label", "")[:100],
                                    (" [%s]" % ", ".join(extra)) if extra else ""))
         if d >= depth:

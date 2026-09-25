@@ -70,15 +70,29 @@ def fmt(n):
 
 def cmd_refresh(args):
     fast = "--fast" in args
+    # ОБН-04: обновление одного проекта — пересканируется только его репозиторий,
+    # остальные слои собираются как при --fast. Скан всех репозиториев идёт минутами.
+    only = None
+    if "--project" in args:
+        i = args.index("--project")
+        only = args[i + 1] if i + 1 < len(args) else ""
+        if only not in jload("projects.json").get("projects", {}):
+            print("Нет такого проекта: %s" % only)
+            return 1
     print("→ токены из журналов сессий")
     run("collect_usage.py")
-    if not fast:
+    if only:
+        print("\n→ репозиторий проекта %s (чужие не сканируются)" % only)
+        run("collect_repos.py", only)
+    elif not fast:
         print("\n→ технический срез репозиториев")
         run("collect_repos.py")
     else:
         print("\n→ репозитории пропущены (--fast)")
 
     auto = jload("obsidian.json", {}).get("auto") or {}
+    if only:
+        auto = {}                     # обновление проекта не трогает хранилище
     if auto.get("pull_on_refresh") and "--no-vault" not in args:
         print("\n→ заметки из Obsidian")
         run("obsidian.py", "pull")

@@ -96,9 +96,44 @@ def count_lines(fp):
         return 0
 
 
+def task_tokens(meta):
+    """ДРВ-05: чем задача бэклога может быть названа в сообщении коммита —
+    её номер и коды из поля refs (например, код задачи ТЗ). -> {токен: номер задачи}."""
+    out = {}
+    for b in meta.get("backlog") or []:
+        tid = str(b.get("id") or "").strip()
+        for t in [tid] + [str(r) for r in (b.get("refs") or [])]:
+            t = t.strip()
+            if len(t) >= 2:
+                out.setdefault(t, tid)
+    return out
+
+
+def task_commits(path, tokens, per_task=20):
+    """Коммиты, в сообщении которых назван номер задачи, -> {задача: [коммиты по времени]}.
+    Номер ищется целым словом: «Т1» не находится внутри «Т14»."""
+    if not tokens:
+        return {}
+    log = sh(["git", "log", "--no-merges", "--format=%h%x09%ad%x09%s", "--date=short"], path)
+    rx = re.compile(r"(?<![\w-])(%s)(?!\w)" % "|".join(
+        re.escape(t) for t in sorted(tokens, key=len, reverse=True)))
+    out = {}
+    for line in log.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        sha, date, subject = parts
+        for tid in dict.fromkeys(tokens[m.group(1)] for m in rx.finditer(subject)):
+            out.setdefault(tid, []).append({"sha": sha, "date": date, "subject": subject[:160]})
+    return {tid: sorted(cs, key=lambda c: c["date"])[-per_task:] for tid, cs in out.items()}
+
+
 def scan_repo(key, meta):
     path = meta.get("path") or ""
-    res = {"key": key, "path": path, "exists": os.path.isdir(path)}
+    # ОБН-05: время среза у каждого репозитория — обновление одного проекта
+    # не должно выдавать остальные за свежие.
+    res = {"key": key, "path": path, "exists": os.path.isdir(path),
+           "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     if not res["exists"]:
         return res
 
@@ -114,6 +149,7 @@ def scan_repo(key, meta):
             "last_subject": log1.split("|", 1)[1] if "|" in log1 else "",
             "dirty_files": len([l for l in sh(["git", "status", "--short"], path).splitlines() if l.strip()]),
             "remote": sh(["git", "remote", "get-url", "origin"], path),
+            "task_commits": task_commits(path, task_tokens(meta)),
         }
     else:
         res["git"] = None

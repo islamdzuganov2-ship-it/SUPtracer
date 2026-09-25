@@ -543,6 +543,10 @@ def cmd_push(args):
                {"title": "Портфель TaskTreker", "tags": ["tasktreker", "портфель"]},
                "\n".join(body), written, dry)
 
+    if not dry:                                   # ОБН-05: свежесть выгрузки видна на дашборде
+        state = jload(STATE, {"files": {}})
+        state["pushed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        jsave(STATE, state)
     print("Хранилище: %s" % root)
     print("Записано заметок: %d%s" % (len(written), " (пробный прогон)" if dry else ""))
     for w in written[:20]:
@@ -557,7 +561,7 @@ def cmd_push(args):
 def _icon(kind):
     return {"проект": "🌳", "запрос": "🌱", "решение": "✅", "требование": "📐", "риск": "⚠️",
             "итог": "🏁", "факт": "📊", "фундамент": "🧱", "сделано": "🧱", "бэклог": "🌿",
-            "задача": "🌿", "почки": "🔵", "предложение": "🔵"}.get(kind, "·")
+            "задача": "🌿", "почки": "🔵", "предложение": "🔵", "коммит": "🔸"}.get(kind, "·")
 
 
 def memory_note_name(rec):

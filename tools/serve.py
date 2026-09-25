@@ -23,6 +23,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")
 DASH = os.path.join(ROOT, "dashboard.html")
 PY = sys.executable
 
@@ -30,7 +31,18 @@ MODES = {
     "fast": (["refresh", "--fast"], "быстрое обновление: токены, оценки, дерево, дашборд"),
     "full": (["refresh"], "полное обновление: с пересканированием репозиториев"),
     "vault": (["vault", "sync"], "обмен с Obsidian: забрать заметки и выложить портфель"),
+    # ОБН-04: проект передаётся отдельным полем и сверяется со списком проектов —
+    # в командную строку попадает только известный ключ.
+    "project": (["refresh", "--project"], "обновление одного проекта: только его репозиторий"),
 }
+
+
+def project_keys():
+    try:
+        with open(os.path.join(DATA, "projects.json"), encoding="utf-8") as f:
+            return set(json.load(f).get("projects", {}))
+    except Exception:
+        return set()
 
 _lock = threading.Lock()
 _last = {"at": 0, "mode": "", "ok": None, "log": "", "seconds": 0}
@@ -102,13 +114,20 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
         except Exception:
             req = {}
+        if not isinstance(req, dict):
+            req = {}
         mode = req.get("mode", "fast")
         if mode not in MODES:
             return self.send_json(400, {"ok": False, "error": "неизвестный режим %r" % mode})
+        args, title = MODES[mode]
+        if mode == "project":
+            key = str(req.get("project") or "")
+            if key not in project_keys():
+                return self.send_json(400, {"ok": False, "error": "нет такого проекта %r" % key})
+            args, title = args + [key], "%s: %s" % (title, key)
         if not _lock.acquire(blocking=False):
             return self.send_json(409, {"ok": False, "error": "обновление уже идёт"})
         try:
-            args, title = MODES[mode]
             ok, log, secs = run_pm(args)
             _last.update({"at": time.time(), "mode": mode, "ok": ok, "log": log, "seconds": secs})
             self.send_json(200, {"ok": ok, "mode": mode, "title": title,

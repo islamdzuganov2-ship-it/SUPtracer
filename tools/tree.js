@@ -23,6 +23,7 @@ const TREEVIEW = (function () {
     'требование': '--s5', 'риск': '--s8', 'итог': '--s7', 'факт': '--ink3',
     'заметка': '--ink3', 'источник': '--ink3', 'фундамент': '--s2', 'сделано': '--s2',
     'бэклог': '--s4', 'задача': '--s4', 'почки': '--ink3', 'предложение': '--ink3',
+    'коммит': '--s2',
   };
   const kcol = k => `var(${KCOL[k] || '--ink3'})`;
   const SVGNS = 'http://www.w3.org/2000/svg';
@@ -62,7 +63,7 @@ const TREEVIEW = (function () {
       <div class="tlegend2">${Object.entries({
         'запрос': 'корневой запрос', 'решение': 'чем ответили', 'требование': 'условие приёмки',
         'риск': 'угроза', 'сделано': 'фундамент — уже работает', 'задача': 'ветвь — запланировано',
-        'предложение': 'почка — ещё не принято',
+        'предложение': 'почка — ещё не принято', 'коммит': 'коммит с номером задачи',
       }).map(([k, v]) => `<span><i style="background:${kcol(k)}"></i>${esc(v)}</span>`).join('')}
         <span style="color:var(--ink3)">толщина ветви — вес в токенах · клик по узлу сворачивает ветвь</span></div>
       ${TREE.note ? `<div class="tnote">${esc(TREE.note)}</div>` : ''}
@@ -195,7 +196,7 @@ const TREEVIEW = (function () {
       const m = [];
       if (n.size) m.push('размер ' + esc(n.size));
       if (n.status) m.push(esc(n.status));
-      if (nd(n)) m.push(esc(nd(n)));
+      if (nd(n)) m.push(esc(nd(n)) + (n.date_estimated ? ' (оценка по месту в списке)' : ''));
       if (n.subtree_weight) m.push(tok(n.subtree_weight) + ' токенов');
       if (n.count > 1) m.push(n.count + ' узлов в ветви');
       if (n.source) m.push('из ' + esc(String(n.source).slice(0, 60)));

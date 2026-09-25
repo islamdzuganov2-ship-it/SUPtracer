@@ -83,6 +83,7 @@ class Vault(DataCase):
     def test_push_is_idempotent(self):                                  # ОБС-06
         self.push()
         self.assertIn("всё уже актуально", self.push())
+        self.assertTrue(self.jread("vault_state.json")["pushed_at"])    # ОБН-05: свежесть выгрузки
 
     def test_generated_notes_are_never_read_back(self):                 # ОБС-04
         self.pull()

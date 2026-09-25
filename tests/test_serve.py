@@ -74,6 +74,24 @@ class Server(unittest.TestCase):
         self.assertTrue(json.loads(body)["ok"])
         self.assertEqual(self.calls[-1], ["vault", "sync"])
 
+    def test_project_mode_takes_only_known_projects(self):              # ОБН-04
+        with mock.patch.object(serve, "project_keys", lambda: {"alpha-api"}):
+            code, body = self.req("POST", "/api/refresh",
+                                  json.dumps({"mode": "project", "project": "alpha-api"}),
+                                  {"X-TaskTreker": "1"})
+            self.assertEqual(code, 200)
+            self.assertEqual(self.calls[-1], ["refresh", "--project", "alpha-api"])
+            for bad in ("beta; rm -rf /", "", None, "../alpha-api"):
+                with self.subTest(project=bad):
+                    code, _ = self.req("POST", "/api/refresh",
+                                       json.dumps({"mode": "project", "project": bad}),
+                                       {"X-TaskTreker": "1"})
+                    self.assertEqual(code, 400)
+
+    def test_non_object_body_is_ignored(self):
+        code, _ = self.req("POST", "/api/refresh", json.dumps([1, 2]), {"X-TaskTreker": "1"})
+        self.assertEqual(code, 200)                                     # как пустой запрос: режим fast
+
     def test_unknown_mode_rejected(self):
         code, _ = self.req("POST", "/api/refresh", json.dumps({"mode": "rm -rf"}),
                            {"X-TaskTreker": "1"})

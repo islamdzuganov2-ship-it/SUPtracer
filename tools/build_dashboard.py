@@ -100,6 +100,10 @@ a:hover{text-decoration:underline}
 header.top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}
 h1{font-size:25px;margin:0 0 4px;letter-spacing:-.4px;font-weight:650}
 .sub{color:var(--ink2);font-size:13.5px}
+.fresh{color:var(--ink3);font-size:12px;margin-top:3px}
+.fresh .old{color:var(--warn);font-weight:600}
+.prow{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.plog{color:var(--ink3);font-size:12.5px}
 .btn{background:var(--panel);border:1px solid var(--line);color:var(--ink2);border-radius:8px;
   padding:7px 12px;font-size:13px;cursor:pointer;font-family:inherit}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
@@ -325,6 +329,22 @@ def context_stats():
         return {"error": str(e)}
 
 
+def freshness():
+    """ОБН-05: когда собран каждый слой. Репозитории — по самому старому срезу:
+    обновление одного проекта не делает свежими остальные."""
+    repos = load("repos.json", {"repos": {}})
+    scans = [r.get("scanned_at") for r in (repos.get("repos") or {}).values() if r.get("scanned_at")]
+    mem = load(os.path.join("memory", "index.json"), {})
+    vault = load("vault_state.json", {})
+    return {
+        "usage": load("usage.json", {}).get("generated_at", ""),
+        "repos": min(scans) if scans else repos.get("generated_at", ""),
+        "memory": mem.get("generated_at", ""),
+        "vault_pull": vault.get("pulled_at", ""),
+        "vault_push": vault.get("pushed_at", ""),
+    }
+
+
 def main():
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -340,6 +360,7 @@ def main():
         "memory": load(os.path.join("memory", "index.json"), {"records": [], "totals": {}}),
         "inbox": load("inbox.json", {"items": []}),
         "context": context_stats(),
+        "fresh": freshness(),
     }
     blob = json.dumps(payload, ensure_ascii=False).replace("</script>", "<\\/script>")
 

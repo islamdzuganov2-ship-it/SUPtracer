@@ -49,6 +49,27 @@ document.getElementById('sub').textContent =
   `${own.length} собственных проектов · ${Math.round(hours)} ч работы за ${calDays} дней · данные собраны ` +
   D.generated_at.slice(0, 16).replace('T', ' ') + ' UTC';
 
+/* Свежесть слоёв (ОБН-05): кнопка «быстро» не трогает репозитории, обмен с хранилищем
+   идёт отдельно — и цифры на странице могут быть разного возраста. Слой старше суток
+   помечен: по нему видно, что и чем обновить. */
+(function freshness() {
+  const F = D.fresh || {}, now = Date.now();
+  const LAYERS = [['usage', 'токены'], ['repos', 'репозитории'], ['memory', 'память'],
+                  ['vault_pull', 'заметки из Obsidian'],
+                  ['vault_push', 'выгрузка в Obsidian']];
+  const ago = t => {
+    const h = (now - Date.parse(t)) / 36e5;
+    return h < 1 ? Math.max(1, Math.round(h * 60)) + ' мин назад' : h < 48 ? Math.round(h) + ' ч назад'
+      : Math.round(h / 24) + ' дн назад';
+  };
+  document.getElementById('fresh').innerHTML = 'Свежесть: ' + LAYERS.map(([k, name]) => {
+    const t = F[k];
+    if (!t || isNaN(Date.parse(t))) return `<span class="old" title="слой ещё не собирался">${name} — нет</span>`;
+    const old = now - Date.parse(t) > 864e5;
+    return `<span class="${old ? 'old' : ''}" title="${esc(t)}">${name} ${ago(t)}${old ? ' ⚠' : ''}</span>`;
+  }).join(' · ');
+})();
+
 document.getElementById('kpis').innerHTML = [
   ['Потрачено', money(spent), tok(spentTok) + ' токенов · ' + sess + ' сессий'],
   ['Осталось', money(rem), tok(remTok) + ' токенов · ' + tasks + ' задач'],
@@ -360,6 +381,10 @@ document.getElementById('cards').innerHTML = order.map(k => {
     ${u ? `<span class="chip">${money(u.usd)} · ${hrs(u.active_hours)}</span>` : ''}
   </summary><div class="body">
 
+  <div class="prow"><button class="btn prefresh" data-k="${esc(k)}"
+    title="Пересканировать только репозиторий этого проекта, остальное — быстро">Обновить проект</button>
+    <span class="plog" id="plog-${esc(k)}">${r.scanned_at ? 'срез репозитория: ' + esc(String(r.scanned_at).slice(0, 16).replace('T', ' ')) + ' UTC' : ''}</span></div>
+
   <div class="grid2">
     <div class="block"><h3>Цель</h3><p>${esc(p.goal_long || '')}</p></div>
     <div class="block"><h3>Готовность</h3>${readRows}
@@ -548,6 +573,39 @@ ${j.ok ? 'Готово за ' + j.seconds + ' с. Перезагружаю ст�
     }
   };
 })();
+
+/* Обновление одного проекта с его карточки (ОБН-04): пересканируется только его
+   репозиторий. Без сервера кнопка показывает и копирует команду. */
+document.getElementById('cards').addEventListener('click', async e => {
+  const b = e.target.closest('.prefresh');
+  if (!b) return;
+  e.preventDefault();
+  const k = b.dataset.k, log = document.getElementById('plog-' + k);
+  const cmd = 'py tools/pm.py refresh --project ' + k;
+  if (!(location.protocol === 'http:' || location.protocol === 'https:')) {
+    log.textContent = 'Дашборд открыт файлом — выполните в каталоге системы: ' + cmd;
+    if (navigator.clipboard) navigator.clipboard.writeText(cmd).catch(() => {});
+    return;
+  }
+  const label = b.textContent;
+  b.disabled = true;
+  b.innerHTML = '<span class="spin"></span>Обновляю…';
+  try {
+    const r = await fetch('/api/refresh', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
+      body: JSON.stringify({mode: 'project', project: k}),
+    });
+    const j = await r.json();
+    log.textContent = j.ok ? 'Готово за ' + j.seconds + ' с — перезагружаю…' : (j.error || 'Обновление не прошло');
+    if (j.ok) setTimeout(() => { location.hash = 'proj'; location.reload(); }, 900);
+  } catch (err) {
+    log.textContent = 'Сервер не ответил: ' + err;
+  } finally {
+    b.disabled = false;
+    b.textContent = label;
+  }
+});
 
 /* ======================= вкладки и тема ======================= */
 const PAGES = ['dash', 'tree', 'proj'];

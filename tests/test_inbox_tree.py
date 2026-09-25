@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Входящие и дерево работ (ПРМ-05, ДРВ-01 … ДРВ-04, КАЧ-05)."""
+"""Входящие и дерево работ (ПРМ-05, ДРВ-01 … ДРВ-07, КАЧ-05)."""
+import os
+import subprocess
 import unittest
 
 from base import DataCase
@@ -137,6 +139,59 @@ class Tree(DataCase):
         self.assertEqual(text.count("Запись "), self.t.tree.WIDE)
         self.assertIn("… ещё 15 записей", text)
         self.assertIn("Фундамент", text)                                  # служебные ветви не прячутся
+
+
+class Growth(DataCase):
+    """Реализация в дереве: коммиты под задачами и даты сделанного (ДРВ-05, ДРВ-06)."""
+    find = Tree.find
+
+    def git(self, repo, *args, date=None):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        if date:
+            env.update(GIT_AUTHOR_DATE=date + "T12:00:00", GIT_COMMITTER_DATE=date + "T12:00:00")
+        subprocess.run(["git"] + list(args), cwd=repo, env=env, check=True, capture_output=True)
+
+    def commit(self, repo, msg, date):
+        with open(os.path.join(repo, "f.txt"), "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+        self.git(repo, "add", "f.txt")
+        self.git(repo, "commit", "-q", "-m", msg, date=date)
+
+    def test_commits_with_task_number_become_leaves(self):             # ДРВ-05
+        import collect_repos
+        def m(d):
+            d["projects"]["alpha-api"]["backlog"][0]["refs"] = ["Т2"]
+        P = self.projects(m)["projects"]
+        repo = P["alpha-api"]["path"]
+        self.git(repo, "init", "-q")
+        self.commit(repo, "Каркас сервиса", "2026-03-01")
+        self.commit(repo, "AL-01: кеш ответов в Redis", "2026-03-10")
+        self.commit(repo, "Т2: инвалидация кеша; Т14 тут ни при чём", "2026-03-12")
+        self.commit(repo, "Т14: другое", "2026-03-15")
+        found = collect_repos.task_commits(repo, collect_repos.task_tokens(P["alpha-api"]))
+        self.assertEqual([c["date"] for c in found["AL-01"]], ["2026-03-10", "2026-03-12"])
+        self.assertNotIn("AL-02", found)
+        self.jwrite("repos.json", {"repos": {"alpha-api": {"git": {"task_commits": found}}}})
+        (out, _), _ = self.quiet(self.t.tree.build)
+        task = self.find(out["root"], lambda n: n.get("task") == "AL-01")
+        self.assertEqual([c["kind"] for c in task["children"]], ["коммит", "коммит"])
+        self.assertEqual(task["date"], "2026-03-10")                     # дата первого коммита
+        self.assertIn("AL-01: кеш ответов", task["children"][0]["label"])
+
+    def test_done_dates_are_estimated_in_order(self):                  # ДРВ-06
+        def m(d):
+            d["projects"]["alpha-api"]["done"] = ["Первое", "Второе", "Третье 2026-02-20", "Четвёртое"]
+        self.projects(m)
+        self.jwrite("repos.json", {"repos": {"alpha-api": {"git": {
+            "first_commit": "2026-01-01", "last_commit": "2026-05-01"}}}})
+        (out, _), _ = self.quiet(self.t.tree.build)
+        found = self.find(out["root"], lambda n: n["id"] == "f:alpha-api")
+        dates = [(c["date"], c["date_estimated"]) for c in found["children"]]
+        self.assertEqual(dates[2], ("2026-02-20", False))                # своя дата в тексте
+        self.assertTrue(dates[0][1] and dates[1][1] and dates[3][1])
+        self.assertLess(dates[0][0], dates[1][0])                        # фундамент растёт по порядку
+        self.assertEqual(dates[3][0], "2026-05-01")
 
 
 class ForeignTasks(DataCase):

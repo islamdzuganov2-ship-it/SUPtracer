@@ -35,8 +35,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ingest
 import mdparse as md
 import memory as mem
+import tree as tree_mod
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT =os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 CONF = os.path.join(DATA, "obsidian.json")
 STATE = os.path.join(DATA, "vault_state.json")
@@ -220,10 +221,13 @@ def cmd_pull(args):
         foreign = {}
         for r in reports:
             if r.get("foreign_project"):
-                foreign[r["foreign_project"]] = foreign.get(r["foreign_project"], 0) + 1
+                n, t = foreign.get(r["foreign_project"], (0, 0))
+                foreign[r["foreign_project"]] = (n + 1, t + (r.get("foreign_tasks") or 0))
         if foreign:
-            print("  Папки проектов, которых нет в портфеле, — заметки легли в «портфель»: %s" % ", ".join(
-                "%s — %d" % kv for kv in sorted(foreign.items(), key=lambda kv: (-kv[1], kv[0]))))
+            print("  Папки проектов, которых нет в портфеле, — заметки легли в «портфель», "
+                  "задачи из них во входящие не попали: %s" % ", ".join(
+                      "%s — %d%s" % (k, n, (" (задач %d)" % t) if t else "")
+                      for k, (n, t) in sorted(foreign.items(), key=lambda kv: (-kv[1][0], kv[0]))))
             print("  Завести такой проект: добавить его в projects.json (или имя папки в aliases "
                   "существующего) и забрать заново: py tools/pm.py vault pull --all")
 
@@ -354,6 +358,7 @@ def cmd_push(args):
     E = load("estimates.json", {"projects": {}}).get("projects", {})
     T = load("tree.json", {})
     idx = mem.load_index()
+    by_id = {y["id"]: y for y in idx.get("records", [])}
     written = []
 
     def usage_for(k):
@@ -422,15 +427,34 @@ def cmd_push(args):
         if acts:
             body += ["", "## Что делать дальше", ""] + ["- " + a for a in acts]
         if recs:
-            body += ["", "## Память по проекту", ""]
-            for x in sorted(recs, key=lambda x: x["kind"]):
-                body.append("- `%s` %s — [[%s]]" % (x["kind"], x["title"], memory_note_name(x)))
+            # Корни — по одному на заметку или документ; разделы видны по ссылке.
+            # Записи из самого хранилища ведут на исходную заметку, а не на копию.
+            roots = sorted((x for x in recs if not x.get("parent")),
+                           key=lambda x: (-mem.KIND_WEIGHT.get(x["kind"], 1), x["title"]))
+            from_vault = sum(1 for x in recs if from_vault_source(x))
+            body += ["", "## Память по проекту", "",
+                     "Записей %d%s. Ниже — корни: запросы, документы и заметки, из которых "
+                     "выросло остальное." % (len(recs), (", из них из заметок хранилища %d — ссылки "
+                                                         "ведут на исходные заметки" % from_vault)
+                                             if from_vault else ""), ""]
+            for x in roots[:PAGE_ROOTS]:
+                body.append("- `%s` %s" % (x["kind"], note_link(x)))
+            if len(roots) > PAGE_ROOTS:
+                body.append("- … ещё %d — [[Дерево работ]]" % (len(roots) - PAGE_ROOTS))
         body += ["", "---", "", "Собрано %s · `py tools/pm.py vault push`" % mem.today()]
         write_note(os.path.join(exp, "Проекты", names[k] + ".md"), fm, "\n".join(body), written, dry)
 
-    # --- записи памяти
+    # --- записи памяти. Пришедшие из хранилища не выгружаются: их оригинал уже там,
+    # копия раздвоила бы заметки и граф. Выгружается то, чего в хранилище нет, —
+    # решения, запросы и документы, принятые из других мест.
     if c["export"].get("memory", True):
+        kids_of = {}
+        for y in idx.get("records", []):
+            if y.get("parent"):
+                kids_of.setdefault(y["parent"], []).append(y)
         for x in idx.get("records", []):
+            if from_vault_source(x):
+                continue
             rec = mem.get(x["id"])
             if not rec:
                 continue
@@ -442,12 +466,12 @@ def cmd_push(args):
             if rec["project"] in names:
                 links.append("Проект: [[%s]]" % names[rec["project"]])
             if rec.get("parent"):
-                par = next((y for y in idx["records"] if y["id"] == rec["parent"]), None)
+                par = by_id.get(rec["parent"])
                 if par:
-                    links.append("Выросло из: [[%s]]" % memory_note_name(par))
-            kids = [y for y in idx["records"] if y.get("parent") == rec["id"]]
+                    links.append("Выросло из: %s" % note_link(par))
+            kids = kids_of.get(rec["id"], [])
             if kids:
-                links.append("Ветви: " + ", ".join("[[%s]]" % memory_note_name(y) for y in kids))
+                links.append("Ветви: " + ", ".join(note_link(y) for y in kids))
             body = "\n".join(links + ["", rec.get("body") or "", "",
                                       "---", "", "Запись памяти TaskTreker · `%s`" % rec["id"]])
             write_note(os.path.join(exp, "Память", memory_note_name(x) + ".md"), fm, body, written, dry)
@@ -464,14 +488,23 @@ def cmd_push(args):
             if n["kind"] in ("проект",) and label in names.values():
                 label = "[[%s]]" % label
             elif n.get("memory"):
-                rec = next((y for y in idx["records"] if y["id"] == n["memory"]), None)
+                rec = by_id.get(n["memory"])
                 if rec:
-                    label = "[[%s]]" % memory_note_name(rec)
+                    label = note_link(rec)
             lines.append("%s- %s **%s**%s" % (
                 "    " * d, _icon(n["kind"]), label,
                 (" — %s" % n["detail"][:100]) if n.get("detail") else ""))
+            # ДРВ-07: у широкого узла — первые записи памяти, остальное одной строкой.
+            shown = 0
             for ch in n["children"]:
+                if ch.get("memory"):
+                    shown += 1
+                    if shown > tree_mod.WIDE:
+                        continue
                 walk(ch, d + 1)
+            if shown > tree_mod.WIDE:
+                lines.append("%s- … ещё %d записей — в дашборде или `py tools/pm.py recall <слова>`" % (
+                    "    " * (d + 1), shown - tree_mod.WIDE))
         for ch in T["root"]["children"]:
             walk(ch, 0)
         st = T.get("stats", {})
@@ -522,6 +555,26 @@ def _icon(kind):
 
 def memory_note_name(rec):
     return safe_name("%s — %s" % (rec.get("kind", "заметка"), rec.get("title", rec.get("id"))))
+
+
+PAGE_ROOTS = 60          # сколько корней памяти перечислять на странице проекта
+
+
+def from_vault_source(rec):
+    return str(rec.get("source") or "").startswith("obsidian:")
+
+
+def note_link(rec):
+    """Викиссылка на запись: на исходную заметку хранилища с разделом, если запись
+    пришла оттуда, иначе на выгруженную заметку памяти."""
+    src = str(rec.get("source") or "")
+    if src.startswith("obsidian:"):
+        path, _, section = src[len("obsidian:"):].partition("#")
+        path = re.sub(r"\.(md|markdown)$", "", path, flags=re.I)
+        alias = re.sub(r"[\[\]|#^]", " ", rec.get("title") or "").strip()
+        section = re.sub(r"[\[\]|#^]", " ", section).strip()
+        return "[[%s%s|%s]]" % (path, ("#" + section) if section else "", alias or path)
+    return "[[%s]]" % memory_note_name(rec)
 
 
 # ------------------------------------------------------------------ прочее

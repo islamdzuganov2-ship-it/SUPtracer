@@ -11,7 +11,11 @@
    и вписать в него дерево нельзя.
 
    Управление (ДРВ-08): сворачивание кликом, поиск с раскрытием пути, масштаб колесом,
-   перетаскивание, фильтр проекта, скрытие планов, двойной клик — к карточке проекта. */
+   перетаскивание, фильтр проекта, скрытие планов, двойной клик — к карточке проекта.
+
+   Широкие узлы (ДРВ-07): у узла больше WIDE записей памяти — видны первые WIDE и узел
+   «ещё N», клик по нему показывает остальные. Фундамент, задачи и почки не прячутся:
+   хранилище на сотни заметок иначе заслонило бы бэклог проекта. */
 
 const TREEVIEW = (function () {
   const KCOL = {
@@ -67,7 +71,7 @@ const TREEVIEW = (function () {
     const svg = document.getElementById('tSvg'), cam = document.getElementById('tCam'),
       stage = document.getElementById('tStage'), tip = document.getElementById('tTip'),
       stat = document.getElementById('tStat');
-    const collapsed = new Set(), ROW = 25;
+    const collapsed = new Set(), opened = new Set(), ROW = 25, WIDE = 25;
     let cutoff = '9999-12', showFuture = true, onlyProj = '', find = '';
     let view = {x: 40, y: 20, k: 1}, playTimer = null;
     const maxW = Math.max(1, root.subtree_weight || 1);
@@ -90,17 +94,34 @@ const TREEVIEW = (function () {
     function shortLabel(n) { const s = String(n.label || ''); return s.length > 46 ? s.slice(0, 46) + '…' : s; }
     function labelW(n) { return radius(n) + 9 + shortLabel(n).length * 6.35 + (n._hidden > 0 ? 26 : 0); }
 
+    // Узел «ещё N» вместо лишних записей памяти широкого узла.
+    function capWide(n, kids) {
+      if (opened.has(n.id)) return kids;
+      let m = 0;
+      const shown = [], rest = [];
+      kids.forEach(k => { if (k.memory && m++ >= WIDE) rest.push(k); else shown.push(k); });
+      if (!rest.length) return kids;
+      shown.push({
+        id: n.id + ':more', kind: 'ещё', label: `ещё ${rest.length} — показать`, _more: n, children: [],
+        subtree_weight: rest.reduce((s, k) => s + (k.subtree_weight || 0), 0),
+        count: rest.reduce((s, k) => s + (k.count || 1), 0),
+        detail: 'Узел широкий: видны первые ' + WIDE + ' записей. Клик — показать все.',
+      });
+      return shown;
+    }
+
     function visibleTree() {
       const nodes = [], links = [];
       let y = 0;
       (function walk(n, depth, parent) {
         if (onlyProj && depth === 1 && n.id !== onlyProj) return null;
         n._d = depth; n._p = parent;
-        const kids = collapsed.has(n.id) ? [] : kidsOf(n);
+        const kids = collapsed.has(n.id) ? [] : capWide(n, kidsOf(n));
         const laid = kids.map(k => walk(k, depth + 1, n)).filter(Boolean);
         if (laid.length) n._y = (laid[0]._y + laid[laid.length - 1]._y) / 2;
         else { n._y = y; y += ROW; }
-        n._hidden = (n.children || []).length - laid.length;
+        const more = laid.find(k => k._more);
+        n._hidden = more ? 0 : (n.children || []).length - laid.length;
         nodes.push(n);
         laid.forEach(k => links.push([n, k]));
         return n;
@@ -148,6 +169,7 @@ const TREEVIEW = (function () {
         g.appendChild(t);
         g.addEventListener('click', e => {
           e.stopPropagation();
+          if (n._more) { opened.add(n._more.id); draw(true); return; }
           if ((n.children || []).length) {
             collapsed.has(n.id) ? collapsed.delete(n.id) : collapsed.add(n.id);
             draw(true);
@@ -162,7 +184,8 @@ const TREEVIEW = (function () {
       if (animate) requestAnimationFrame(() =>
         cam.querySelectorAll('.tt-fade').forEach(e => e.classList.remove('tt-fade')));
       const w = nodes.filter(n => n._d === 1).reduce((s, n) => s + (n.subtree_weight || 0), 0);
-      stat.innerHTML = `узлов ${nodes.length} из ${(TREE.stats || {}).nodes || nodes.length} · ${tok(w)} токенов`
+      const real = nodes.filter(n => !n._more).length;
+      stat.innerHTML = `узлов ${real} из ${(TREE.stats || {}).nodes || real} · ${tok(w)} токенов`
         + (cutoff < '9999' ? ` · на ${esc(cutoff)}` : '');
       apply();
     }
@@ -180,7 +203,8 @@ const TREEVIEW = (function () {
         + (n.detail ? `<div style="margin-top:5px">${esc(String(n.detail).slice(0, 260))}</div>` : '')
         + (m.length ? `<div style="margin-top:6px;color:var(--ink3)">${m.join(' · ')}</div>` : '')
         + ((n.children || []).length
-          ? `<div style="margin-top:6px;color:var(--ink3)">клик — ${collapsed.has(n.id) ? 'раскрыть' : 'свернуть'} ветвь</div>` : '');
+          ? `<div style="margin-top:6px;color:var(--ink3)">клик — ${collapsed.has(n.id) ? 'раскрыть' : 'свернуть'} ветвь</div>` : '')
+        + (n._more ? '<div style="margin-top:6px;color:var(--ink3)">клик — показать все</div>' : '');
       tip.style.opacity = 1;
       const x = Math.min(e.clientX - r.left + 14, r.width - tip.offsetWidth - 8);
       const y = Math.min(e.clientY - r.top + 12, r.height - tip.offsetHeight - 8);
@@ -234,6 +258,7 @@ const TREEVIEW = (function () {
     document.getElementById('tFut').onchange = e => { showFuture = e.target.checked; draw(true); };
     document.getElementById('tFit').onclick = () => fit();
     document.getElementById('tColl').onclick = () => {
+      opened.clear();
       (function c(n, d) {
         if (d >= 1 && (n.children || []).length) collapsed.add(n.id);
         (n.children || []).forEach(x => c(x, d + 1));
@@ -271,7 +296,8 @@ const TREEVIEW = (function () {
     function expandTo(q) {
       (function walk(n, chain) {
         const c = chain.concat([n]);
-        if (String(n.label || '').toLowerCase().includes(q)) c.forEach(x => collapsed.delete(x.id));
+        // Найденный узел не должен остаться за «ещё N» — путь к нему раскрывается целиком.
+        if (String(n.label || '').toLowerCase().includes(q)) c.forEach(x => { collapsed.delete(x.id); opened.add(x.id); });
         (n.children || []).forEach(k => walk(k, c));
       })(root, []);
     }

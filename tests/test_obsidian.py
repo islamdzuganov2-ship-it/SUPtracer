@@ -56,19 +56,29 @@ class Vault(DataCase):
 
     def test_push_writes_linked_pages(self):                            # ОБС-03
         self.pull()
-        self.t.memory.build_index()
-        out = self.push()
+        # Документ не из хранилища: его запись выгружается заметкой памяти.
+        doc = self.note("решение.md", "---\nproject: alpha-api\n---\n# Кеш в Redis\n\n"
+                                      "Решили держать кеш ответов в Redis, а не в памяти процесса.\n\n"
+                                      "## Сроки\n\nКеш должен жить не дольше пяти минут, иначе роли "
+                                      "партнёров устаревают.\n")
+        self.quiet(self.t.ingest.run, [doc], quiet=True)
+        self.quiet(self.t.tree.build)
+        self.push()
         page = self.read("TaskTreker/Проекты/Сервис Альфа.md")
         self.assertIn("tasktreker: generated", page)
         self.assertIn("[[Портфель TaskTreker]]", page)
         self.assertIn("- [ ] **AL-01**", page)
         self.assertIn("- [x] **AL-02**", page)
-        mem_dir = os.path.join(self.vault, "TaskTreker", "Память")
-        notes = os.listdir(mem_dir)
-        self.assertTrue(any(n.startswith("запрос — Вынести кеш") for n in notes), notes)
-        linked = self.read("TaskTreker/Память/требование — Требования.md")
+        # Запись из хранилища ведёт на исходную заметку, а не на свою копию.
+        self.assertIn("[[Проекты/api-kesh|Вынести кеш эндпоинтов из приложения]]", page)
+        self.assertIn("[[решение — Кеш в Redis]]", page)
+        notes = os.listdir(os.path.join(self.vault, "TaskTreker", "Память"))
+        self.assertFalse(any(n.startswith("запрос — Вынести кеш") for n in notes), notes)
+        linked = self.read("TaskTreker/Память/требование — Сроки.md")
         self.assertIn("[[Сервис Альфа]]", linked)
-        self.assertIn("Выросло из: [[запрос — Вынести кеш эндпоинтов из приложения]]", linked)
+        self.assertIn("Выросло из: [[решение — Кеш в Redis]]", linked)
+        tree = self.read("TaskTreker/Дерево работ.md")
+        self.assertIn("[[Проекты/api-kesh#Требования|Требования]]", tree)   # раздел исходной заметки
 
     def test_push_is_idempotent(self):                                  # ОБС-06
         self.push()

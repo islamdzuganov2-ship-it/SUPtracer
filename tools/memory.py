@@ -192,6 +192,8 @@ def build_index(records=None):
             "keywords": md.keywords(r["title"] + " " + r["body"], 14),
             "file": "memory/" + os.path.basename(r.get("path") or record_path(r["id"])),
         })
+        if r.get("foreign_project"):          # ПРМ-08: заметка проекта, которого нет в портфеле
+            items[-1]["foreign_project"] = r["foreign_project"]
         by_project[r["project"]] = by_project.get(r["project"], 0) + 1
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
     items.sort(key=lambda x: (x["project"], -KIND_WEIGHT.get(x["kind"], 1), x["updated"]), reverse=False)

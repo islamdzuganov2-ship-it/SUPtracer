@@ -148,14 +148,17 @@ def build(write=True):
         total_weight += spent
         trunk["children"].append(pn)
 
-    # --- записи памяти вне известных проектов
+    # --- записи памяти вне известных проектов. Заметки проектов, которых портфель
+    # не ведёт (ПРМ-08), — отдельными ветвями: видно, сколько знания лежит у каждого.
     orphan_projects = {}
     for r in records:
         if r["project"] not in projects:
-            orphan_projects.setdefault(r["project"], []).append(r)
-    for proj, recs in sorted(orphan_projects.items()):
-        pn = node("p:" + proj, proj, "проект", project=proj,
-                  detail="Записи без проекта в projects.json")
+            orphan_projects.setdefault(r.get("foreign_project") or r["project"], []).append(r)
+    for proj, recs in sorted(orphan_projects.items(), key=lambda kv: (kv[0] == "портфель", kv[0])):
+        foreign = any(x.get("foreign_project") for x in recs)
+        pn = node("p:" + proj, proj + (" — вне портфеля" if foreign else ""), "проект", project=proj,
+                  detail=("Папка проекта в хранилище; в projects.json такого проекта нет" if foreign
+                          else "Записи без проекта в projects.json"))
         for r in sorted([x for x in recs if not x.get("parent")], key=lambda r: r.get("created", "")):
             pn["children"].append(_memory_node(r, kids, by_id, proj))
         if pn["children"]:
@@ -263,6 +266,8 @@ def _walk(n):
         yield from _walk(c)
 
 
+WIDE = 25        # ДРВ-07: сколько записей памяти показывать у широкого узла
+
 MARK = {"проект": "▣", "запрос": "◆", "решение": "✓", "требование": "≡", "риск": "!",
         "итог": "■", "факт": "#", "источник": "↗", "заметка": "·", "фундамент": "▤",
         "сделано": "▪", "бэклог": "▷", "задача": "○", "почки": "◌", "предложение": "◌"}
@@ -295,8 +300,18 @@ def render_text(project=None, depth=4, max_lines=150):
             if n["children"]:
                 lines.append("%s  … ещё %d узлов" % ("  " * d, n["count"] - 1))
             return
+        # ДРВ-07: у широкого узла — первые WIDE записей памяти; фундамент, задачи
+        # и почки видны всегда, иначе сотни заметок заслонили бы бэклог.
+        seen, rest = 0, 0
         for c in n["children"]:
+            if c.get("memory"):
+                seen += 1
+                if seen > WIDE:
+                    rest += 1
+                    continue
             walk(c, d + 1)
+        if rest and len(lines) < max_lines:
+            lines.append("%s  … ещё %d записей — найти: tt_recall <слова>" % ("  " * d, rest))
 
     walk(root, 0)
     if len(lines) >= max_lines:

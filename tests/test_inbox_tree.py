@@ -109,6 +109,47 @@ class Tree(DataCase):
         out = self.build()
         self.assertTrue(self.find(out["root"], lambda n: n["id"] == "p:портфель"))
 
+    def test_foreign_project_is_its_own_branch(self):                   # ПРМ-08
+        self.projects()
+        m = self.t.memory
+        rec = m.new_record("Устав проекта", "текст", project="портфель", kind="запрос")
+        rec["foreign_project"] = "Облачный склад"
+        m.save(rec)
+        m.save(m.new_record("Личное", "текст", project="портфель", kind="заметка"))
+        idx = m.build_index()
+        self.assertEqual([r.get("foreign_project") for r in idx["records"] if r["title"] == "Устав проекта"],
+                         ["Облачный склад"])
+        out = self.build()
+        branch = self.find(out["root"], lambda n: n["id"] == "p:Облачный склад")
+        self.assertEqual(branch["label"], "Облачный склад — вне портфеля")
+        self.assertEqual([c["label"] for c in branch["children"]], ["Устав проекта"])
+        rest = self.find(out["root"], lambda n: n["id"] == "p:портфель")
+        self.assertEqual([c["label"] for c in rest["children"]], ["Личное"])
+
+    def test_wide_node_is_capped_in_text(self):                         # ДРВ-07
+        self.projects()
+        m = self.t.memory
+        for i in range(40):
+            m.save(m.new_record("Запись %02d" % i, "текст", project="beta-tool", kind="заметка",
+                                created="2026-09-%02d" % (i % 28 + 1)))
+        m.build_index()
+        text = self.t.tree.render_text("beta-tool", depth=2, max_lines=500)
+        self.assertEqual(text.count("Запись "), self.t.tree.WIDE)
+        self.assertIn("… ещё 15 записей", text)
+        self.assertIn("Фундамент", text)                                  # служебные ветви не прячутся
+
+
+class ForeignTasks(DataCase):
+    def test_foreign_note_tasks_stay_out_of_inbox(self):                # ПРМ-08
+        self.projects()
+        p = self.note("Проекты/Облачный склад/план.md",
+                      "# План\n\nЧто делаем.\n\n## Задачи\n- [ ] Подключить оплату картой\n"
+                      "- [ ] Добавить остатки по ячейкам\n")
+        reps, _ = self.quiet(self.t.ingest.run, [p], quiet=True, rel_hint="Проекты/Облачный склад/план.md")
+        self.assertEqual((reps[0]["foreign_project"], reps[0]["foreign_tasks"]), ("Облачный склад", 2))
+        self.assertEqual(reps[0]["proposals"], [])
+        self.assertEqual(self.jread("inbox.json")["items"], [])
+
 
 class Estimate(DataCase):
     def test_closed_tasks_do_not_count_in_remaining(self):             # КАЧ-05

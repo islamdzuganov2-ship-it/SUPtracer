@@ -702,6 +702,13 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
                     proposals.append(_proposal(b.group(1).strip(), target,
                                                holder, src, s.get("title"), "пункт плана"))
 
+    # Задачи проекта, которого нет в портфеле, принять некуда: во входящих они только
+    # заслонили бы свои. Знание о них остаётся в записях памяти, а когда проект заведут,
+    # повторный приём (vault pull --all) предложит их уже в его бэклог.
+    foreign_tasks = len(proposals) if foreign else 0
+    if foreign:
+        proposals = [p for p in proposals if p["project"] in projects]
+
     fresh = []
     for p in proposals:
         k = (p["project"], norm_title(p["title"]))
@@ -729,7 +736,8 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
             box.setdefault("items", []).append(p)
 
     return {"file": rel(path), "project": proj, "confidence": conf, "why": why,
-            "foreign_project": foreign, "kept_manual": kept_manual, "retired": retired,
+            "foreign_project": foreign, "foreign_tasks": foreign_tasks,
+            "kept_manual": kept_manual, "retired": retired,
             "kind": kind, "kind_why": kwhy, "records": records, "proposals": fresh,
             "redacted": secrets}
 

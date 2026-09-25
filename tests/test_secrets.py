@@ -50,10 +50,19 @@ class Redact(unittest.TestCase):
         self.assertNotIn("x9-y8-z7", out)
         self.assertIn("пароль: [скрыто]", out)
 
+    def test_password_list_in_backticks(self):                         # БЕЗ-05
+        out, found = self.clean("логины `admin` / `manager`, пароли `Admin123!` / `Manager123!` — демо")
+        self.assertNotIn("Admin123!", out)
+        self.assertNotIn("Manager123!", out)
+        self.assertIn("логины `admin` / `manager`", out)                 # логины остаются
+        self.assertEqual(found, ["пароль", "пароль"])
+
     def test_prose_is_left_alone(self):
         for text in ("Ключ: значение — это пара в словаре.", "токен: единица текста",
                      "секрет: успеха в регулярности", "sk-learn — библиотека",
-                     "Пароль должен быть длиннее 12 символов."):
+                     "Пароль должен быть длиннее 12 символов.",
+                     "проверяет её и пароль в `DATABASE_URL`",
+                     "пароли `POSTGRES_PASSWORD` и `JWT_SECRET_KEY` перегенерированы"):
             with self.subTest(text=text):
                 out, found = self.clean(text)
                 self.assertEqual((out, found), (text, []))

@@ -222,12 +222,27 @@ _KV = re.compile(
     r"client[_\- ]?secret|ключ(?: api| доступа)?)(\s*[:=]\s*)([\"'`]?)([^\s\"'`]{4,})\3")
 
 
+# «пароли `Admin123!` / `Manager123!`»: слово «пароль» и за ним значения в обратных
+# кавычках. Так пишут в заметках и в авто-памяти ассистента, и «имя: значение» этого
+# не ловит. Имена переменных (`DATABASE_URL`) и слова без цифр и знаков не трогаем.
+_PW_LIST = re.compile(r"(?i)\b(парол[ьяеиюм]\w*|passwords?|passwd|pwd)\b([^`\n]{0,20}?)"
+                      r"((?:`[^`\n]{1,64}`[ \t/,;и]*)+)")
+
+
 def _looks_secret(name, value):
     if value.startswith("[скрыто"):
         return False
     if re.match(r"(?i)pass|pwd|пароль", name):
         return True
     return bool(re.search(r"[\d_\-+/=]", value)) or len(value) >= 20
+
+
+def _looks_password(token):
+    if not (4 <= len(token) <= 64) or re.search(r"\s", token) or token.startswith("[скрыто"):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", token):          # имя переменной окружения
+        return False
+    return bool(re.search(r"[A-Za-zА-Яа-яЁё]", token) and re.search(r"[\d!@#$%^&*?+=~]", token))
 
 
 def redact_secrets(text):
@@ -252,6 +267,15 @@ def redact_secrets(text):
         found.append("значение «%s»" % m.group(1).lower())
         return m.group(1) + m.group(2) + "[скрыто]"
     s = _KV.sub(kv_sub, s)
+
+    def list_sub(m):
+        def tok(t):
+            if not _looks_password(t.group(1)):
+                return t.group(0)
+            found.append("пароль")
+            return "`[скрыто]`"
+        return m.group(1) + m.group(2) + re.sub(r"`([^`\n]+)`", tok, m.group(3))
+    s = _PW_LIST.sub(list_sub, s)
     return s, found
 
 

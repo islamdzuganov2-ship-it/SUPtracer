@@ -24,7 +24,7 @@ if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
 # Порядок важен: сначала то, от чего зависят остальные.
-MODULES = ["mdparse", "memory", "ingest", "inbox", "tree", "context", "obsidian", "estimate"]
+MODULES = ["mdparse", "memory", "ingest", "automem", "inbox", "tree", "context", "obsidian", "estimate"]
 
 _READY = {"basis": "тестовые данные"}
 

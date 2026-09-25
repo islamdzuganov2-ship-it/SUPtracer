@@ -16,6 +16,7 @@
   py tools/pm.py recall <id|слова>    достать запись памяти целиком
   py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]
   py tools/pm.py forget <id> --why "почему устарела"
+  py tools/pm.py claude-memory [--dry-run]  авто-память Claude Code -> память портфеля
 
 Входящие
   py tools/pm.py ingest <файл|каталог>  разобрать Markdown и разложить по проектам
@@ -82,6 +83,8 @@ def cmd_refresh(args):
         print("\n→ заметки из Obsidian")
         run("obsidian.py", "pull")
 
+    print("\n→ авто-память ассистента")
+    run("automem.py")
     print("\n→ индекс памяти")
     run("memory.py", "index")
     print("\n→ оценка оставшихся задач")
@@ -318,6 +321,11 @@ def cmd_forget(args):
     return run("memory.py", "forget", *args)
 
 
+def cmd_claude_memory(args):
+    """ИНТ-07: авто-память Claude Code (~/.claude/projects/*/memory) -> память портфеля."""
+    return run("automem.py", *args)
+
+
 # ---------------------------------------------------------------- входящие
 
 def cmd_ingest(args):
@@ -365,7 +373,7 @@ def cmd_disconnect(args):
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
             "open": cmd_open, "context": cmd_context, "recall": cmd_recall,
-            "remember": cmd_remember, "forget": cmd_forget, "ingest": cmd_ingest,
+            "remember": cmd_remember, "forget": cmd_forget, "claude-memory": cmd_claude_memory, "ingest": cmd_ingest,
             "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
             "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
             "connect": cmd_connect, "disconnect": cmd_disconnect}

@@ -32,7 +32,7 @@ import mdparse as md
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
-MEM = os.path.join(DATA, "memory")
+MEM = os.path.join(DATA, "memory")   # в .gitignore: записи личные и в репозиторий не идут (БЕЗ-03)
 INDEX = os.path.join(MEM, "index.json")
 
 KINDS = ("запрос", "решение", "факт", "требование", "риск", "итог", "источник", "заметка")

@@ -181,7 +181,7 @@ def t_no_secrets():
     files = [os.path.join(DATA, fn) for fn in sorted(os.listdir(DATA)) if fn.endswith(".json")]
     mem = os.path.join(DATA, "memory")
     if os.path.isdir(mem):
-        # Память набивается из чужих заметок, поэтому её проверяем наравне с данными.
+        # БЕЗ-04: память набивается из чужих заметок, поэтому её проверяем наравне с данными.
         files += [os.path.join(mem, fn) for fn in sorted(os.listdir(mem)) if fn.endswith((".md", ".json"))]
     for path in files:
         try:

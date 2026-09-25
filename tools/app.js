@@ -496,8 +496,8 @@ document.getElementById('foot').innerHTML =
 })();
 
 /* ======================= обновление данных =======================
-   Под сервером (py tools/pm.py serve) кнопка действительно запускает сбор.
-   Открытый файлом дашборд запускать ничего не может — тогда показываем команду. */
+   Под сервером (py tools/pm.py serve) кнопка действительно запускает сбор (ОБН-01).
+   Открытый файлом дашборд запускать ничего не может — тогда показываем команду (ОБН-03). */
 (function refreshBtn() {
   const btn = document.getElementById('refresh'), mode = document.getElementById('rmode'),
     wrap = document.getElementById('rlogWrap');

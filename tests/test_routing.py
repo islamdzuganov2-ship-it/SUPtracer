@@ -76,7 +76,8 @@ class Numbering(DataCase):
     def test_empty_backlog_continues_closed_series(self):               # ПРМ-07
         def m(d):
             d["projects"]["beta-tool"]["readiness"]["basis"] = (
-                "Закрыты TT-01, TT-02 и TT-03. Требования БЕЗ-01, БЕЗ-02 и БЕЗ-05 выполнены, ОБС-08 нет.")
+                # Коды вымышленной серии: настоящие коды ТЗ здесь исказили бы трассируемость.
+                "Закрыты TT-01, TT-02 и TT-03. Требования ЗАЩ-01, ЗАЩ-02 и ЗАЩ-05 выполнены, ХРН-08 нет.")
         self.assertEqual(self.nid("beta-tool", m), "TT-04")
 
     def test_explicit_prefix(self):

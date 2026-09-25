@@ -65,6 +65,135 @@ class PathRouting(DataCase):
         self.assertIn("-> alpha-api (95%)", out)
 
 
+class ForeignAndMentions(DataCase):
+    """Калибровка на реальном хранилище: заметки проектов, которых нет в портфеле,
+    упоминания нескольких проектов, разделы, случайные совпадения со словарём."""
+
+    # Текст в словах проекта Альфа — без папки и имени он ушёл бы в Альфу.
+    ALPHA_WORDS = "# Обзор\n\nAPI партнёров: роли, кеш ответов, эндпоинты чтения.\n"
+
+    def setUp(self):
+        super().setUp()
+        self.P = self.projects()["projects"]
+
+    def ingest(self, rel, text, **kw):
+        path = self.note(rel, text)
+        reps, _ = self.quiet(self.t.ingest.run, [path], quiet=True, rel_hint=rel, **kw)
+        return reps[0]
+
+    def route(self, text, links=()):
+        vocab, weight = self.t.ingest.build_vocab(self.P)
+        return self.t.ingest.route(text, {}, [], list(links), self.P, vocab, weight)
+
+    def test_foreign_project_folder(self):                              # ПРМ-08
+        rep = self.ingest("Проекты/Облачный склад/обзор.md",
+                          self.ALPHA_WORDS + "\n## Состав\n\nКеш ответов и роли партнёров, "
+                                             "как у всех, плюс свой склад и доставка.\n")
+        self.assertEqual((rep["project"], rep["confidence"]), ("портфель", 0.9))
+        self.assertEqual(rep["foreign_project"], "Облачный склад")
+        self.assertTrue(all(r["project"] == "портфель" for r in rep["records"]))
+        self.assertTrue(all(r.get("foreign_project") == "Облачный склад" for r in rep["records"]))
+
+    def test_foreign_folder_beats_named_project(self):
+        rep = self.ingest("Проекты/Облачный склад/x.md", "# Интеграция\n\nОтдаём остатки в Сервис Альфа.\n")
+        self.assertEqual(rep["project"], "портфель")
+
+    def test_configured_project_folder(self):
+        self.jwrite("obsidian.json", {"import": {"project_folders": ["Проекты/*", "Лаборатория"]}})
+        rep = self.ingest("Лаборатория/опыт.md", self.ALPHA_WORDS)
+        self.assertEqual((rep["project"], rep["foreign_project"]), ("портфель", "Лаборатория"))
+        # Без настройки «Лаборатория» — обычная папка, и текст решает сам.
+        self.jwrite("obsidian.json", {"import": {}})
+        self.assertEqual(self.ingest("Лаборатория/опыт.md", self.ALPHA_WORDS)["project"], "alpha-api")
+
+    def test_project_folder_patterns(self):
+        pf = self.t.ingest.project_folder
+        self.assertEqual(pf(["Проекты", "Склад", "x.md"]), "Склад")
+        self.assertEqual(pf(["проекты", "Склад", "Итоги", "x.md"]), "Склад")      # регистр и глубина
+        self.assertIsNone(pf(["Проекты", "x.md"]))                                 # сам файл — не папка
+        self.assertIsNone(pf(["Работа", "LLM", "x.md"], ["LLM"]))                 # папка не в корне
+        self.assertEqual(pf(["LLM", "sub", "x.md"], ["LLM"]), "LLM")
+
+    def test_one_named_project(self):
+        self.assertEqual(self.route("Обсудили, что Утилита Бета теряет строки.")[:2], ("beta-tool", 0.8))
+
+    def test_several_named_projects_is_portfolio(self):
+        key, conf, why = self.route("Веду Сервис Альфа и Утилита Бета, остальное потом.")
+        self.assertEqual((key, conf), ("портфель", 0.6))
+        self.assertIn("несколько проектов", why)
+
+    def test_dominant_named_project(self):
+        text = ("Сервис Альфа отдаёт данные. Сервис Альфа проверяет роли. "
+                "Сервис Альфа кеширует ответы. Отчёты как в Утилита Бета.")
+        self.assertEqual(self.route(text)[0], "alpha-api")
+
+    def test_links_to_several_projects_is_portfolio(self):
+        self.assertEqual(self.route("Связь между проектами", links=["Сервис Альфа", "Утилита Бета"])[0],
+                         "портфель")
+
+    def test_named_is_whole_word(self):
+        self.assertEqual(self.t.ingest.named_projects("Гаммалучи и гамма-распад", self.P), {})
+        self.assertEqual(self.t.ingest.named_projects("проект Гамма, снова Гамма.", self.P),
+                         {"gamma-voice": 2})
+
+    def test_section_keeps_file_project_despite_mention(self):          # ПРМ-13
+        rep = self.ingest("Проекты/Сервис Альфа/план.md",
+                          "# План\n\nЧто делаем дальше.\n\n## Сравнение\n\n"
+                          "Утилита Бета собирает отчёты похожим способом, берём у неё идею выгрузки.\n")
+        self.assertEqual({r["project"] for r in rep["records"]}, {"alpha-api"})
+
+    def test_section_tag_overrides(self):
+        rep = self.ingest("Проекты/Сервис Альфа/план.md",
+                          "# План\n\nЧто делаем дальше.\n\n## Отчёты\n\n"
+                          "#beta-tool Выгрузку отчётов переносим в утилиту, в сервисе её не будет.\n")
+        sec = [r for r in rep["records"] if r["title"] == "Отчёты"][0]
+        self.assertEqual(sec["project"], "beta-tool")
+
+    def test_weekly_review_sections_follow_their_projects(self):        # ПРМ-13
+        rep = self.ingest("Разное/неделя.md",
+                          "# Итоги недели\n\nЧто сдвинулось по разным проектам.\n\n"
+                          "## Сервис Альфа\n\nСервис Альфа: закрыли кеш ответов, осталось проверить роли.\n\n"
+                          "- [ ] Проверить роли на эндпоинтах записи\n\n"
+                          "## Утилита Бета\n\nУтилита Бета научилась читать большие файлы CSV без падений "
+                          "и лишней памяти.\n")
+        self.assertEqual(rep["project"], "портфель")
+        by_title = {r["title"]: r["project"] for r in rep["records"]}
+        self.assertEqual(by_title["Сервис Альфа"], "alpha-api")
+        self.assertEqual(by_title["Утилита Бета"], "beta-tool")
+        self.assertEqual([p["project"] for p in rep["proposals"]], ["alpha-api"])   # задача — в проект раздела
+
+    def test_chance_matches_do_not_route(self):                         # ПРМ-03
+        # Три слова из словаря Альфы в короткой заметке — признак, в длинной — случайность.
+        short = "Кеш ответов и роли партнёров."
+        self.assertEqual(self.route(short)[0], "alpha-api")
+        filler = " ".join("пункт%d" % i for i in range(400))
+        key, _, why = self.route(filler + " " + short)
+        self.assertEqual(key, "портфель")
+        self.assertIn("случайность", why)
+
+    def test_vocab_weights_by_full_description(self):
+        # Слово из длинного описания двух проектов весит вдвое меньше уникального.
+        def m(d):
+            d["projects"]["beta-tool"]["goal_long"] = "Партнёры получают отчёты без ручной сборки."
+        P = self.projects(m)["projects"]
+        _, weight = self.t.ingest.build_vocab(P)
+        self.assertEqual(weight["партнёр"], 0.5)
+        self.assertEqual(weight["кеш"], 1.0)
+
+    def test_vault_pull_reports_foreign_projects(self):
+        vault = os.path.join(self.tmp, "vault")
+        os.makedirs(os.path.join(vault, ".obsidian"))
+        for rel in ("Проекты/Облачный склад/a.md", "Проекты/Облачный склад/b.md", "Проекты/Сервис Альфа/c.md"):
+            p = os.path.join(vault, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(self.ALPHA_WORDS)
+        self.quiet(self.t.obsidian.cmd_init, [vault])
+        _, out = self.quiet(self.t.obsidian.cmd_pull, [])
+        self.assertIn("Облачный склад — 2", out)
+        self.assertIn("-> alpha-api (95%)", out)
+
+
 class Numbering(DataCase):
     def nid(self, key, mutate=None, trusted=()):
         P = self.projects(mutate)["projects"]

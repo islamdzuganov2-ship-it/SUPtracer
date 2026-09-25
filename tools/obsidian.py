@@ -50,6 +50,10 @@ DEFAULT_CONF = {
         "folders": [],
         "tags": [],
         "ignore": [".obsidian", ".trash", "templates", "шаблоны", "archive", "архив"],
+        # ПРМ-08: где лежат папки проектов. «Проекты/*» — каждая подпапка — проект;
+        # имя без звёздочки — эта папка сама проект. Папка проекта, которого нет
+        # в портфеле, уходит в «портфель», а не угадывается по словам.
+        "project_folders": ["Проекты/*", "Projects/*"],
     },
     "export": {"enabled": True, "folder": "TaskTreker", "memory": True, "tree": True},
     "status_sync": True,
@@ -186,7 +190,7 @@ def cmd_pull(args):
         # Один пакетный приём: индекс памяти перестраивается один раз, а не на каждую заметку.
         reports = ingest.run_items(
             [(os.path.join(root, rel), rel, "obsidian:" + rel) for rel in order],
-            dry=dry, quiet=True)
+            dry=dry, quiet=True, project_folders=c["import"].get("project_folders"))
         for rel, r in zip(order, reports):
             if r.get("error"):
                 print("  ! %s — %s" % (rel, r["error"]))
@@ -213,6 +217,15 @@ def cmd_pull(args):
         if leaky:
             print("  Ключи и пароли в заметках (%d) — в память не попали, из заметок их стоит убрать: %s" % (
                 len(leaky), ", ".join(leaky[:8])))
+        foreign = {}
+        for r in reports:
+            if r.get("foreign_project"):
+                foreign[r["foreign_project"]] = foreign.get(r["foreign_project"], 0) + 1
+        if foreign:
+            print("  Папки проектов, которых нет в портфеле, — заметки легли в «портфель»: %s" % ", ".join(
+                "%s — %d" % kv for kv in sorted(foreign.items(), key=lambda kv: (-kv[1], kv[0]))))
+            print("  Завести такой проект: добавить его в projects.json (или имя папки в aliases "
+                  "существующего) и забрать заново: py tools/pm.py vault pull --all")
 
     # ПРМ-11: заметка удалена или переименована — её записи устаревают, файлы остаются.
     if gone and not dry:
@@ -528,7 +541,8 @@ def cmd_init(args):
         print("Предупреждение: в каталоге нет .obsidian — это точно хранилище?")
     jsave(CONF, c)
     print("Хранилище записано в data/obsidian.json: %s" % path)
-    print("Что читать и что выкладывать, настраивается там же (import.folders, import.tags, export.folder).")
+    print("Что читать и что выкладывать, настраивается там же (import.folders, import.tags, "
+          "import.project_folders, export.folder).")
     print("Дальше: py tools/pm.py vault pull · py tools/pm.py vault push")
     return 0
 

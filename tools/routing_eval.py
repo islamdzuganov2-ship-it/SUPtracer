@@ -26,13 +26,14 @@ MIN_KIND = 70.0        # ПРМ-09: точность вида записи
 
 
 def load_cases(folder):
-    """Размеченные заметки каталога: [(путь, путь в каталоге, проект, вид)]."""
+    """Размеченные заметки каталога: [(путь, путь в каталоге, проект, вид, смешанная)]."""
     out = []
     for path, rel in ingest.iter_files([folder]):
         with open(path, encoding="utf-8") as f:
             fm, _ = md.parse_frontmatter(f.read())
         if fm.get("expect_project"):
-            out.append((path, rel, str(fm["expect_project"]), str(fm.get("expect_kind") or "")))
+            out.append((path, rel, str(fm["expect_project"]), str(fm.get("expect_kind") or ""),
+                        str(fm.get("expect_mixed") or "").lower() in ("true", "yes", "да", "1")))
     return out
 
 
@@ -41,10 +42,13 @@ def evaluate(folder, projects=None):
     if projects is None and os.path.exists(os.path.join(folder, "_projects.json")):
         with open(os.path.join(folder, "_projects.json"), encoding="utf-8") as f:
             projects = json.load(f).get("projects", {})
-    reports = ingest.run_items([(p, rel, None) for p, rel, _, _ in cases],
-                               dry=True, quiet=True, projects=projects)
+    # Папки проектов — общепринятые, а не из настройки хранилища: набор размечен под них,
+    # и результат не должен зависеть от того, чьё хранилище подключено.
+    reports = ingest.run_items([(p, rel, None) for p, rel, _, _, _ in cases],
+                               dry=True, quiet=True, projects=projects,
+                               project_folders=ingest.DEFAULT_PROJECT_FOLDERS)
     rows, p_ok, k_ok, k_total = [], 0, 0, 0
-    for (path, rel, want_p, want_k), r in zip(cases, reports):
+    for (path, rel, want_p, want_k, mixed), r in zip(cases, reports):
         got_p, got_k = r.get("project"), r.get("kind")
         hit_p = got_p == want_p
         hit_k = (got_k == want_k) if want_k else None
@@ -52,10 +56,15 @@ def evaluate(folder, projects=None):
         if want_k:
             k_total += 1
             k_ok += bool(hit_k)
+        # Раздел в чужом проекте — та же опасная ошибка, что и файл, только мельче и
+        # незаметнее: отчёт о приёме показывает проект файла, а не каждого раздела.
+        # Заметка с разделами о разных проектах помечается expect_mixed и тут не судится.
+        stray = [] if mixed else [x["title"] for x in r.get("records", [])[1:]
+                                  if x["project"] not in (want_p, "портфель")]
         rows.append({"file": rel, "want_project": want_p, "got_project": got_p,
                      "confidence": r.get("confidence"), "why": r.get("why"),
                      "want_kind": want_k, "got_kind": got_k,
-                     "project_ok": hit_p, "kind_ok": hit_k})
+                     "project_ok": hit_p, "kind_ok": hit_k, "stray_sections": stray})
     n = len(cases)
     # Ошибки раскладки неравноценны. Заметка, оставшаяся в «портфеле», попадает в отчёт
     # о неуверенной раскладке и ждёт человека. Заметка, ушедшая в чужой проект, молча
@@ -68,6 +77,7 @@ def evaluate(folder, projects=None):
         "kind_accuracy": round(100.0 * k_ok / k_total, 1) if k_total else None,
         "misrouted": len(wrong),
         "unassigned": len(unassigned),
+        "stray_sections": sum(len(r["stray_sections"]) for r in rows),
         "rows": rows,
     }
 
@@ -91,7 +101,8 @@ def main():
     min_p = float(opt("--min-project", MIN_PROJECT))
     min_k = float(opt("--min-kind", MIN_KIND))
 
-    misses = [r for r in res["rows"] if not r["project_ok"] or r["kind_ok"] is False]
+    misses = [r for r in res["rows"]
+              if not r["project_ok"] or r["kind_ok"] is False or r["stray_sections"]]
     for r in misses:
         marks = []
         if not r["project_ok"]:
@@ -99,11 +110,13 @@ def main():
                 r["got_project"], r["want_project"], (r["confidence"] or 0) * 100, r["why"]))
         if r["kind_ok"] is False:
             marks.append("вид «%s» вместо «%s»" % (r["got_kind"], r["want_kind"]))
+        if r["stray_sections"]:
+            marks.append("разделы в чужом проекте: %s" % ", ".join(r["stray_sections"][:3]))
         print("  × %s — %s" % (r["file"], "; ".join(marks)))
     print("\nЗаметок %d · точность по проекту %s%% (порог %s) · по виду %s%% (порог %s)" % (
         res["cases"], res["project_accuracy"], min_p, res["kind_accuracy"], min_k))
-    print("Ошибки по проекту: в чужой проект %d · оставлено в «портфеле» на проверку %d" % (
-        res["misrouted"], res["unassigned"]))
+    print("Ошибки по проекту: в чужой проект %d · оставлено в «портфеле» на проверку %d"
+          " · разделов в чужом проекте %d" % (res["misrouted"], res["unassigned"], res["stray_sections"]))
     ok = (res["project_accuracy"] or 0) >= min_p and (res["kind_accuracy"] or 0) >= min_k
     print("Порог пройден." if ok else "НИЖЕ ПОРОГА — правила раскладки нужно чинить, а не порог двигать.")
     return 0 if ok else 1

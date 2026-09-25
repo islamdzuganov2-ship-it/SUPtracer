@@ -138,27 +138,58 @@ def _base(p):
     return os.path.basename((p.get("path") or "").replace("\\", "/").rstrip("/"))
 
 
+# Проверка на случайность совпадений со словарём. Модель простая: слова заметки —
+# будто бы случайная выборка из рабочего запаса языка в VOCAB_BASE основ; тогда
+# со словарём из V слов заметка из N слов случайно совпадёт примерно в N·V/VOCAB_BASE
+# словах. Признаком считается только совпадение в CHANCE_FACTOR раз больше случайного.
+# Калибровка — на размеченном наборе и на реальном хранилище (ТЗ-01, Т14): короткие
+# заметки о проекте дают превышение в десятки раз, случайные — в 2–3 раза.
+VOCAB_BASE = 5000
+CHANCE_FACTOR = 5.0
+
+
+def _strings(v):
+    """Все строки внутри вложенной структуры — полный текст описания проекта."""
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _strings(x)
+    elif isinstance(v, (list, tuple)):
+        for x in v:
+            yield from _strings(x)
+
+
 def build_vocab(projects):
-    """Словарь проекта — по чему его узнать в тексте. Слова, встречающиеся почти
-    у всех проектов («система», «данные»), веса почти не дают: они ничего не различают."""
+    """Словарь проекта — по чему его узнать в тексте — и вес каждого слова.
+
+    Состав — короткие поля, которые проект называют: имя, псевдонимы, каталог,
+    слоган, цель, стек, сделанное, названия задач. Длинные описания (цель надолго,
+    оценка, обоснования, «почему» задач) в состав не идут: это рассуждения, а не приметы.
+
+    Вес — по тому, у скольких проектов слово встречается во ВСЁМ их описании:
+    у одного — 1, у двух — 1/2, у трёх — 1/3. Раньше вес считался по самим словарям,
+    и общее слово («база», «оценка», «LLM») становилось «уникальным», стоило ему
+    попасть в словарь одного проекта, хотя в описаниях оно есть у всех. На реальном
+    хранилище крупные проекты от этого становились воронками: туда уезжали профиль,
+    поиск работы и заметки проектов, которых портфель не ведёт."""
     vocab, df = {}, {}
     for key, p in projects.items():
         aliases = [str(a) for a in (p.get("aliases") or [])]
         parts = [key, key.replace("-", " "), p.get("name", ""), p.get("tagline", ""),
-                 p.get("goal", ""), p.get("goal_long", "")] + aliases
+                 p.get("goal", "")] + aliases
         arch = p.get("architecture") or {}
-        parts += [str(v) for v in arch.values()]
-        parts += [b.get("title", "") for b in p.get("backlog", [])]
-        parts += list(p.get("done", []) or [])[:12]
+        parts += [str(arch.get(f, "")) for f in ("stack", "style")]
+        parts += [str(x) for x in (p.get("done") or []) if isinstance(x, str)]
+        parts += [str(b.get("title") or "") for b in (p.get("backlog") or []) if isinstance(b, dict)]
         base = _base(p)
         parts += [base, base.replace("-", " ").replace("_", " ")]
         words = md.word_set(" ".join(parts))
         words |= {md.stem(key.lower()), md.stem(base.lower())}
         vocab[key] = words
-        for w in words:
+        for w in words | md.word_set(" ".join(_strings(p))):
             df[w] = df.get(w, 0) + 1
-    n = max(1, len(projects))
-    weight = {w: 1.0 if c == 1 else max(0.1, 1.0 - (c - 1) / n) for w, c in df.items()}
+    weight = {w: 1.0 / c for w, c in df.items()}
     # Ключ, имя каталога и псевдонимы — опознавательные знаки, их вес не размывается
     for key, p in projects.items():
         marks = [key.lower(), _base(p).lower()] + [str(a).lower() for a in (p.get("aliases") or [])]
@@ -206,28 +237,141 @@ def by_prefix(text, idx):
     return best[1] if best else None
 
 
-def by_path(parts, idx):
-    """ПРМ-08: путь заметки в хранилище. Глубокая папка точнее верхней:
+def by_folder(parts, idx):
+    """ПРМ-08: папка заметки в хранилище. Глубокая папка точнее верхней:
     «Проекты/CellWatch/Итоги.md» говорит о CellWatch, а не о «Проектах»."""
     parts = [p for p in (parts or []) if p]
-    if not parts:
-        return None
     for f in reversed(parts[:-1]):
         k = by_name(f, idx) or by_prefix(f, idx)
         if k:
             return k, 0.95, "папка «%s» в хранилище" % f
-    stem = os.path.splitext(parts[-1])[0]
-    k = by_name(stem, idx) or by_prefix(stem, idx)
-    if k:
-        return k, 0.9, "имя файла «%s»" % stem
     return None
 
 
-def route(text, fm, tags, links, projects, vocab, weight, default=None, path_parts=None, idx=None):
+def by_filename(parts, idx):
+    parts = [p for p in (parts or []) if p]
+    if not parts:
+        return None
+    stem = os.path.splitext(parts[-1])[0]
+    k = by_name(stem, idx) or by_prefix(stem, idx)
+    return (k, 0.9, "имя файла «%s»" % stem) if k else None
+
+
+# Папки, в которых каждая подпапка — отдельный проект. Настраивается в
+# data/obsidian.json (import.project_folders); без настройки — общепринятые имена.
+DEFAULT_PROJECT_FOLDERS = ["Проекты/*", "Projects/*"]
+
+
+def configured_project_folders():
+    """Папки проектов из настройки обмена с хранилищем, иначе общепринятые."""
+    try:
+        with open(os.path.join(DATA, "obsidian.json"), encoding="utf-8") as f:
+            v = (json.load(f).get("import") or {}).get("project_folders")
+    except (OSError, ValueError, AttributeError):
+        v = None
+    return [str(x) for x in v] if isinstance(v, list) else list(DEFAULT_PROJECT_FOLDERS)
+
+
+def project_folder(path_parts, patterns=None):
+    """Имя папки проекта, в которой лежит заметка, или None.
+
+    «Проекты/*» — каждая подпапка «Проектов» — проект; «LLM-Administrator» — эта
+    папка сама проект. Файл прямо в «Проектах» в папке проекта не лежит."""
+    parts = [p for p in (path_parts or []) if p][:-1]            # только папки
+    low = [p.lower() for p in parts]
+    best = None
+    for pat in (patterns if patterns is not None else DEFAULT_PROJECT_FOLDERS):
+        segs = [s for s in str(pat).replace("\\", "/").split("/") if s]
+        if not segs:
+            continue
+        if segs[-1] == "*":
+            head = [s.lower() for s in segs[:-1]]
+            if len(low) > len(head) and low[:len(head)] == head:
+                cand = (len(head) + 1, parts[len(head)])
+            else:
+                continue
+        else:
+            head = [s.lower() for s in segs]
+            if low[:len(head)] == head:
+                cand = (len(head), parts[len(head) - 1])
+            else:
+                continue
+        if best is None or cand[0] > best[0]:
+            best = cand
+    return best[1] if best else None
+
+
+def named_projects(text, projects):
+    """Сколько раз каждый проект назван в тексте прямо — ключом, именем, псевдонимом,
+    каталогом. Только целые слова и имена от 4 символов: короткие совпадают случайно."""
+    low = (text or "").lower()
+    found = {}
+    for k, p in projects.items():
+        names = {str(n).strip().lower() for n in
+                 [k, p.get("name") or "", _base(p)] + list(p.get("aliases") or [])}
+        names = sorted((n for n in names if len(n) >= 4), key=len, reverse=True)
+        if not names:
+            continue
+        rx = r"(?<![\w-])(?:%s)(?![\w-])" % "|".join(re.escape(n) for n in names)
+        n = len(re.findall(rx, low))
+        if n:
+            found[k] = n
+    return found
+
+
+def by_tags(tags, idx):
+    """Тег проекта — решение автора. Теги нескольких проектов — заметка о портфеле."""
+    found = []
+    for t in tags or ():
+        k = by_name(t, idx)
+        if k and k not in found:
+            found.append(k)
+    if len(found) == 1:
+        return found[0], 0.9, "проект указан тегом"
+    if found:
+        return "портфель", 0.6, "теги нескольких проектов: %s" % ", ".join(found)
+    return None
+
+
+def by_mentions(text, links, projects, idx):
+    """Проект, на который заметка ссылается или который называет прямо.
+
+    Один — он. Несколько — заметка о портфеле (профиль, обзор недели), если только
+    один не упомянут много чаще остальных: в ТЗ проекта разок назван сосед — это
+    всё ещё ТЗ проекта. Викиссылка считается и как ссылка, и как имя в тексте:
+    ссылка — более сильное упоминание."""
+    counts = dict(named_projects(text, projects))
+    linked = set()
+    for l in links or ():
+        k = by_name(l, idx)
+        if k:
+            counts[k] = counts.get(k, 0) + 1
+            linked.add(k)
+    if not counts:
+        return None
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    (top, n1), n2 = ranked[0], (ranked[1][1] if len(ranked) > 1 else 0)
+    if n2 == 0:
+        return top, (0.85 if top in linked else 0.8), \
+            ("ссылка на заметку проекта" if top in linked else "проект назван в тексте")
+    if n1 >= 3 * n2:
+        return top, 0.8, "проект упомянут %d раз, другие — не больше %d" % (n1, n2)
+    return "портфель", 0.6, "упомянуты несколько проектов: %s" % ", ".join(k for k, _ in ranked)
+
+
+def route(text, fm, tags, links, projects, vocab, weight, default=None, path_parts=None, idx=None,
+          project_folders=None):
     """Куда положить кусок. Возвращает (ключ проекта, уверенность 0..1, обоснование).
 
-    ПРМ-03: признаки по убыванию силы — аргумент, фронтматтер, путь в хранилище,
-    тег, викиссылка, словарь проекта."""
+    ПРМ-03: признаки по убыванию силы — аргумент, фронтматтер, папка проекта из портфеля,
+    папка чужого проекта, имя файла, тег, викиссылка, проект, названный в тексте,
+    словарь проекта.
+
+    Словарь — последний и самый слабый признак. Ошибка в нём опаснее отказа:
+    заметка, ушедшая в чужой проект, молча засоряет его память, а неуверенная
+    остаётся в «портфеле» и попадает в отчёт на проверку. Поэтому словарь
+    не запускается для заметок из папок проектов, требует двух разных совпадений,
+    заметного превышения над случайными и отрыва от второго места."""
     if default and default in projects:
         return default, 1.0, "проект задан аргументом"
     idx = idx if idx is not None else name_index(projects)
@@ -238,22 +382,23 @@ def route(text, fm, tags, links, projects, vocab, weight, default=None, path_par
             k = by_name(cand, idx)
             if k:
                 return k, 1.0, "проект указан во фронтматтере"
-    hit = by_path(path_parts, idx)
+    hit = by_folder(path_parts, idx)
     if hit:
         return hit
-    for t in tags:
-        k = by_name(t, idx)
-        if k:
-            return k, 0.9, "проект указан тегом #%s" % t
-    for l in links or ():
-        k = by_name(l, idx)
-        if k:
-            return k, 0.85, "ссылка на заметку проекта"
+    folder = project_folder(path_parts, project_folders)
+    if folder:
+        # Папка проекта, которого нет в портфеле: это другой проект, а не «неизвестно».
+        # Угадывать по словам тут нельзя — чужой проект похож на свои общими словами.
+        return "портфель", 0.9, "папка проекта «%s» — такого проекта в портфеле нет" % folder
+    hit = by_filename(path_parts, idx) or by_tags(tags, idx) or by_mentions(text, links, projects, idx)
+    if hit:
+        return hit
 
     words = md.word_set(text)
-    scores = {}
+    scores, hits = {}, {}
     for key, vw in vocab.items():
         hit = words & vw
+        hits[key] = hit
         scores[key] = sum(weight.get(w, 0.5) for w in hit)
     if not scores:
         return "портфель", 0.2, "проектов в системе нет"
@@ -261,11 +406,42 @@ def route(text, fm, tags, links, projects, vocab, weight, default=None, path_par
     top = scores[best]
     rest = sorted((v for k, v in scores.items() if k != best), reverse=True)
     second = rest[0] if rest else 0.0
-    if top < 2.0:
+    if top < 2.0 or len(hits[best]) < 2:
         return "портфель", 0.25, "нет уверенного совпадения ни с одним проектом"
+    # Совпадения бывают и случайными: чем больше словарь проекта и длиннее заметка,
+    # тем больше общих слов найдётся у любых двух текстов. Совпадений должно быть
+    # заметно больше, чем дал бы случай, — иначе это не признак, а шум.
+    chance = len(words) * len(vocab[best]) / float(VOCAB_BASE)
+    if len(hits[best]) < CHANCE_FACTOR * chance:
+        return "портфель", 0.3, "совпадений со словарём %s %d — для такой длины это почти случайность" % (
+            best, len(hits[best]))
     margin = (top - second) / top if top else 0
+    if margin < 0.25:
+        return "портфель", 0.3, "совпадения с несколькими проектами почти равны"
     conf = max(0.3, min(0.95, 0.45 + margin * 0.5 + min(top, 12) / 40))
     return best, round(conf, 2), "совпало по словарю проекта (%.1f против %.1f)" % (top, second)
+
+
+def route_section(text, tags, links, projects, idx, file_route, default=None):
+    """ПРМ-13: проект раздела. У заметки один предмет, поэтому раздел наследует проект файла.
+
+    Своим признакам раздел следует в двух случаях: у него явный тег проекта — это
+    решение автора; или сам файл не привязан (нет признаков либо в нём названы
+    несколько проектов, как в недельном обзоре) — тогда раздел с викиссылкой или
+    прямо названным проектом говорит о своём. Словарь для разделов не работает:
+    в коротком тексте общие слова решают всё, и раздел заметки о чужом проекте
+    уезжал в проект с похожими словами."""
+    proj, conf, _ = file_route
+    if default and default in projects:
+        return default, 1.0, "проект задан аргументом"
+    hit = by_tags(tags, idx)
+    if hit and hit[0] != "портфель":
+        return hit
+    if conf < 0.8:
+        hit = by_mentions(text, links, projects, idx)
+        if hit and hit[0] != "портфель":
+            return hit
+    return proj, conf, "унаследован от файла"
 
 
 # --------------------------------------------------------------- входящие
@@ -389,12 +565,14 @@ def rel(path):
 
 
 def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
-                source_label=None, dry=False, attach_root=None, rel_path=None, prior=None):
+                source_label=None, dry=False, attach_root=None, rel_path=None, prior=None,
+                project_folders=None):
     """Один файл -> записи памяти и предложения задач. Отчёт — что куда легло.
 
     attach_root подвешивает документ под существующий запрос (ПРМ-04): так ТЗ,
     написанное в ответ на запрос, растёт в дереве из этого запроса, а не отдельно.
-    rel_path — путь заметки внутри хранилища или каталога заметок (ПРМ-08)."""
+    rel_path — путь заметки внутри хранилища или каталога заметок (ПРМ-08),
+    project_folders — где в хранилище лежат папки проектов."""
     idx = name_index(projects)
     path_parts = (rel_path or os.path.basename(path)).replace("\\", "/").split("/")
     try:
@@ -432,7 +610,11 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
     gist = "\n".join([intro] + [s["title"] for s in secs if s["title"]])
 
     proj, conf, why = route(file_title + "\n" + body, fm, all_tags, links,
-                            projects, vocab, weight, default_project, path_parts, idx)
+                            projects, vocab, weight, default_project, path_parts, idx,
+                            project_folders)
+    # Заметка из папки проекта, которого нет в портфеле: запоминаем, какого именно, —
+    # по этому полю видно, сколько знания лежит у проектов, которые портфель не ведёт.
+    foreign = project_folder(path_parts, project_folders) if proj == "портфель" and conf >= 0.8 else None
 
     kind, kconf, kwhy = classify(file_title, gist, fm, all_tags)
     # Вступление длиннее предела не обрезается молча: первая часть — тело корня,
@@ -447,6 +629,8 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
         parent=attach_root or "", root=attach_root or "",
         id=mem.make_id(file_title, proj, src))
     root["routing"] = why
+    if foreign:
+        root["foreign_project"] = foreign
     records = [root]
     tree_root = attach_root or root["id"]
     for i, (sub, text) in enumerate(intro_parts[1:], 2):
@@ -465,11 +649,9 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
             continue          # список задач уезжает в предложения, дублировать в памяти нечего
         stags = md.tags(s["body"], None) or []
         skind, _, _ = classify(s["title"], s["body"], None, stags)
-        sproj, sconf, swhy = route(s["title"] + "\n" + s["body"], None, stags,
-                                   md.wikilinks(s["body"]), projects, vocab, weight,
-                                   default_project or (proj if conf >= 0.8 else None), None, idx)
-        if sconf < 0.5:
-            sproj, swhy = proj, "унаследован от файла"
+        sproj, sconf, swhy = route_section(s["title"] + "\n" + s["body"], stags,
+                                           md.wikilinks(s["body"]), projects, idx,
+                                           (proj, conf, why), default_project)
         parts = split_body(s["body"])
         for i, (sub, text) in enumerate(parts, 1):
             if len(parts) == 1:
@@ -488,23 +670,36 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
                 id=mem.make_id(title, sproj, src))
             rec["routing"] = swhy
             records.append(rec)
+    if foreign:
+        for r in records:
+            if r["project"] == "портфель":
+                r["foreign_project"] = foreign
 
     proposals = []
     for s in secs + ([{"title": "", "body": body}] if not secs else []):
         in_task_section = bool(TASK_SECTION_RE.search(s.get("title") or ""))
         holder = next((r for r in records if r["source"].endswith("#" + (s.get("title") or ""))
                        and s.get("title")), root)
+        # Задача уходит в проект своего раздела: в недельном обзоре раздел «CellWatch»
+        # предлагает задачи CellWatch, а не «портфелю».
+        if holder is not root:
+            tproj, tconf = holder["project"], float(holder["confidence"])
+        elif s is intro_sec or not s.get("title"):
+            tproj, tconf = proj, conf
+        else:
+            tproj, tconf, _ = route_section(s["title"] + "\n" + s["body"],
+                                            md.tags(s["body"], None) or [], md.wikilinks(s["body"]),
+                                            projects, idx, (proj, conf, why), default_project)
+        target = tproj if tconf >= 0.5 and tproj in projects else "портфель"
         for t in md.tasks(s.get("body") or ""):
             if t["done"] or t["dropped"]:
                 continue
-            proposals.append(_proposal(t["text"], proj if conf >= 0.5 else "портфель",
-                                       holder, src, s.get("title"), "чекбокс"))
+            proposals.append(_proposal(t["text"], target, holder, src, s.get("title"), "чекбокс"))
         if in_task_section:
             for line in (s.get("body") or "").splitlines():
                 b = re.match(r"^\s*[-*+]\s+(?!\[)(.{8,200})$", line)
                 if b and IMPERATIVE_RE.match(b.group(1).strip()):
-                    proposals.append(_proposal(b.group(1).strip(),
-                                               proj if conf >= 0.5 else "портфель",
+                    proposals.append(_proposal(b.group(1).strip(), target,
                                                holder, src, s.get("title"), "пункт плана"))
 
     fresh = []
@@ -534,7 +729,7 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
             box.setdefault("items", []).append(p)
 
     return {"file": rel(path), "project": proj, "confidence": conf, "why": why,
-            "kept_manual": kept_manual, "retired": retired,
+            "foreign_project": foreign, "kept_manual": kept_manual, "retired": retired,
             "kind": kind, "kind_why": kwhy, "records": records, "proposals": fresh,
             "redacted": secrets}
 
@@ -606,14 +801,17 @@ def run(paths, default_project=None, dry=False, quiet=False, source_label=None,
     return run_items(items, default_project, dry, quiet, attach_root)
 
 
-def run_items(items, default_project=None, dry=False, quiet=False, attach_root=None, projects=None):
+def run_items(items, default_project=None, dry=False, quiet=False, attach_root=None, projects=None,
+              project_folders=None):
     """Пакетный приём: [(путь, путь в хранилище, метка источника)].
 
     Словарь проектов, входящие и снимок памяти готовятся один раз, индекс памяти
     перестраивается один раз в конце. Хранилище на сотни заметок иначе стоило бы
     сотни полных перестроений индекса. projects подменяет портфель — так оценка
-    раскладки проверяет правила на своём размеченном портфеле."""
+    раскладки проверяет правила на своём размеченном портфеле. project_folders без
+    значения берётся из настройки хранилища."""
     projects = projects if projects is not None else load_projects()
+    folders = project_folders if project_folders is not None else configured_project_folders()
     vocab, weight = build_vocab(projects)
     box = load_inbox()
     seen = known_titles(projects, box)
@@ -621,7 +819,7 @@ def run_items(items, default_project=None, dry=False, quiet=False, attach_root=N
     reports = []
     for f, rel_path, label in items:
         r = ingest_file(f, projects, vocab, weight, box, seen, default_project,
-                        label, dry, attach_root, rel_path, prior)
+                        label, dry, attach_root, rel_path, prior, folders)
         reports.append(r)
         if quiet:
             continue
@@ -674,6 +872,9 @@ def main():
     if leaky:
         print("Ключи и пароли в заметках (%d) — в память не попали, но из заметок их стоит убрать: %s" % (
             len(leaky), ", ".join(r["file"] for r in leaky[:5])))
+    foreign = sorted({r["foreign_project"] for r in ok if r.get("foreign_project")})
+    if foreign:
+        print("Папки проектов, которых нет в портфеле (заметки в «портфеле»): %s" % ", ".join(foreign))
     if "--dry-run" in sys.argv:
         print("Пробный прогон: ничего не записано.")
     else:

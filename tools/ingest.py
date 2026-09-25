@@ -86,8 +86,17 @@ IMPERATIVE_RE = re.compile(
     r"поправить|очистить|унифицировать|перевести|назначить|выделить)\b", re.I)
 
 
-def classify(title, body, fm=None, tags=()):
-    """Вид куска текста. Явное указание во фронтматтере или теге сильнее догадки."""
+PARAGRAPH_WORDS = 60      # признаки считаются на абзац такой длины, а не на весь текст
+
+
+def classify(title, body, fm=None, tags=(), section=False):
+    """Вид куска текста. Явное указание во фронтматтере или теге сильнее догадки.
+
+    Признаки считаются по плотности — на абзац, а не на весь текст. В длинном
+    документе любой вид набирает предельное число совпадений, и при простом счёте
+    выигрывал первый в списке — «запрос»: руководство пользователя становилось
+    сотней запросов. «Запрос» — это то, с чего началась работа, поэтому раздел
+    внутри заметки становится запросом только с признаком в собственном заголовке."""
     explicit = str((fm or {}).get("kind") or (fm or {}).get("вид") or "").strip().lower()
     if explicit in mem.KINDS:
         return explicit, 1.0, "указано во фронтматтере"
@@ -96,18 +105,27 @@ def classify(title, body, fm=None, tags=()):
             return t, 0.95, "указано тегом #%s" % t
     text = ((title or "") + "\n" + (body or "")).lower()
     head = (title or "").lower()
-    best, score, why = "заметка", 0.0, "нет явных признаков"
+    paragraphs = max(1.0, len(re.findall(r"\w+", text)) / float(PARAGRAPH_WORDS))
+    scored = []
     for kind, w, rx in MARKERS:
         hits = len(re.findall(rx, text))
         if not hits:
             continue
-        s = w * (1 + min(hits, 4) * 0.35)
-        if re.search(rx, head):
+        in_head = bool(re.search(rx, head))
+        if section and kind == "запрос" and not in_head:
+            continue
+        rate = hits / paragraphs
+        if rate < 0.5 and not in_head:
+            continue                      # одно слово на длинный раздел — не вид, а упоминание
+        s = w * (1 + min(rate, 4) * 0.35)
+        if in_head:
             s *= 1.6                      # признак в заголовке весит больше
-        if s > score:
-            best, score, why = kind, s, "признаки вида «%s» в тексте" % kind
-    conf = max(0.3, min(0.95, score / 8.0)) if score else 0.3
-    return best, round(conf, 2), why
+        scored.append((s, kind))
+    if not scored:
+        return "заметка", 0.3, "нет явных признаков"
+    score, best = max(scored, key=lambda x: x[0])      # при равенстве — первый по списку
+    conf = max(0.3, min(0.95, score / 8.0))
+    return best, round(conf, 2), "признаки вида «%s» в тексте" % best
 
 
 def guess_size(text):
@@ -648,7 +666,7 @@ def ingest_file(path, projects, vocab, weight, box, seen, default_project=None,
         if _is_task_list(s):
             continue          # список задач уезжает в предложения, дублировать в памяти нечего
         stags = md.tags(s["body"], None) or []
-        skind, _, _ = classify(s["title"], s["body"], None, stags)
+        skind, _, _ = classify(s["title"], s["body"], None, stags, section=True)
         sproj, sconf, swhy = route_section(s["title"] + "\n" + s["body"], stags,
                                            md.wikilinks(s["body"]), projects, idx,
                                            (proj, conf, why), default_project)

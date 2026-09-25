@@ -283,29 +283,54 @@ def brief(budget=1500, project=None, index=None, kinds=None, recall_cmd="py tool
         recs = [r for r in recs if r["project"] == project]
     if kinds:
         recs = [r for r in recs if r["kind"] in kinds]
-    recs.sort(key=lambda r: (-(10.0 if r["pin"] else 0) - KIND_WEIGHT.get(r["kind"], 1.0),
-                             r["project"], r["updated"]))
+    # Порядок внутри проекта: закреплённое; записанное вручную раньше принятого из
+    # хранилища пачкой; корень документа раньше его разделов; вид; свежее раньше.
+    recs.sort(key=lambda r: r["updated"], reverse=True)
+    recs.sort(key=lambda r: (0 if r["pin"] else 1, 1 if is_bulk(r) else 0, 1 if r.get("parent") else 0,
+                             -KIND_WEIGHT.get(r["kind"], 1.0)))
 
-    groups, lines, used = {}, [], 0
+    groups = {}
     for r in recs:
         groups.setdefault(r["project"], []).append(r)
+    # Проекты, где есть закреплённое или записанное вручную, — первыми; «портфель» — последним.
+    order = sorted(groups, key=lambda p: (p == "портфель",
+                                          -sum(1 for r in groups[p] if r["pin"] or not is_bulk(r)),
+                                          -len(groups[p]), p))
 
-    skipped = 0
-    for proj in sorted(groups, key=lambda p: (-len(groups[p]), p)):
-        head = "## %s — %d записей" % (proj, len(groups[proj]))
-        block = [head]
-        for r in groups[proj]:
-            line = "  [%s] %-9s %s" % (r["id"], r["kind"], r["title"])
-            if r["digest"] and len(line) < 110:
-                line += " — " + r["digest"][:110]
+    def line_of(r):
+        line = "  [%s] %-9s %s" % (r["id"], r["kind"], r["title"])
+        if r["digest"] and len(line) < 110:
+            line += " — " + r["digest"][:110]
+        return line
+
+    # Бюджет делится по кругу: каждый проект получает свою лучшую запись, потом вторую…
+    # Иначе проект с тысячей записей из хранилища съедал весь брифинг, а память
+    # остальных, включая решения, записанные вручную, в него не попадала.
+    picked = {p: [] for p in order}
+    used = 0
+    cursor = {p: 0 for p in order}
+    progress = True
+    while progress:
+        progress = False
+        for p in order:
+            if cursor[p] >= len(groups[p]):
+                continue
+            line = line_of(groups[p][cursor[p]])
             cost = md.est_tokens(line)
+            if not picked[p]:                       # первая строка проекта несёт и его заголовок
+                cost += md.est_tokens("## %s — %d записей" % (p, len(groups[p])))
             if used + cost > budget:
-                skipped += 1
+                cursor[p] = len(groups[p])          # этому проекту больше не помещается
                 continue
             used += cost
-            block.append(line)
-        if len(block) > 1:
-            lines += block
+            picked[p].append(line)
+            cursor[p] += 1
+            progress = True
+    lines, skipped = [], 0
+    for p in order:
+        skipped += len(groups[p]) - len(picked[p])
+        if picked[p]:
+            lines += ["## %s — %d записей" % (p, len(groups[p]))] + picked[p]
     total = idx["totals"].get("stored_tokens", 0)
     header = ("ПАМЯТЬ TASKTREKER · записей %d · на диске ~%s токенов · в брифинге ~%s\n"
               "Тела записей не загружены. Прочитать целиком: %s" % (
@@ -313,7 +338,14 @@ def brief(budget=1500, project=None, index=None, kinds=None, recall_cmd="py tool
     if skipped:
         header += "\nНе поместилось в бюджет: %d записей — поиск: %s" % (
             skipped, recall_cmd.replace("<id>", "<слова>"))
-    return header + "\n\n" + "\n".join(lines) if lines else header + "\n\n(память пуста)"
+    if lines:
+        return header + "\n\n" + "\n".join(lines)
+    return header + "\n\n" + ("(в бюджет не поместилась ни одна запись)" if recs else "(память пуста)")
+
+
+def is_bulk(rec):
+    """Запись принята пачкой из хранилища заметок, а не записана как знание о работе."""
+    return str(rec.get("source") or "").startswith("obsidian:")
 
 
 def fmt(n):

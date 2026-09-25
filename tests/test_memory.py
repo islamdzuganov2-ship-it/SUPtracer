@@ -66,6 +66,23 @@ class Memory(DataCase):
         self.assertNotIn("Тело 5 Тело 5", b)
         self.assertIn("Не поместилось", b)
 
+    def test_brief_is_fair_to_small_projects(self):                     # ПАМ-05
+        # Сотня записей из хранилища у одного проекта не вытесняет решение другого.
+        root = self.rec("Документ хранилища", kind="запрос", source="obsidian:doc.md")
+        for i in range(100):
+            self.rec("Раздел %d документа" % i, kind="запрос", source="obsidian:doc.md#Раздел %d" % i,
+                     parent=root["id"], root=root["id"])
+        self.rec("Кеш держим на диске", project="beta-tool", kind="решение")
+        self.rec("Записанное вручную про Альфу", kind="заметка")
+        self.t.memory.build_index()
+        b = self.t.memory.brief(budget=400)
+        self.assertIn("Кеш держим на диске", b)
+        lines = [l for l in b.splitlines() if l.startswith("  [")]
+        alpha = [l for l in lines if "Альф" in l or "Документ" in l or "Раздел" in l]
+        # Внутри проекта: записанное вручную раньше принятого пачкой, корень раньше разделов.
+        self.assertIn("Записанное вручную про Альфу", alpha[0])
+        self.assertIn("Документ хранилища", alpha[1])
+
     def test_forget_keeps_file_and_hides_from_brief(self):              # ПАМ-09
         r = self.rec("Устаревшее решение")
         self.t.memory.build_index()

@@ -49,6 +49,24 @@ class Classify(DataCase):
     def test_nothing_recognisable_is_a_note(self):
         self.assertEqual(self.t.ingest.classify("Разное", "просто текст про погоду")[0], "заметка")
 
+    # Раздел руководства: описание экрана, где слова «добавить» и «нужно» — часть текста.
+    MANUAL = ("Окно открывается из реестра. " + "Поле заполняется вручную, значение сохраняется сразу. " * 12 +
+              "Если нужно, можно добавить описание. " +
+              "Сохранённая запись появляется в списке и доступна всем ролям. " * 12)
+
+    def test_section_is_a_request_only_with_marker_in_title(self):     # ПРМ-02
+        c = self.t.ingest.classify
+        self.assertNotEqual(c("Карточка системы", self.MANUAL, section=True)[0], "запрос")
+        self.assertEqual(c("Что нужно от заказчика", "Доступ к стенду и выгрузка метрик.", section=True)[0],
+                         "запрос")
+
+    def test_long_text_is_judged_by_density(self):                     # ПРМ-02
+        # Одно слово «риск» на длинный раздел — упоминание, а не вид записи.
+        text = "Экран показывает список систем и их метрики за период. " * 30 + "Риск тут не главное."
+        self.assertEqual(self.t.ingest.classify("Экран систем", text)[0], "заметка")
+        dense = "Риск утечки ключа. Уязвимость в ролях. Утечка токена опасна. " * 5
+        self.assertEqual(self.t.ingest.classify("Разбор", dense)[0], "риск")
+
 
 class Route(DataCase):
     def setUp(self):

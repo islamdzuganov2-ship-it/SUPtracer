@@ -27,6 +27,8 @@ Obsidian и дашборд
   py tools/pm.py vault init <путь> | pull | push | sync | status
   py tools/pm.py tree                 пересобрать дерево работ
   py tools/pm.py serve                дашборд с работающей кнопкой обновления
+  py tools/pm.py connect [--status]   подключить Клода во всех проектах: хук и MCP-сервер
+  py tools/pm.py disconnect           снять подключение
   py tools/pm.py open                 открыть собранный дашборд файлом
 """
 import json
@@ -351,12 +353,22 @@ def cmd_serve(args):
     return run("serve.py", *args)
 
 
+def cmd_connect(args):
+    """ИНТ-06: хук начала сессии и MCP-сервер на уровне пользователя."""
+    return run("connect.py", "connect", *args)
+
+
+def cmd_disconnect(args):
+    return run("connect.py", "disconnect", *args)
+
+
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
             "open": cmd_open, "context": cmd_context, "recall": cmd_recall,
             "remember": cmd_remember, "forget": cmd_forget, "ingest": cmd_ingest,
             "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
-            "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve}
+            "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
+            "connect": cmd_connect, "disconnect": cmd_disconnect}
 
 
 def main():

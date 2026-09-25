@@ -88,10 +88,21 @@ class Brief(DataCase):
 
 class Hook(DataCase):
     def run_hook(self, stdin):
+        """Хук отвечает JSON с hookSpecificOutput.additionalContext — возвращаем сам текст."""
         env = dict(os.environ, PYTHONIOENCODING="utf-8", TASKTREKER_DATA=self.data)
         r = subprocess.run([sys.executable, os.path.join(TOOLS, "hook.py")], input=stdin,
                            capture_output=True, text=True, encoding="utf-8", env=env, timeout=60)
-        return r.returncode, r.stdout, r.stderr
+        out = json.loads(r.stdout)
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        return r.returncode, out["hookSpecificOutput"]["additionalContext"], r.stderr
+
+    def test_text_mode_for_humans(self):
+        self.projects()
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", TASKTREKER_DATA=self.data)
+        r = subprocess.run([sys.executable, os.path.join(TOOLS, "hook.py"), "--text"],
+                           input=json.dumps({"cwd": self.tmp}), capture_output=True, text=True,
+                           encoding="utf-8", env=env, timeout=60)
+        self.assertTrue(r.stdout.startswith("TaskTreker: каталог вне портфеля"))
 
     def test_outside_portfolio_one_line(self):                          # ИНТ-03
         self.projects()

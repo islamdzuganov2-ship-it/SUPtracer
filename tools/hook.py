@@ -5,17 +5,33 @@
 в любом каталоге. Отсюда два жёстких правила:
 
   1. Никогда не ломать сессию. Даже если код системы сломан на середине правки,
-     хук печатает одну строку и выходит с кодом 0. Поэтому импорт модулей системы
+     хук отдаёт одну строку и выходит с кодом 0. Поэтому импорт модулей системы
      стоит внутри защиты, а не в начале файла.
   2. Не тратить чужой контекст. Вне портфеля — одна строка; в проекте портфеля —
      брифинг по нему в бюджете context.HOOK_BUDGET.
 
-Событие хука приходит JSON-объектом на stdin, из него нужен только cwd.
+Событие хука приходит JSON-объектом на stdin, из него нужен только cwd. Ответ —
+JSON с hookSpecificOutput.additionalContext: так Claude Code добавляет текст
+в контекст сессии. Флаг --text печатает тот же брифинг обычным текстом — для
+проверки глазами.
 
   py tools/hook.py < событие.json
+  py tools/hook.py --text < событие.json
 """
+import json
 import os
 import sys
+
+
+def briefing(raw):
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import context
+        return context.hook_output(context.parse_event(raw))
+    except BaseException as e:            # включая SyntaxError при импорте
+        return "TaskTreker: брифинг не собрался (%s). Портфель: py \"%s\" context" % (
+            type(e).__name__,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "pm.py").replace("\\", "/"))
 
 
 def main():
@@ -27,14 +43,12 @@ def main():
         raw = sys.stdin.read() if sys.stdin and not sys.stdin.isatty() else ""
     except Exception:
         raw = ""
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import context
-        print(context.hook_output(context.parse_event(raw)))
-    except BaseException as e:            # включая SyntaxError при импорте
-        print("TaskTreker: брифинг не собрался (%s). Портфель: py \"%s\" context" % (
-            type(e).__name__,
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "pm.py").replace("\\", "/")))
+    text = briefing(raw)
+    if "--text" in sys.argv[1:]:
+        print(text)
+    else:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                                 "additionalContext": text}}, ensure_ascii=False))
     return 0
 
 

@@ -320,7 +320,11 @@ def main():
     out = {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "repos": {}}
     if only and os.path.exists(out_path):
         with open(out_path, encoding="utf-8") as f:
-            out["repos"] = json.load(f).get("repos", {})
+            prev = json.load(f)
+        out["repos"] = prev.get("repos", {})
+        # Срезы, которые сейчас не пересканируются, остаются со временем прежнего сбора (ОБН-05).
+        for r in out["repos"].values():
+            r.setdefault("scanned_at", prev.get("generated_at", ""))
     for key, meta in projects.items():
         if only and key not in only:
             continue

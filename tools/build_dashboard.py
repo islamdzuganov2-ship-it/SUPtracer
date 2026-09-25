@@ -333,12 +333,14 @@ def freshness():
     """ОБН-05: когда собран каждый слой. Репозитории — по самому старому срезу:
     обновление одного проекта не делает свежими остальные."""
     repos = load("repos.json", {"repos": {}})
-    scans = [r.get("scanned_at") for r in (repos.get("repos") or {}).values() if r.get("scanned_at")]
+    rs = list((repos.get("repos") or {}).values())
+    scans = [r.get("scanned_at") or "" for r in rs]
     mem = load(os.path.join("memory", "index.json"), {})
     vault = load("vault_state.json", {})
     return {
         "usage": load("usage.json", {}).get("generated_at", ""),
-        "repos": min(scans) if scans else repos.get("generated_at", ""),
+        # Срез без отметки времени — неизвестной свежести: честнее «нет», чем чужая дата.
+        "repos": "" if not rs or "" in scans else min(scans),
         "memory": mem.get("generated_at", ""),
         "vault_pull": vault.get("pulled_at", ""),
         "vault_push": vault.get("pushed_at", ""),

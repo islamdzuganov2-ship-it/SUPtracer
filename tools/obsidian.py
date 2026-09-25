@@ -312,6 +312,11 @@ def load(name, default=None):
 
 
 def write_note(path, fm, body, written, dry=False):
+    # ОБС-08: обмен пишет только в свою папку. Заметки пользователя он читает,
+    # но не меняет — даже если вызывающий код ошибся путём.
+    own = os.path.abspath(export_root())
+    if os.path.commonpath([own, os.path.abspath(path)]) != own:
+        raise ValueError("выгрузка вне папки %s: %s" % (own, path))
     fm = dict(fm)
     fm[MARK] = "generated"
     fm.setdefault("updated", mem.today())
@@ -447,6 +452,8 @@ def cmd_push(args):
     # --- записи памяти. Пришедшие из хранилища не выгружаются: их оригинал уже там,
     # копия раздвоила бы заметки и граф. Выгружается то, чего в хранилище нет, —
     # решения, запросы и документы, принятые из других мест.
+    # ИНТ-08: это и граница со смысловым поиском — индексатор читает хранилище
+    # (заметки и эту выгрузку с record_id во фронтматтере), а не data/ системы.
     if c["export"].get("memory", True):
         kids_of = {}
         for y in idx.get("records", []):

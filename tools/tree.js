@@ -235,15 +235,23 @@ const TREEVIEW = (function () {
       view.y = my - (my - view.y) * (k / view.k);
       view.k = k; apply();
     }, {passive: false});
+    // Захват указателя — только когда мышь действительно сдвинулась. Захват прямо на
+    // нажатии уводил отпускание к <svg>, и клик до узла не доходил: ветви не
+    // сворачивались и «ещё N» не раскрывался (ДРВ-07, ДРВ-08).
     let drag = null;
     svg.addEventListener('pointerdown', e => {
-      drag = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y};
-      svg.classList.add('drag'); svg.setPointerCapture(e.pointerId);
+      drag = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, id: e.pointerId, moving: false};
     });
     svg.addEventListener('pointermove', e => {
       if (!drag) return;
-      view.x = drag.vx + (e.clientX - drag.x);
-      view.y = drag.vy + (e.clientY - drag.y);
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.moving) {
+        if (Math.abs(dx) + Math.abs(dy) < 5) return;      // пока это клик, а не перетаскивание
+        drag.moving = true;
+        svg.classList.add('drag'); svg.setPointerCapture(drag.id);
+      }
+      view.x = drag.vx + dx;
+      view.y = drag.vy + dy;
       apply();
     });
     svg.addEventListener('pointerup', () => { drag = null; svg.classList.remove('drag'); });

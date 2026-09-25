@@ -104,6 +104,27 @@ class Vault(DataCase):
         backlog = self.jread("projects.json")["projects"]["alpha-api"]["backlog"]
         self.assertEqual([(b["id"], b["status"]) for b in backlog], [("AL-01", "done"), ("AL-02", "done")])
 
+    def test_user_notes_are_never_changed(self):                        # ОБС-08
+        def snapshot():
+            out = {}
+            for d, _, files in os.walk(self.vault):
+                for f in files:
+                    p = os.path.join(d, f)
+                    rel = os.path.relpath(p, self.vault).replace("\\", "/")
+                    if not rel.startswith("TaskTreker/"):
+                        with open(p, "rb") as fh:
+                            out[rel] = fh.read()
+            return out
+        before = snapshot()
+        self.pull()
+        self.quiet(self.t.tree.build)
+        self.push()
+        self.pull()
+        self.assertEqual(snapshot(), before)
+        self.assertTrue(os.listdir(os.path.join(self.vault, "TaskTreker")))
+        with self.assertRaises(ValueError):
+            self.t.obsidian.write_note(os.path.join(self.vault, "Личное", "x.md"), {}, "текст", [])
+
     def test_dry_run_changes_nothing(self):
         out = self.pull("--dry-run")
         self.assertIn("Пробный прогон", out)

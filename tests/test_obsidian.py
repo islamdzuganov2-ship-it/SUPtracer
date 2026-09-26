@@ -142,6 +142,30 @@ class Vault(DataCase):
         self.assertIn("alpha-api/AL-01: queued -> done", out)
         self.assertIn("- [x] **AL-01**", self.read(self.PAGE))
 
+    def test_system_side_status_change_is_not_rolled_back(self):        # ОБС-05
+        # Страница выгружена с AL-01 «в работе»; потом задачу закрыли в системе.
+        # Отметку «[/]» на странице записала система — это не ввод человека.
+        def wip(d):
+            d["projects"]["alpha-api"]["backlog"][0]["status"] = "in-progress"
+        self.projects(wip)
+        self.push()
+        self.assertIn("- [/] **AL-01**", self.read(self.PAGE))
+        def done(d):
+            d["projects"]["alpha-api"]["backlog"][0]["status"] = "done"
+        self.projects(done)
+        out = self.push() + self.pull()
+        self.assertNotIn("AL-01: done ->", out)
+        status = {b["id"]: b["status"] for b in self.jread("projects.json")["projects"]["alpha-api"]["backlog"]}
+        self.assertEqual(status["AL-01"], "done")
+        self.assertIn("- [x] **AL-01**", self.read(self.PAGE))
+
+    def test_tick_cannot_reopen_a_closed_task(self):                    # ОБС-05
+        self.push()
+        self.edit_page(lambda t: t.replace("- [x] **AL-02**", "- [/] **AL-02**"))
+        self.pull()
+        status = {b["id"]: b["status"] for b in self.jread("projects.json")["projects"]["alpha-api"]["backlog"]}
+        self.assertEqual(status["AL-02"], "done")
+
     def test_repeated_push_makes_no_copies(self):                       # ОБС-07
         self.push()
         self.push()

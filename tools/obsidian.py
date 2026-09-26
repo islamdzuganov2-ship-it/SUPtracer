@@ -255,7 +255,13 @@ def cmd_pull(args):
 
 
 def sync_task_status(c, dry=False):
-    """Галочки в выложенных страницах проектов -> статус задач в projects.json."""
+    """Галочки в выложенных страницах проектов -> статус задач в projects.json (ОБС-05).
+
+    Переносится только то, что изменил человек: отметка, которую система сама записала
+    при выгрузке (pushed_marks в vault_state.json), вводом не считается. Иначе статус,
+    поменянный в системе после выгрузки, откатывался бы к устаревшей отметке на странице —
+    так закрытая задача однажды вернулась в работу. И галочка двигает задачу только
+    вперёд: закрытую задачу отметкой в хранилище не переоткрыть."""
     changes = []
     exp = export_root(c)
     pdir = os.path.join(exp, "Проекты")
@@ -267,6 +273,7 @@ def sync_task_status(c, dry=False):
     with open(pf, encoding="utf-8") as f:
         data = json.load(f)
     projects = data.get("projects", {})
+    pushed = jload(STATE, {}).get("pushed_marks", {})
     touched = False
     for fn in sorted(os.listdir(pdir)):
         if not fn.endswith(".md"):
@@ -280,13 +287,22 @@ def sync_task_status(c, dry=False):
         key = str(fm.get("project_key") or "")
         if key not in projects:
             continue
+        written = pushed.get(os.path.relpath(os.path.join(pdir, fn), vault_path(c)).replace("\\", "/"), {})
         marks = {}
         for t in md.tasks(body):
-            m = re.match(r"^\*{0,2}([A-ZА-Я]{1,6}-\d+)\*{0,2}\s*[—:-]?\s*", t["text"])
-            if m:
-                marks[m.group(1)] = "done" if t["done"] else ("in-progress" if t["wip"] else None)
+            m = re.match(r"^\*\*(.+?)\*\*\s*[—:-]", t["text"]) or \
+                re.match(r"^\*{0,2}([A-ZА-Я]{1,6}-\d+)\*{0,2}\s*[—:-]?\s*", t["text"])
+            if not m:
+                continue
+            tid = m.group(1).strip()
+            mark = "x" if t["done"] else ("/" if t["wip"] else " ")
+            if written.get(tid) == mark:
+                continue                  # отметку поставила система, человек её не трогал
+            marks[tid] = "done" if mark == "x" else ("in-progress" if mark == "/" else None)
         for b in projects[key].get("backlog", []):
             want = marks.get(b.get("id"))
+            if b.get("status") == "done" and want != "done":
+                continue                  # галочка двигает только вперёд
             if want and b.get("status") != want:
                 changes.append("%s/%s: %s -> %s" % (key, b["id"], b.get("status", "—"), want))
                 if not dry:
@@ -417,10 +433,12 @@ def cmd_push(args):
 
     # --- страницы проектов
     names = {k: safe_name(P[k].get("name") or k) for k in P}
+    marks_ledger = state.setdefault("pushed_marks", {})     # ОБС-05: какие отметки записала система
     for k, p in P.items():
         u, e, r = usage_for(k), E.get(k, {}), R.get(k, {})
         rd = p.get("readiness") or {}
         g = (r.get("git") or {})
+        page_marks = {}
         recs = [x for x in idx.get("records", []) if x["project"] == k and x["status"] == "активна"]
         fm = {
             "project_key": k, "title": p.get("name", k),
@@ -452,6 +470,7 @@ def cmd_push(args):
                      "Отметка галочкой здесь переносится в систему при `pm.py vault pull`.", ""]
             for b in items:
                 mark = "x" if b.get("status") == "done" else ("/" if b.get("status") == "in-progress" else " ")
+                page_marks[str(b.get("id"))] = mark
                 extra = []
                 if b.get("est_usd"):
                     extra.append("$%s" % round(b["est_usd"]))
@@ -488,7 +507,10 @@ def cmd_push(args):
             if len(roots) > PAGE_ROOTS:
                 body.append("- … ещё %d — [[Дерево работ]]" % (len(roots) - PAGE_ROOTS))
         body += ["", "---", "", "Собрано %s · `py tools/pm.py vault push`" % mem.today()]
-        write_note(os.path.join(exp, "Проекты", names[k] + ".md"), fm, "\n".join(body), written, dry, ledger, copies)
+        page = os.path.join(exp, "Проекты", names[k] + ".md")
+        write_note(page, fm, "\n".join(body), written, dry, ledger, copies)
+        if not dry:
+            marks_ledger[os.path.relpath(page, root).replace("\\", "/")] = page_marks
 
     # --- записи памяти. Пришедшие из хранилища не выгружаются: их оригинал уже там,
     # копия раздвоила бы заметки и граф. Выгружается то, чего в хранилище нет, —

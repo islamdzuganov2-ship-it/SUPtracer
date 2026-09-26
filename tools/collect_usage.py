@@ -43,6 +43,34 @@ def project_key_from_cwd(cwd):
     return os.path.basename(p.rstrip("/"))
 
 
+def usage_overrides():
+    """Каталоги, расход сессий в которых принадлежит проекту, хотя каталог называется
+    иначе: клон репозитория под заказчика, рабочая копия с другим именем. Задаются
+    полем usage_paths проекта в projects.json. -> [(путь в нижнем регистре, ключ)],
+    длинные пути первыми: вложенный каталог точнее родительского."""
+    try:
+        with open(os.path.join(DATA, "projects.json"), encoding="utf-8") as f:
+            projects = json.load(f).get("projects", {})
+    except (OSError, ValueError):
+        return []
+    out = []
+    for key, p in projects.items():
+        for path in p.get("usage_paths") or []:
+            norm = str(path).replace("\\", "/").rstrip("/").lower()
+            if norm:
+                out.append((norm, key))
+    return sorted(out, key=lambda x: -len(x[0]))
+
+
+def project_key(cwd, overrides=()):
+    """Ключ проекта для сессии: сначала явные usage_paths, потом правило по пути."""
+    p = (cwd or "").replace("\\", "/").lower()
+    for prefix, key in overrides:
+        if p == prefix or p.startswith(prefix + "/"):
+            return key
+    return project_key_from_cwd(cwd)
+
+
 def slug_to_key(slug):
     s = slug.lower()
     s = re.sub(r"--claude-worktrees-.*$", "", s)
@@ -80,6 +108,7 @@ def main():
     beats = defaultdict(list)
     days = defaultdict(set)
     files_scanned = rows_total = rows_used = 0
+    overrides = usage_overrides()
 
     for slug in sorted(os.listdir(SESSIONS_DIR)):
         sdir = os.path.join(SESSIONS_DIR, slug)
@@ -110,7 +139,7 @@ def main():
                     seen.add(rid)
                     rows_used += 1
 
-                    key = project_key_from_cwd(d.get("cwd", "")) or slug_to_key(slug)
+                    key = project_key(d.get("cwd", ""), overrides) or slug_to_key(slug)
                     model = msg.get("model") or "unknown"
                     ts = d.get("timestamp") or ""
                     month = ts[:7] if len(ts) >= 7 else "unknown"

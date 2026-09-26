@@ -43,6 +43,23 @@ class RefreshOne(DataCase):
         self.assertFalse([c for c in calls if c[0] == "collect_repos.py"])
 
 
+class UsagePaths(DataCase):
+    """Расход сессии в каталоге с другим именем относится к проекту по usage_paths."""
+
+    def test_clone_directory_counts_for_its_project(self):
+        import collect_usage
+        cu = importlib.reload(collect_usage)
+        def m(d):
+            d["projects"]["alpha-api"]["usage_paths"] = ["C:/Work/Alpha for Client", "C:/Work/Alpha for Client/sub"]
+            d["projects"]["beta-tool"]["usage_paths"] = ["C:/Work/Alpha for Client/sub/beta"]
+        self.projects(m)
+        ov = cu.usage_overrides()
+        self.assertEqual(cu.project_key("C:\\Work\\Alpha for Client\\.claude\\worktrees\\x", ov), "alpha-api")
+        self.assertEqual(cu.project_key("C:/work/alpha for client/sub/beta/src", ov), "beta-tool")   # длинный путь точнее
+        self.assertEqual(cu.project_key("C:/Work/Alpha for Clients", ov), "alpha for clients")     # только целый каталог
+        self.assertEqual(cu.project_key("C:/Users/x/projects/cellwatch/app", ov), "cellwatch")     # остальное как раньше
+
+
 class Freshness(DataCase):
     def test_layers_and_oldest_repo(self):                              # ОБН-05
         import build_dashboard

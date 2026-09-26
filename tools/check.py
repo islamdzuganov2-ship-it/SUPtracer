@@ -131,7 +131,8 @@ def t_usage_mapping():
     U = load("usage.json")["projects"]
     mapped = {usage_key(P, U, k) for k in P}
     orphan = [k for k in U if k not in mapped]
-    return ["расход проекта %s ($%.0f) ни к чему не привязан — добавь проект в projects.json "
+    return ["расход проекта %s ($%.0f) ни к чему не привязан — добавь проект в projects.json, "
+            "допиши каталог в usage_paths проекта, к которому относится работа, "
             "или поправь project_key_from_cwd в collect_usage.py" % (k, U[k]["usd"]) for k in orphan]
 
 

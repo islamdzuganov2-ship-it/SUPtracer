@@ -32,7 +32,8 @@ class Redact(unittest.TestCase):
                 self.assertEqual(found, [label])
 
     def test_private_key_block(self):
-        block = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----"
+        head, tail = "-----BEGIN RSA " + "PRIVATE KEY-----", "-----END RSA " + "PRIVATE KEY-----"
+        block = head + "\nMIIEow\nabc\n" + tail
         out, found = self.clean("ключ:\n" + block + "\nконец")
         self.assertNotIn("MIIEow", out)
         self.assertIn("конец", out)

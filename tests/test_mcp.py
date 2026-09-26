@@ -202,6 +202,24 @@ class Modern(McpCase):
         self.assertEqual(r["resultType"], "complete")
         self.assertIn("beta-tool", self.text(r))
 
+    def test_cacheable_results_carry_hints(self):                       # ИНТ-06
+        # Ревизия 2026-07-28: без ttlMs и cacheScope клиент отвергает tools/list целиком —
+        # сервер подключён, а инструментов в сессии нет. Так и было на живом клиенте.
+        for method in ("server/discover", "tools/list"):
+            with self.subTest(method=method):
+                r = self.request(method, modern=True)["result"]
+                self.assertIsInstance(r["ttlMs"], int)
+                self.assertGreaterEqual(r["ttlMs"], 0)
+                self.assertIn(r["cacheScope"], ("public", "private"))
+        call = self.call("tt_projects", modern=True)
+        self.assertNotIn("ttlMs", call)                                 # вызов инструмента не кешируется
+
+    def test_legacy_results_have_no_modern_fields(self):
+        self.handshake()
+        r = self.request("tools/list")["result"]
+        for field in ("resultType", "ttlMs", "cacheScope"):
+            self.assertNotIn(field, r)
+
     def test_unsupported_version(self):
         r = self.request("tools/list", {"_meta": {"io.modelcontextprotocol/protocolVersion": "1900-01-01"}},
                          modern=True)

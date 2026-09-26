@@ -37,11 +37,17 @@ import memory as mem
 import mdparse as md
 import tree
 
-SERVER_INFO = {"name": "tasktreker", "title": "TaskTreker", "version": "1.0.0"}
+SERVER_INFO = {"name": "tasktreker", "title": "TaskTreker", "version": "1.0.1"}
 MODERN_VERSIONS = ["2026-07-28"]
 LEGACY_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 SUPPORTED = MODERN_VERSIONS + LEGACY_VERSIONS
 META = "io.modelcontextprotocol/"
+
+# Кешируемые результаты современной ревизии (utilities/caching): server/discover и
+# tools/list обязаны нести ttlMs и cacheScope. Без них клиент отвергает ответ целиком —
+# сервер подключался, а инструменты в сессии так и не появлялись. Список инструментов
+# одинаков для всех и пользовательских данных не содержит, поэтому "public".
+CACHE_HINTS = {"ttlMs": 300000, "cacheScope": "public"}
 
 # ИНТ-05: протокол работы передаётся клиенту самим сервером — так он действует
 # в любом проекте, а не только там, где лежит CLAUDE.md системы.
@@ -380,12 +386,12 @@ class Server:
             if method == "server/discover":
                 self.era(params)         # проверит версию, если клиент её прислал
                 return _result(rid, {"supportedVersions": SUPPORTED, "capabilities": self.capabilities(),
-                                     "instructions": INSTRUCTIONS}, modern=True)
+                                     "instructions": INSTRUCTIONS}, modern=True, cacheable=True)
             modern, _ = self.era(params)
             if method == "ping":
                 return _result(rid, {}, modern)
             if method == "tools/list":
-                return _result(rid, {"tools": TOOLS}, modern)
+                return _result(rid, {"tools": TOOLS}, modern, cacheable=True)
             if method == "tools/call":
                 name = params.get("name")
                 if name not in TOOL_NAMES:
@@ -406,9 +412,11 @@ class Server:
                 "serverInfo": SERVER_INFO, "instructions": INSTRUCTIONS}
 
 
-def _result(rid, result, modern):
+def _result(rid, result, modern, cacheable=False):
     if modern:
         result = dict(result, resultType="complete")
+        if cacheable:
+            result.update(CACHE_HINTS)
         result["_meta"] = dict(result.get("_meta") or {}, **{META + "serverInfo": SERVER_INFO})
     return {"jsonrpc": "2.0", "id": rid, "result": result}
 

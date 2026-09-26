@@ -289,7 +289,8 @@ keys.forEach(k => {
   }
   (p.security?.open_critical || []).forEach(s =>
     alerts.push(['crit', `<b>${esc(p.name)}</b> — ${esc(s.split('—')[0].trim())}: ${esc(s.split('—').slice(1).join('—').trim())}`]));
-  (r.secrets_suspect || []).filter(s => !s.file.includes('.claude/worktrees')).forEach(s =>
+  const reviewed = new Set((p.security?.reviewed_suspects || []).map(x => x.file + '|' + x.digest));
+  (r.secrets_suspect || []).filter(s => !s.file.includes('.claude/worktrees') && !reviewed.has(s.file + '|' + s.digest)).forEach(s =>
     alerts.push(['warn', `<b>${esc(p.name)}</b> — возможный секрет в коде: <span class="mono">${esc(s.file)}</span> (${esc(s.kind)})`]));
   (r.weird_paths || []).forEach(w =>
     alerts.push(['warn', `<b>${esc(p.name)}</b> — мусорный файл с зарезервированным именем Windows: <span class="mono">${esc(w)}</span>`]));

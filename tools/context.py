@@ -25,6 +25,7 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import collect_repos
 import mdparse as md
 import memory as mem
 
@@ -138,7 +139,7 @@ def project_alerts(k, P, R):
         out.append("%s: %d незакоммиченных файлов" % (k, g["dirty_files"]))
     if r.get("exists") and not g:
         out.append("%s: нет git — история работы не сохраняется" % k)
-    susp = [s for s in (r.get("secrets_suspect") or []) if ".claude/worktrees" not in str(s)]
+    susp = collect_repos.active_suspects(r, P[k])
     if susp:
         out.append("%s: подозрение на секреты в %d местах — проверить глазами" % (k, len(susp)))
     crit = sec.get("open_critical") or []

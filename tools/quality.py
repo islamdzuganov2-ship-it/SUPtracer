@@ -13,6 +13,9 @@ import os
 import sys
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import collect_repos  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
@@ -118,7 +121,7 @@ def spec_quality(r):
     return {"score": combine(comps), "components": comps}
 
 
-def engineering_quality(r):
+def engineering_quality(r, project=None):
     """Качество проработки: то, что отличает продукт от наброска."""
     c = r.get("code") or {}
     h = r.get("hygiene") or {}
@@ -169,7 +172,7 @@ def engineering_quality(r):
         1.0, "нечего коммитить" if dirty == 0 else "%s незакоммиченных файлов" % dirty))
 
     # Подозрение на секреты в коде — прямой риск.
-    sec = [s for s in (r.get("secrets_suspect") or []) if ".claude/worktrees" not in s.get("file", "")]
+    sec = collect_repos.active_suspects(r, project)       # проверенное глазами не штрафуется
     comps.append(component(
         "Секреты в коде", len(sec),
         1.0 if not sec else clamp(1.0 - len(sec) / 3.0),
@@ -378,7 +381,7 @@ def main():
             }
         out["projects"][key] = {
             "spec": spec_quality(r),
-            "engineering": engineering_quality(r),
+            "engineering": engineering_quality(r, P[key]),
             "economics": econ,
         }
 

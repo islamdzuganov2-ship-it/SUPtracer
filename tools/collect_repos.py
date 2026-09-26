@@ -4,6 +4,7 @@
 Читает список проектов из data/projects.json (поле path) и снимает факты прямо
 с диска. Ничего не выдумывает: чего нет — того нет. -> data/repos.json
 """
+import hashlib
 import json
 import os
 import re
@@ -37,8 +38,30 @@ SECRET_PATTERNS = [
     ("ключ Anthropic", r"sk-ant-[A-Za-z0-9\-_]{20,}"),
     ("ключ OpenAI", r"sk-[A-Za-z0-9]{32,}"),
     ("токен Telegram", r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),
-    ("секрет в коде", r"(?i)(password|passwd|secret|api[_-]?key)\s*[:=]\s*[\x22\x27][^\x22\x27{$\s]{8,}[\x22\x27]"),
+    ("секрет в коде", r"(?i)(password|passwd|secret|api[_-]?key)\s*[:=]\s*[\x22\x27]([^\x22\x27{$\s]{8,})[\x22\x27]"),
 ]
+# Значение вида BYBIT_API_SECRET — имя переменной окружения, откуда секрет читают,
+# а не сам секрет. Такие совпадения поднимали тревогу в брифинге при каждом обновлении.
+ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{2,}")
+
+
+def secret_hit(label, rx, text):
+    """Есть ли в тексте совпадение, похожее на настоящий секрет."""
+    if label != "секрет в коде":
+        return bool(rx.search(text))
+    return any(not ENV_NAME.fullmatch(m.group(2)) for m in rx.finditer(text))
+
+
+def active_suspects(repo, project):
+    """Подозрения на секреты, которые ещё ждут человека: без временных рабочих деревьев
+    и без проверенных глазами (security.reviewed_suspects в projects.json — файл,
+    отпечаток и вердикт). Вердикт действует, пока отпечаток файла тот же: изменился
+    файл — подозрение возвращается."""
+    reviewed = {(str(x.get("file")), str(x.get("digest")))
+                for x in ((project or {}).get("security") or {}).get("reviewed_suspects") or []}
+    return [s for s in ((repo or {}).get("secrets_suspect") or [])
+            if ".claude/worktrees" not in str(s.get("file", ""))
+            and (str(s.get("file")), str(s.get("digest"))) not in reviewed]
 SECRET_RX = [(label, re.compile(rx)) for label, rx in SECRET_PATTERNS]
 SECRET_SCAN_EXT = {".py", ".ts", ".tsx", ".js", ".kt", ".java", ".cs", ".go",
                    ".yml", ".yaml", ".json", ".env", ".ini", ".cfg", ".toml",
@@ -206,8 +229,11 @@ def scan_repo(key, meta):
                 open_questions += len(OPEN_QUESTION.findall(txt))
             if ext in SECRET_SCAN_EXT:
                 for label, rx in SECRET_RX:
-                    if rx.search(txt):
-                        secrets.append({"file": rel, "kind": label})
+                    if secret_hit(label, rx, txt):
+                        # Отпечаток файла: по нему вердикт «проверено глазами» действует,
+                        # пока файл не изменился (active_suspects).
+                        secrets.append({"file": rel, "kind": label,
+                                        "digest": hashlib.sha256(txt.encode("utf-8", "ignore")).hexdigest()[:16]})
                         break
 
     res["code"] = {

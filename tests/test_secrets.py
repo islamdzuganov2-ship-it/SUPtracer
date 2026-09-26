@@ -75,6 +75,63 @@ class Redact(unittest.TestCase):
         self.assertEqual(found, [])
 
 
+class RepoScanner(unittest.TestCase):
+    """Сканер репозиториев: тревога «секрет в коде» только на похожее на секрет."""
+
+    def hit(self, text):
+        import collect_repos as cr
+        label, rx = next((l, r) for l, r in cr.SECRET_RX if l == "секрет в коде")
+        return cr.secret_hit(label, rx, text)
+
+    def test_env_variable_name_is_not_a_secret(self):
+        # Строки собраны из частей: иначе сам этот файл выглядел бы для сканера как утечка.
+        self.assertFalse(self.hit("ENV_" + "SECRET = " + '"' + "BYBIT_API_" + "SECRET" + '"'))
+
+    def test_literal_value_is_flagged(self):
+        self.assertTrue(self.hit("SUPERADMIN_" + "PASSWORD = " + '"' + "Qw3rty!" + "2026x" + '"'))
+
+    def test_one_real_value_among_names_is_flagged(self):
+        text = ("api_" + "key = 'OPENAI_API_KEY'\n" + "pass" + "word = " + '"' + "hunter2" + "hunter2" + '"')
+        self.assertTrue(self.hit(text))
+
+
+class ReviewedSuspects(DataCase):
+    """Вердикт «проверено глазами» помнится, пока файл не изменился."""
+
+    def setUp(self):
+        super().setUp()
+        import collect_repos
+        self.cr = collect_repos
+        self.P = self.projects()["projects"]
+        self.repo = self.P["alpha-api"]["path"]
+        self.write("fake = 1\n")
+
+    def write(self, extra):
+        with open(os.path.join(self.repo, "creds.py"), "w", encoding="utf-8") as f:
+            f.write("pass" + "word = " + '"' + "not-a-real-" + "one-123" + '"\n' + extra)
+
+    def scan(self):
+        return self.cr.scan_repo("alpha-api", self.P["alpha-api"])
+
+    def test_suspect_carries_digest(self):
+        [s] = self.scan()["secrets_suspect"]
+        self.assertEqual((s["file"], s["kind"]), ("creds.py", "секрет в коде"))
+        self.assertRegex(s["digest"], r"^[0-9a-f]{16}$")
+
+    def test_reviewed_suspect_is_quiet_until_file_changes(self):
+        r = self.scan()
+        [s] = r["secrets_suspect"]
+        project = dict(self.P["alpha-api"], security={"reviewed_suspects": [
+            {"file": s["file"], "digest": s["digest"], "verdict": "поддельное значение в тесте"}]})
+        self.assertEqual(self.cr.active_suspects(r, project), [])
+        self.write("fake = 2\n")                                         # файл изменился — снова под подозрением
+        self.assertEqual(len(self.cr.active_suspects(self.scan(), project)), 1)
+
+    def test_worktree_copies_are_ignored(self):
+        r = {"secrets_suspect": [{"file": ".claude/worktrees/x/creds.py", "kind": "секрет в коде", "digest": "1"}]}
+        self.assertEqual(self.cr.active_suspects(r, {}), [])
+
+
 class IngestRedacts(DataCase):
     def test_nothing_secret_reaches_memory_or_inbox(self):              # БЕЗ-05
         self.projects()

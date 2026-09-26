@@ -339,7 +339,8 @@ py tools/pm.py vault init "C:/путь/к/хранилищу"
 
 - **Ежедневно 09:00** — задача планировщика Windows `TaskTreker\Обновление портфеля`
   запускает `ops/refresh.cmd` → `pm.py refresh`. Обновляет **только генерируемые** файлы.
-  Лог: `ops/logs/refresh.log`.
+  Лог: `ops/logs/refresh.log`. Пропущенный запуск (компьютер выключен или спал)
+  выполняется, когда компьютер проснётся: у задачи включено `StartWhenAvailable`.
 - **Понедельник 10:00** — запланированная задача Клода `tasktreker-weekly-review`
   (`~/.claude/scheduled-tasks/tasktreker-weekly-review/SKILL.md`): разбор комментариев,
   сверка записанного с фактами, отчёт. Она выполняет ровно этот регламент.

@@ -276,6 +276,13 @@ git checkout тестирование && git merge --no-ff разработка 
 schtasks /Create /TN "TaskTreker\Обновление портфеля" /TR "%CD%\ops\refresh.cmd" /SC DAILY /ST 09:00 /RL LIMITED
 ```
 
+И чтобы пропущенный запуск (компьютер был выключен или спал в 09:00) выполнился, когда
+компьютер проснётся, — в PowerShell:
+
+```powershell
+$t = Get-ScheduledTask -TaskPath '\TaskTreker\' -TaskName 'Обновление портфеля'; $t.Settings.StartWhenAvailable = $true; Set-ScheduledTask -InputObject $t
+```
+
 ## Что где лежит
 
 ```

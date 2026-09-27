@@ -238,8 +238,10 @@ def portfolio_signals(P, R, U, E, usage_of):
         "его надо либо возобновить, либо закрыть. Третьего состояния не бывает.")
 
     # --- 4. Работа в одном экземпляре ----------------------------------------
+    # Считается код: проект из одних заметок живёт историей хранилища Obsidian, не git.
     nogit = [P[k]["name"] for k in own
-             if (R.get(k) or {}).get("exists") and not (R.get(k) or {}).get("git")]
+             if (R.get(k) or {}).get("exists") and not (R.get(k) or {}).get("git")
+             and (((R.get(k) or {}).get("code") or {}).get("loc_total") or 0) > 0]
     noremote = [P[k]["name"] for k in own
                 if ((R.get(k) or {}).get("git") or {}).get("commits")
                 and not ((R.get(k) or {}).get("git") or {}).get("remote")]

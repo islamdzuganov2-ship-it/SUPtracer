@@ -73,6 +73,15 @@ class Brief(DataCase):
         full = self.t.context.build(budget=4000)
         self.assertIn("пароль лежит в конфиге", full)
 
+    def test_no_git_alert_only_for_code(self):
+        # Проект из одних заметок живёт историей хранилища — тревога «нет git» для кода.
+        self.jwrite("repos.json", {"repos": {
+            "alpha-api": {"exists": True, "git": None, "code": {"loc_total": 1200}},
+            "beta-tool": {"exists": True, "git": None, "code": {"loc_total": 0}}}})
+        out = self.t.context.build(budget=4000)
+        self.assertIn("alpha-api: нет git", out)
+        self.assertNotIn("beta-tool: нет git", out)
+
     def test_no_invented_saving_on_empty_data(self):                   # ПАМ-11
         import shutil
         shutil.rmtree(self.data)

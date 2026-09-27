@@ -137,7 +137,9 @@ def project_alerts(k, P, R):
         out.append("%s: каталога проекта нет на диске" % k)
     if g.get("dirty_files"):
         out.append("%s: %d незакоммиченных файлов" % (k, g["dirty_files"]))
-    if r.get("exists") and not g:
+    # Без git тревожно там, где есть код. Проект из одних заметок в хранилище Obsidian
+    # живёт историей хранилища, а не git — как и на дашборде.
+    if r.get("exists") and not g and ((r.get("code") or {}).get("loc_total") or 0) > 0:
         out.append("%s: нет git — история работы не сохраняется" % k)
     susp = collect_repos.active_suspects(r, P[k])
     if susp:

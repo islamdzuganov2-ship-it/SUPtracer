@@ -260,56 +260,19 @@ select.sel{background:var(--panel);border:1px solid var(--line);color:var(--ink2
   border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px;margin-right:6px}
 @keyframes sp{to{transform:rotate(360deg)}}
 
-/* ---------- дерево роста ---------- */
-.treebox{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
-  overflow:hidden;position:relative}
-.ttools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 13px;
-  border-bottom:1px solid var(--line2);background:var(--panel2)}
-.ttools .grow{flex:1;min-width:20px}
-.ttools input[type="search"]{background:var(--panel);border:1px solid var(--line);color:var(--ink);
-  border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit;min-width:150px}
-.ttools input[type="range"]{width:190px;accent-color:var(--accent)}
-.ttools label{font-size:12px;color:var(--ink3);display:flex;align-items:center;gap:6px;white-space:nowrap}
-.tstage{position:relative;height:620px;overflow:hidden;background:
-  radial-gradient(circle at 12% 50%, rgba(47,109,246,.05), transparent 62%)}
-.tstage svg{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
-.tstage svg.drag{cursor:grabbing}
-.tt-link{fill:none;stroke-linecap:round;opacity:.75;transition:opacity .35s}
-.tt-n{cursor:pointer}
-.tt-n text{font-size:12px;fill:var(--ink);dominant-baseline:middle;paint-order:stroke;
-  stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}
-.tt-n .dot{transition:r .2s,opacity .35s}
-.tt-n:hover text{fill:var(--accent)}
-.tt-n.dim{opacity:.22}
-.tt-n.hit text{font-weight:700}
-.tt-n .kid{font-size:9.5px;fill:var(--panel);stroke:none;font-weight:700;text-anchor:middle}
-.tt-fade{opacity:0}
-.ttip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);
-  border-radius:9px;padding:9px 11px;font-size:12.5px;max-width:330px;box-shadow:0 6px 22px rgba(16,24,40,.18);
-  opacity:0;transition:opacity .12s;z-index:5;line-height:1.45}
-.ttip b{font-weight:650}
-.ttip .k{color:var(--ink3);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
-.tlegend2{display:flex;gap:13px;flex-wrap:wrap;padding:9px 13px;border-top:1px solid var(--line2);
-  font-size:11.5px;color:var(--ink2);background:var(--panel2)}
-.tlegend2 span{display:flex;align-items:center;gap:5px}
-.tlegend2 i{width:9px;height:9px;border-radius:50%;display:inline-block}
-.tstat{position:absolute;right:11px;top:11px;background:var(--panel);border:1px solid var(--line);
-  border-radius:9px;padding:7px 11px;font-size:11.5px;color:var(--ink2);box-shadow:var(--shadow);
-  font-variant-numeric:tabular-nums}
+/* ---------- древо: сцену на весь экран рисует tree.js со своими стилями ---------- */
 .memgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
 .memcard{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 14px;
   box-shadow:var(--shadow)}
 .memcard .t{font-size:13px;font-weight:600;margin-bottom:3px}
 .memcard .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
 .memcard .m{font-size:11px;color:var(--ink3);margin-top:6px;font-family:var(--mono)}
-.tnote{padding:9px 13px;border-top:1px solid var(--line2);font-size:12px;color:var(--ink3)}
+.tnote{padding:14px 16px;border:1px dashed var(--line);border-radius:12px;font-size:13px;color:var(--ink3)}
 @media(max-width:720px){
   .wrap{padding:16px 16px 60px}
   table.pf{display:block;overflow-x:auto}
   h1{font-size:21px}
   .grid-viz{grid-template-columns:1fr}
-  .tstage{height:440px}
-  .ttools input[type="range"]{width:120px}
 }
 """
 

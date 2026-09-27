@@ -616,21 +616,27 @@ function showTab(which) {
     document.getElementById('page-' + p).hidden = (p !== cur);
     document.getElementById('tab-' + p).setAttribute('aria-selected', String(p === cur));
   });
-  // Дерево строится при первом показе: у скрытого блока нулевой размер,
-  // и вписать в него дерево нельзя.
+  // Древо — сцена на весь экран поверх дашборда: открывается вкладкой,
+  // закрывается кнопкой «← Дашборд» или Esc. Раскладка считается при первом открытии.
   if (cur === 'tree') {
-    TREEVIEW.ensure(document.getElementById('treeWrap'), TREE, {
-      esc, tok,
+    TREEVIEW.open(TREE, {
+      onClose: () => showTab('dash'),
       onProject: k => {
         if (!P[k]) return;
         showTab('proj');
         const d = document.getElementById('p-' + k);
         if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }
       },
+      onEmpty: () => {
+        document.getElementById('treeWrap').textContent =
+          'Дерево пустое: в data/tree.json нет узлов. Соберите его: py tools/pm.py tree';
+      },
     });
-  }
+  } else TREEVIEW.close();
   try { history.replaceState(null, '', '#' + cur); } catch (e) {}
 }
+// Тема — до первой вкладки: древо читает её при открытии.
+try { const s = localStorage.getItem('tt-theme'); if (s) document.documentElement.setAttribute('data-theme', s); } catch (e) {}
 PAGES.forEach(p => document.getElementById('tab-' + p).onclick = () => showTab(p));
 showTab((location.hash || '').replace('#', ''));
 
@@ -642,4 +648,3 @@ t.onclick = () => {
   document.documentElement.setAttribute('data-theme', next);
   try { localStorage.setItem('tt-theme', next); } catch (e) {}
 };
-try { const s = localStorage.getItem('tt-theme'); if (s) document.documentElement.setAttribute('data-theme', s); } catch (e) {}

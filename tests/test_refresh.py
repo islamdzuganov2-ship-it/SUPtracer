@@ -60,6 +60,23 @@ class UsagePaths(DataCase):
         self.assertEqual(cu.project_key("C:/Users/x/projects/cellwatch/app", ov), "cellwatch")     # остальное как раньше
 
 
+class StaleSignal(DataCase):
+    """Застой виден и у проектов без git — по последней правке файлов."""
+
+    def test_project_without_git_is_judged_by_files(self):
+        import quality
+        q = importlib.reload(quality)
+        P = self.projects()["projects"]
+        R = {"alpha-api": {"exists": True, "git": {"last_commit": "2020-01-01"}},
+             "beta-tool": {"exists": True, "git": None, "spec": {"newest_doc": "2020-02-01", "newest_code": ""}},
+             "gamma-voice": {"exists": True, "git": None, "spec": {}}}
+        sig = {s["key"]: s for s in q.portfolio_signals(P, R, {}, {}, lambda k: {})}["stale"]
+        self.assertEqual(sig["value"], "2")
+        self.assertIn("Утилита Бета", sig["what"])
+        self.assertIn("по файлам", sig["what"])
+        self.assertNotIn("Гамма", sig["what"])                          # дат нет — судить не по чему
+
+
 class Freshness(DataCase):
     def test_layers_and_oldest_repo(self):                              # ОБН-05
         import build_dashboard

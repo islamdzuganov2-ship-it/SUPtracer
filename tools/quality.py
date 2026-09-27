@@ -221,7 +221,12 @@ def portfolio_signals(P, R, U, E, usage_of):
     stale = []
     for k in own:
         g = (R.get(k) or {}).get("git") or {}
-        last = g.get("last_commit") or ""
+        last, how = g.get("last_commit") or "", ""
+        if not last:
+            # Без git — последняя правка файлов: проекты без истории коммитов иначе
+            # выпадали из проверки ровно там, где застой обычно сильнее всего.
+            s = (R.get(k) or {}).get("spec") or {}
+            last, how = max(s.get("newest_doc") or "", s.get("newest_code") or ""), " по файлам"
         if not last:
             continue
         try:
@@ -229,11 +234,11 @@ def portfolio_signals(P, R, U, E, usage_of):
         except ValueError:
             continue
         if d >= 21:
-            stale.append((P[k]["name"], d))
+            stale.append((P[k]["name"], d, how))
     stale.sort(key=lambda x: -x[1])
     add("stale", "Проекты без движения", str(len(stale)),
         "act" if len(stale) >= 4 else "watch" if stale else "ok",
-        "; ".join("%s — %d дн." % s for s in stale[:6]) or "все проекты двигались за последние три недели",
+        "; ".join("%s — %d дн.%s" % s for s in stale[:6]) or "все проекты двигались за последние три недели",
         "Проект без движения дольше месяца — это не пауза, а нерешённый вопрос: "
         "его надо либо возобновить, либо закрыть. Третьего состояния не бывает.")
 

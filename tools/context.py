@@ -266,7 +266,7 @@ def build(budget=4000, project=None, with_memory=True, focus=None, hook=False):
             put("  последний сбор фактов %s" % gen[:16].replace("T", " "))
     for c in _commands(hook):
         put(c)
-    put("Перед реализацией: tt_work queue → plan/next → packet; модель и бюджет из паспорта, finish только с проверками. CLI: pm.py work next.")
+    put("Перед реализацией: tt_work queue → plan/next → take (agent — свой ИИ); чужую метку claimed_by не трогать, heartbeat пока работаешь, finish только с проверками. CLI: pm.py work next --agent claude.")
     if any(u.get("cost_complete") is False for u in U.values()):
         put("Стоимость части расхода неизвестна: суммы в $ показывают только оценённую часть, не полную цену.")
     put("")

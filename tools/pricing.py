@@ -7,21 +7,25 @@
 и передвинуть CHECKED.
 
 Правила кеша: запись 5m = 1.25x input, запись 1h = 2x input, чтение = 0.1x input
-(для Fable 5.1 чтение = 0.025x -> $0.25/MTok).
+(для Fable 5.1 чтение = 0.025x -> $0.25/MTok, для Opus 5.5 — $0.20/MTok = 0.05x).
+Haiku 5.5: цена до 100K входа; длинный запрос ($0.50/$2.50) не различается.
 """
 
-CHECKED = "2026-09-21"   # дата последней сверки со skill claude-api
+CHECKED = "2026-10-19"   # дата последней сверки со skill claude-api
 STALE_DAYS = 60          # после скольких дней проверка начинает ругаться
 
 PRICES = {
     "claude-fable-5-1":  {"in": 10.0, "out": 50.0, "read_mult": 0.025},
     "claude-mythos-5-1": {"in": 10.0, "out": 50.0, "read_mult": 0.1},
     "claude-fable-5":    {"in": 10.0, "out": 50.0, "read_mult": 0.1},
+    "claude-opus-5-5":   {"in": 4.0,  "out": 20.0, "read_mult": 0.05},
     "claude-opus-5":     {"in": 5.0,  "out": 25.0, "read_mult": 0.1},
     "claude-opus-4-8":   {"in": 5.0,  "out": 25.0, "read_mult": 0.1},
     "claude-opus-4-7":   {"in": 5.0,  "out": 25.0, "read_mult": 0.1},
     "claude-opus-4-6":   {"in": 5.0,  "out": 25.0, "read_mult": 0.1},
+    "claude-sonnet-5-5": {"in": 2.0,  "out": 10.0, "read_mult": 0.1},
     "claude-sonnet-5":   {"in": 2.0,  "out": 10.0, "read_mult": 0.1},
+    "claude-haiku-5-5":  {"in": 0.1,  "out": 0.5,  "read_mult": 0.1},
     "claude-sonnet-4-6": {"in": 3.0,  "out": 15.0, "read_mult": 0.1},
     "claude-haiku-4-5":  {"in": 1.0,  "out": 5.0,  "read_mult": 0.1},
 }
@@ -68,7 +72,8 @@ def price_for(model: str):
         return PRICES[m]
     if m.startswith("<"):           # <synthetic> — локальные сообщения, не биллятся
         return {"in": 0.0, "out": 0.0, "read_mult": 0.0}
-    for k in PRICES:
+    # Самый длинный префикс: иначе claude-opus-5-5 получит цену claude-opus-5.
+    for k in sorted(PRICES, key=len, reverse=True):
         if m.startswith(k):
             return PRICES[k]
     return DEFAULT

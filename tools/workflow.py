@@ -6,15 +6,12 @@
 двум ИИ одновременно менять одни и те же файлы проекта.
 """
 import argparse
-import contextlib
-import copy
 import json
 import os
 from pathlib import Path
-import tempfile
-import time
 from datetime import date, datetime, timedelta, timezone
 import complexity as cx
+import taskstate as ts
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = 'https://developers.openai.com/api/docs/guides/model-selection'
@@ -49,7 +46,9 @@ STATUS_LABELS = {'queued': 'К выполнению', 'in_progress': 'В раб�
 MANUAL_STATUSES = ('queued', 'in_progress', 'review', 'blocked', 'cancelled')   # «Готово» — только с проверкой
 ASSESS_BUDGET = 4000         # оценка сложности короче исполнения
 LEASE_MINUTES = 45           # срок метки занятости без heartbeat
-LOCK_STALE_SECONDS = 120     # блокировка старше — след упавшего процесса
+LOCK_STALE_SECONDS = ts.LOCK_STALE_SECONDS
+PRIORITIES = ('🔴', '🟡', '🟢')
+RISKS = ('low', 'medium', 'high')
 WORK_TYPES = ('docs', 'test', 'implementation', 'architecture', 'research')
 DIRECTIONS = ('аналитика', 'разработка', 'дизайн', 'маркетинг', 'продажи', 'эксплуатация', 'другое')
 # Тип задачи определяет, какие входные данные нужны исполнителю. Поля типа
@@ -97,40 +96,16 @@ def now():
     return datetime.now(timezone.utc)
 
 def read(name, default):
-    path = data_dir() / name
-    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else copy.deepcopy(default)
+    return ts.read_json(str(data_dir()), name, default)
 
 def save(name, value):
-    folder = data_dir(); folder.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=folder, suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(value, f, ensure_ascii=False, indent=2)
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, folder / name)
-    finally:
-        if os.path.exists(tmp): os.unlink(tmp)
+    ts.save_json(str(data_dir()), name, value)
 
-@contextlib.contextmanager
 def locked():
-    folder = data_dir(); folder.mkdir(parents=True, exist_ok=True)
-    path = folder / '.workflow.lock'
-    for attempt in (1, 2):
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY); break
-        except FileExistsError:
-            # Упавший процесс оставляет файл навсегда; операция длится доли секунды.
-            try: stale = time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS
-            except FileNotFoundError: stale = True
-            if attempt == 2 or not stale:
-                raise ValueError('Другая операция уже меняет задачи; повторите позже')
-            with contextlib.suppress(FileNotFoundError): path.unlink()
-    try:
-        os.close(fd)
-        yield
-    finally: path.unlink()
+    return ts.locked(str(data_dir()))
 
 def state():
+    """Запуски и оперативное состояние задач (tasks: ref -> поля, см. taskstate.py)."""
     return read('workflow.json', dict(schema=1, focus=[], tasks={}, runs=[]))
 
 REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна доработка', 'spec_change': 'Принято с изменением ТЗ'}
@@ -270,8 +245,8 @@ def snapshot():
     conf = settings(s); at = now()
     for key, project in projects.items():
         for original in project.get('backlog', []):
-            t = dict(original); ref = key + '/' + t['id']
-            t.update(s['tasks'].get(ref, {})); t.update(project=key, ref=ref)
+            ref = key + '/' + original['id']
+            t = ts.merge_task(original, s['tasks'].get(ref)); t.update(project=key, ref=ref)
             if t.get('status') == 'in-progress': t['status'] = 'in_progress'   # прежнее написание из Obsidian
             t['complexity'] = cx.assess(t)
             try: t['route'] = recommendation(t, default=conf['default_executor'])
@@ -514,8 +489,8 @@ def validate_plan(project, tasks):
         if '/' in t['id'] or t['id'] in ids or t['id'] in existing: raise ValueError('Повтор или неверный id')
         ids.add(t['id'])
         if t.get('size') not in ('S','M','L'): raise ValueError('Размер S/M/L; XL сначала разбить')
-        if t.get('priority') not in ('🔴','🟡','🟢'): raise ValueError('Укажите приоритет 🔴/🟡/🟢')
-        if t.get('risk') not in ('low','medium','high'): raise ValueError('Укажите риск low/medium/high')
+        if t.get('priority') not in PRIORITIES: raise ValueError('Укажите приоритет 🔴/🟡/🟢')
+        if t.get('risk') not in RISKS: raise ValueError('Укажите риск low/medium/high')
         if t.get('work_type') not in WORK_TYPES: raise ValueError('Укажите вид работы')
         a=t.get('acceptance')
         if not isinstance(a,list) or not a or any(not isinstance(v,str) or not v.strip() for v in a): raise ValueError('Нужны критерии приёмки')
@@ -607,17 +582,14 @@ def split(project, agents, tasks, runs, at):
     return dict(assign=assign, load=load, groups=plan)
 
 def write_patches(s, patches):
-    """Явный ввод пользователя/исполнителя: канонический бэклог виден
-    старым потребителям (дерево, оценка, Obsidian), без импорта фактов."""
+    """Правки задач по слоям (TT-45): паспорт и итог — в ручной projects.json, ход
+    исполнения — в слой tasks этого же workflow.json. Дерево, оценка и Obsidian читают
+    оба слоя через taskstate.apply. Ручной файл переписывается, только если правка его
+    касается, и раньше workflow.json: при сбое между записями ручной статус новее базы
+    слоя и побеждает — задача не покажется незакрытой после записанного итога."""
     if not patches: return
     d=read('projects.json',{})
-    for ref,patch in patches.items():
-        key,tid=ref.split('/',1)
-        original=next(v for v in d['projects'][key]['backlog'] if v['id']==tid)
-        original.update(patch)
-        for k in [k for k,v in original.items() if v is None]: original.pop(k)
-        s['tasks'].pop(ref,None)
-    save('projects.json',d)
+    if ts.commit(d, s.setdefault('tasks',{}), patches): save('projects.json',d)
 
 def start_run(s, t, run, req, at):
     """Общее для claim и take: проверка ИИ, модели, областей; метка занятости."""
@@ -766,6 +738,72 @@ def record_spec_change(t, spec, review_record, at):
     project.setdefault('backlog',[]).append(task); save('projects.json', d)
     return task['id'], rec['id']
 
+def is_text(limit):
+    return lambda v, t: isinstance(v, str) and bool(v.strip()) and len(v) <= limit
+
+def is_criteria(v, t):
+    return isinstance(v, list) and bool(v) and all(isinstance(x, str) and x.strip() for x in v)
+
+def root_of_project(v, t):
+    return any(r.get('id') == v and r.get('project') == t['project'] for r in read('memory/index.json', {}).get('records', []))
+
+# I4: что можно менять op=update и как проверяется значение — по строке на поле:
+# поле -> (проверка значения (value, задача) -> bool, сообщение). Проверка может и сама
+# бросить ValueError со своим текстом. None — поле проверяется вместе со всей задачей
+# (validate_details, recommendation, model_plan): его допустимость зависит от других полей.
+# В каком слое поле живёт — taskstate.OPS; здесь только проверка.
+UPDATE_FIELDS = {
+    'title':           (is_text(1000), 'Заполните title'),
+    'why':             (is_text(1000), 'Заполните why'),
+    'root':            (root_of_project, 'Корень должен принадлежать проекту'),
+    'new_root':        (lambda v, t: validate_new_root(dict(new_root=v)) is None, None),
+    'priority':        (lambda v, t: v in PRIORITIES, 'Неверный приоритет'),
+    'risk':            (lambda v, t: v in RISKS, 'Неверный риск'),
+    'work_type':       (lambda v, t: v in WORK_TYPES, 'Неверный вид работы'),
+    'acceptance':      (is_criteria, 'Нужны критерии'),
+    'assessment':      (lambda v, t: not v or cx.validate_assessment(v) is None, None),
+    'model_plan':      (lambda v, t: isinstance(v, dict) and not set(v) - set(PROVIDERS), 'model_plan: только ' + ', '.join(PROVIDERS)),
+    'model':           (None, None),
+    'model_reason':    (None, None),
+    'acceptance_done': (None, None),
+    'due_date':        (None, None),
+    'executor':        (None, None),
+    'scope':           (None, None),
+    'task_type':       (None, None),
+    **{k: (None, None) for k in TYPE_FIELDS},
+}
+# Правила, связывающие поля одной правки.
+UPDATE_RULES = (
+    (lambda c: 'new_root' in c and 'root' in c, 'Укажите либо существующий запрос, либо новый'),
+    (lambda c: c.get('model') and not c.get('model_reason'), 'Обоснуйте выбор модели'),
+)
+
+def update_patch(t, changes, at):
+    """op=update: поля — по таблице UPDATE_FIELDS, связи — по UPDATE_RULES, затем вся
+    задача после правки. -> (правка задачи, новый запрос или None)."""
+    if not isinstance(changes, dict) or set(changes) - set(UPDATE_FIELDS): raise ValueError('Недопустимые поля изменения')
+    for key, value in changes.items():
+        check, error = UPDATE_FIELDS[key]
+        if check and not check(value, t): raise ValueError(error)
+    for broken, error in UPDATE_RULES:
+        if broken(changes): raise ValueError(error)
+    changes = dict(changes); new_root = changes.pop('new_root', None)
+    if changes.get('assessment'):
+        changes['assessment'] = dict(changes['assessment'], reasons=changes['assessment']['reasons'].strip(), by=dict(agent='владелец'), at=at.isoformat())
+    if 'acceptance' in changes and changes['acceptance'] != t.get('acceptance'):
+        changes['acceptance_done'] = []   # Переформулировка требует новой проверки.
+    if 'model_plan' in changes:
+        # Частичная правка: строка ИИ заменяется, None возвращает автоматический выбор.
+        merged = dict(t.get('model_plan') or {})
+        for k, v in changes['model_plan'].items():
+            if v is None: merged.pop(k, None)
+            else: merged[k] = dict(v, source='manual')
+        changes['model_plan'] = merged
+    after = dict(t, **changes)
+    validate_details(after); recommendation(after)
+    changes['model_plan'] = model_plan(after)
+    return changes, new_root
+
 def expire(s, ref, at, by):
     """Просроченная метка: запуск закрывается как expired, история остаётся."""
     for r in s['runs']:
@@ -869,36 +907,8 @@ def action(req):
             ref=req.get('ref',''); t=task_for(ref)
             patch={}
             if op=='update':
-                changes=req.get('changes',{})
-                if not isinstance(changes,dict) or set(changes)-{'priority','model','model_reason','model_plan','acceptance','acceptance_done','risk','work_type','due_date','root','title','why','executor','scope','task_type','new_root','assessment',*TYPE_FIELDS}: raise ValueError('Недопустимые поля изменения')
-                if changes.get('assessment'):
-                    cx.validate_assessment(changes['assessment'])
-                    changes['assessment']=dict(changes['assessment'],reasons=changes['assessment']['reasons'].strip(),by=dict(agent='владелец'),at=at.isoformat())
-                new_root=None
-                if 'new_root' in changes:
-                    if 'root' in changes: raise ValueError('Укажите либо существующий запрос, либо новый')
-                    validate_new_root(changes); new_root=changes.pop('new_root')
-                for field in ('title','why'):
-                    if field in changes and (not isinstance(changes[field],str) or not changes[field].strip() or len(changes[field])>1000): raise ValueError('Заполните '+field)
-                if 'root' in changes and not any(r.get('id')==changes['root'] and r.get('project')==t['project'] for r in read('memory/index.json',{}).get('records',[])): raise ValueError('Корень должен принадлежать проекту')
-                if 'priority' in changes and changes['priority'] not in ('🔴','🟡','🟢'): raise ValueError('Неверный приоритет')
-                if 'risk' in changes and changes['risk'] not in ('low','medium','high'): raise ValueError('Неверный риск')
-                if 'work_type' in changes and changes['work_type'] not in WORK_TYPES: raise ValueError('Неверный вид работы')
                 if any(r['ref']==ref and r['status']=='running' for r in s['runs']): raise ValueError('Паспорт выполняемой задачи менять нельзя: сначала остановите запуск')
-                if 'acceptance' in changes and (not isinstance(changes['acceptance'],list) or not changes['acceptance'] or any(not isinstance(x,str) or not x.strip() for x in changes['acceptance'])): raise ValueError('Нужны критерии')
-                if changes.get('model') and not changes.get('model_reason'): raise ValueError('Обоснуйте выбор модели')
-                if 'acceptance' in changes and changes['acceptance']!=t.get('acceptance'):
-                    changes['acceptance_done']=[]  # Переформулировка требует новой проверки.
-                if 'model_plan' in changes:
-                    # Частичная правка: строка ИИ заменяется, None возвращает автоматический выбор.
-                    if not isinstance(changes['model_plan'],dict) or set(changes['model_plan'])-set(PROVIDERS): raise ValueError('model_plan: только '+', '.join(PROVIDERS))
-                    merged=dict(t.get('model_plan') or {})
-                    for k,v in changes['model_plan'].items():
-                        if v is None: merged.pop(k,None)
-                        else: merged[k]=dict(v,source='manual')
-                    changes['model_plan']=merged
-                validate_details(dict(t,**changes)); recommendation(dict(t,**changes)); patch.update(changes)
-                patch['model_plan']=model_plan(dict(t,**changes))
+                changes,new_root=update_patch(t, req.get('changes',{}), at); patch.update(changes)
                 if new_root:   # запись памяти — только после всех проверок правки
                     patch['root']=create_roots(t['project'],[dict(new_root=new_root)])[0]['root']
             elif op=='complete':
@@ -1062,7 +1072,7 @@ def action(req):
                     if tokens is not None and (type(tokens)!=int or tokens<0): raise ValueError('Токены должны быть целым неотрицательным числом')
                     run.update(status={'finish':'done','fail':'failed','cancel':'cancelled'}[op],evidence=req['evidence'],tokens=tokens,finished_at=at.isoformat())
                     patch.update(status='done' if op=='finish' else 'queued', claimed_by=None)
-                    if op=='finish': patch['completed_at']=run['finished_at']
+                    if op=='finish': patch.update(completed_at=run['finished_at'], evidence=req['evidence'])   # итог с доказательством
                     branch=((run.get('launch') or {}).get('worktree') or {}).get('branch')
                     if op=='finish' and branch:
                         # Работа в отдельной ветке не в основной ветке проекта: готово — после слияния владельцем.

@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import collect_repos
 import mdparse as md
 import memory as mem
+import taskstate
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
@@ -106,7 +107,7 @@ def full_size():
 
 
 def collect(project=None):
-    P = load("projects.json").get("projects", {})
+    P = taskstate.apply(load("projects.json"), DATA).get("projects", {})   # статус — с оперативным слоем
     U = load("usage.json", {"projects": {}}).get("projects", {})
     R = load("repos.json", {"repos": {}}).get("repos", {})
     E = load("estimates.json", {"projects": {}}).get("projects", {})

@@ -17,6 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mdparse as md
+import taskstate
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
@@ -136,6 +137,17 @@ def cmd_list(args):
 
 
 def cmd_apply(args):
+    """Принятие пишет ручной projects.json — под общей блокировкой задач и атомарно:
+    доска, исполнитель или Obsidian, меняющие задачи в ту же секунду, правку не потеряют."""
+    try:
+        with taskstate.locked(DATA, wait=10):
+            return _apply(args)
+    except taskstate.Busy as e:
+        print(str(e))
+        return 1
+
+
+def _apply(args):
     box = jload(INBOX, {"items": []})
     proj_file = jload(PROJECTS)
     if not proj_file:
@@ -185,7 +197,7 @@ def cmd_apply(args):
         applied.append("%s -> %s/%s  %s" % (it["id"], key, tid, it.get("title", "")[:70]))
 
     if applied:
-        jsave(PROJECTS, proj_file)
+        taskstate.save_json(DATA, "projects.json", proj_file)
         jsave(INBOX, box)
     for line in applied:
         print("  ✓ " + line)

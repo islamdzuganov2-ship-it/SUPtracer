@@ -133,7 +133,7 @@ class ReviewTests(DataCase):
         with self.assertRaisesRegex(ValueError, 'spec.deviation'): self.verdict(run, 'spec_change')
         with self.assertRaises(ValueError):
             w.action(dict(op='review', ref=REF, run=run, worker='чужой', verdict='approve', criteria=[dict(ok=True)]*2, conclusion='x'))
-        d = w.read('projects.json', {}); d['projects']['alpha-api']['backlog'][-1]['auto_check']['ok'] = False; w.save('projects.json', d)
+        s = w.state(); s['tasks'][REF]['auto_check']['ok'] = False; w.save('workflow.json', s)   # оперативный слой (TT-45)
         with self.assertRaisesRegex(ValueError, 'Автопроверка не пройдена'): self.verdict(run, 'approve')
 
     def test_merge_blocked_by_dirty_base_keeps_review(self):

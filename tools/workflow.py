@@ -640,6 +640,8 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
            'Рабочая папка: %s.' % folder]
     if worktree:
         lines.append('Это отдельная рабочая копия, ветка %s. Коммить в неё; в основную ветку не сливай — это решает владелец.' % worktree['branch'])
+    if run.get('phase') not in ('review','assess') and ((t.get('auto_check') or {}).get('ok') is False or (t.get('review') or {}).get('verdict')=='changes'):
+        lines.append('Это ДОРАБОТКА: начни с замечаний в паспорте (auto_check_feedback / review_feedback).')
     if run.get('phase')=='review':
         lines.append('Это РЕВЬЮ, не доработка: проверь каждый критерий приёмки, соответствие ТЗ и автопроверку по паспорту. Модель: %s, усилия %s.' % (route['model'], route['effort']))
     elif run.get('phase')=='assess':

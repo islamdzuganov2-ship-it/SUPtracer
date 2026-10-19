@@ -85,6 +85,22 @@ class Vault(DataCase):
         self.assertIn("всё уже актуально", self.push())
         self.assertTrue(self.jread("vault_state.json")["pushed_at"])    # ОБН-05: свежесть выгрузки
 
+    def test_memory_notes_with_same_name_get_unique_files(self):        # TT-41
+        # Windows не различает регистр: «Продолжай» и «продолжай» не должны писаться в один файл.
+        mem = self.t.memory
+        a = mem.new_record("Продолжай", "Первая запись.", project="alpha-api", kind="запрос", source="codex-1")
+        b = mem.new_record("продолжай", "Вторая запись.", project="alpha-api", kind="запрос", source="codex-2")
+        mem.save(a)
+        mem.save(b)
+        self.quiet(self.t.memory.cmd_index, [])
+        self.push()
+        names = [n.lower() for n in os.listdir(os.path.join(self.vault, "TaskTreker", "Память"))]
+        self.assertEqual(len([n for n in names if n.startswith("запрос — продолжай")]), 2, names)
+        self.assertIn("[[запрос — Продолжай — %s]]" % a["id"], self.read("TaskTreker/Проекты/Сервис Альфа.md"))
+        self.assertIn("Первая запись.", self.read("TaskTreker/Память/запрос — Продолжай — %s.md" % a["id"]))
+        self.assertIn("Вторая запись.", self.read("TaskTreker/Память/запрос — продолжай — %s.md" % b["id"]))
+        self.assertIn("всё уже актуально", self.push())                  # повтор не плодит копий
+
     def test_generated_notes_are_never_read_back(self):                 # ОБС-04
         self.pull()
         self.push()

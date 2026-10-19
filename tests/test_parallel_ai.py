@@ -187,6 +187,31 @@ class ParallelAITests(DataCase):
             with self.subTest(agents=agents), self.assertRaises(ValueError):
                 w.action(dict(op='split',project='alpha-api',agents=agents))
 
+    def test_apply_writes_shown_assignment_not_recomputed(self):
+        self.plan(dict(id='A1',size='L'), dict(id='A2',depends_on=['A1']), dict(id='B1',size='M'))
+        r=w.action(dict(op='split',project='alpha-api',agents=['claude','codex']))
+        # Владелец переключил каждую группу на другой ИИ: пересчёт дал бы другое, поэтому проверяем показанное.
+        shown={ref:('codex' if a=='claude' else 'claude') for ref,a in r['assign'].items()}
+        applied=w.action(dict(op='split',project='alpha-api',agents=['claude','codex'],dry_run=False,assign=shown))
+        self.assertEqual(applied['assign'],shown)
+        for ref,a in shown.items(): self.assertEqual(w.task_for(ref)['executor'],a)
+
+    def test_apply_rejects_assignment_outside_split(self):
+        self.plan(dict(id='A1',size='L'), dict(id='A2',depends_on=['A1']), dict(id='C1',executor='claude',size='M'))
+        bad=[{'alpha-api/C1':'codex'},                             # назначена вручную
+             {'alpha-api/A1':'gemini'},                            # неизвестный ИИ
+             {'alpha-api/A1':'claude','alpha-api/A2':'codex'}]     # связная группа разорвана
+        for assign in bad:
+            with self.subTest(assign=assign), self.assertRaises(ValueError):
+                w.action(dict(op='split',project='alpha-api',agents=['claude','codex'],dry_run=False,assign=assign))
+        self.assertIsNone(w.task_for('alpha-api/A1').get('executor'))   # ничего не записано
+        self.assertEqual(w.task_for('alpha-api/C1')['executor'],'claude')
+
+    def test_mcp_schema_accepts_assign(self):
+        import mcp_server
+        tool=next(t for t in mcp_server.TOOLS if t['name']=='tt_work')
+        self.assertIn('assign', tool['inputSchema']['properties'])
+
     def test_mcp_schema_accepts_new_fields(self):
         import mcp_server, json
         self.plan(dict(id='AL-03'))

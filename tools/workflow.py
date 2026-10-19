@@ -547,6 +547,24 @@ def scope_conflict(t, tasks, runs, at, worker=None):
             return '%s (%s · %s)' % (r['ref'], r.get('agent') or '?', r.get('worker') or '?')
     return None
 
+def free_tasks(project, tasks):
+    """Задачи, которые распределение может отдать ИИ: открытые, без назначения и без метки занятости."""
+    return [t for t in tasks if t['project']==project and t.get('status') not in ('done','cancelled')
+            and not t.get('executor') and not t['claim'] and t.get('status') not in ('in_progress','review')]
+
+def check_assign(assign, project, agents, result, tasks):
+    """Показанное распределение применяется только если оно не выходит за пределы того, что можно распределить:
+    свободные задачи проекта, известные ИИ, и связная группа уходит одному ИИ целиком."""
+    if not isinstance(assign,dict) or not assign: raise ValueError('assign: словарь «задача → ИИ» с хотя бы одной задачей')
+    eligible={t['ref'] for t in free_tasks(project, tasks)}
+    closed=sorted(r for r in assign if r not in eligible)
+    if closed: raise ValueError('Не распределяются (назначены вручную, заняты или закрыты): '+', '.join(closed))
+    unknown=sorted({a for a in assign.values() if a not in agents})
+    if unknown: raise ValueError('ИИ не из распределения: '+', '.join(unknown))
+    for g in result['groups']:
+        got={assign[r] for r in g['tasks'] if r in assign}
+        if len(got)>1: raise ValueError('Связная группа уходит одному ИИ целиком: '+', '.join(g['tasks']))
+
 def split(project, agents, tasks, runs, at):
     """Объяснимое распределение: связные группы (зависимости, общая область)
     целиком уходят одному ИИ; группы раскладываются по наименее загруженному."""
@@ -555,7 +573,7 @@ def split(project, agents, tasks, runs, at):
     # Загрузка: назначенное ИИ плюс то, что он держит прямо сейчас.
     holder=lambda t:t.get('executor') or (t['claim'] or {}).get('agent')
     load={a:sum(points.get(t.get('size'),3) for t in mine if holder(t)==a) for a in agents}
-    free=[t for t in mine if not t.get('executor') and not t['claim'] and t.get('status') not in ('in_progress','review')]
+    free=free_tasks(project, tasks)
     parent={t['ref']:t['ref'] for t in free}
     def find(x):
         while parent[x]!=x: parent[x]=parent[parent[x]]; x=parent[x]
@@ -840,9 +858,13 @@ def action(req):
             if not isinstance(agents,list) or len(agents)<2 or len(set(agents))!=len(agents) or any(a not in PROVIDERS for a in agents): raise ValueError('Нужны минимум два разных ИИ')
             result=split(project, agents, snap['tasks'], s['runs'], at)
             if req.get('dry_run', True): return dict(result, dry_run=True)
-            write_patches(s, {ref:dict(executor=a) for ref,a in result['assign'].items()})
+            # Применяется показанное в предпросмотре (assign: задача → ИИ), а не пересчёт заново.
+            # Без assign — прежнее поведение: пересчитанное распределение.
+            assign=dict(result['assign']) if req.get('assign') is None else req['assign']
+            if req.get('assign') is not None: check_assign(assign, project, agents, result, snap['tasks'])
+            write_patches(s, {ref:dict(executor=a) for ref,a in assign.items()})
             save('workflow.json',s)
-            return dict(result, dry_run=False)
+            return dict(result, assign=assign, dry_run=False)
         else:
             ref=req.get('ref',''); t=task_for(ref)
             patch={}

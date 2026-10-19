@@ -399,6 +399,9 @@ def packet(ref, agent=None):
                                  **{k:t[k] for k in TYPE_FIELDS if t.get(k) not in (None,'',[])})
     project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
     result['workspace']=dict(workspace(t['project'],project), note='Работать только в этом проекте и его папке; путь active_copy, если указан, — текущая рабочая копия.')
+    live=next((r for r in s['runs'] if r['ref']==t['ref'] and r['status'] in ('queued','running') and (r.get('launch') or {}).get('worktree')),None)
+    if live:
+        result['workspace'].update(worktree=live['launch']['worktree'], note='Работать в отдельной рабочей копии задачи: %s, ветка %s.' % (live['launch']['worktree']['path'], live['launch']['worktree']['branch']))
     result['route']=route
     result['instructions']=POLICY['rules']
     result['read_next']=['tt_context(project='+t['project']+', budget=1200)', 'tt_recall(query='+t['root']+')']
@@ -601,20 +604,40 @@ def new_run(s, ref, p, at):
     if p: run['phase']=p['phase']
     s['runs'].append(run); return run
 
-def launch_prompt(t, run, route, project):
-    """Задание для ИИ: вставляется в чат Claude Code или Codex, если запуск сделан с доски."""
+def worker_id(run, agent):
+    """Имя исполнителя сессии, открытой сервером: одинаковое в claim, heartbeat и finish."""
+    return '%s-cli:%s' % (agent, run['id'])
+
+def launch_prompt(t, run, route, project, worker=None, worktree=None):
+    """Задание для ИИ: первая реплика сессии, открытой с доски, или текст для вставки в чат."""
     ai=PROVIDERS[route['provider']]['name']; ref=t['ref']; ws=workspace(t['project'], project)
+    folder=(worktree or {}).get('path') or ws['active_copy'] or ws['path'] or 'не указана'
     lines=['Задача TaskTreker %s «%s» запущена для тебя (%s).' % (ref, t['title'], ai),
-           'Рабочая папка: %s.' % (ws['active_copy'] or ws['path'] or 'не указана')]
+           'Рабочая папка: %s.' % folder]
+    if worktree:
+        lines.append('Это отдельная рабочая копия, ветка %s. Коммить в неё; в основную ветку не сливай — это решает владелец.' % worktree['branch'])
     if run.get('phase')=='assess':
         lines.append('Сначала оценка сложности, не реализация. Модель как есть: %s, усилия %s.' % (route['model'], route['effort']))
     else:
         lines.append('Модель: %s, усилия: %s. Если у тебя другая модель — переключись (/model) или сообщи.' % (route['model'], route['effort']))
-    lines.append('1) tt_work op=claim ref=%s run=%s model=%s worker=<id этой сессии>' % (ref, run['id'], route['model']))
+    lines.append('1) Сразу прими запуск: tt_work op=claim ref=%s run=%s model=%s worker=%s' % (ref, run['id'], route['model'], worker or '<id этой сессии>'))
     lines.append('2) tt_work op=packet ref=%s agent=%s — и действуй строго по паспорту.' % (ref, route['provider']))
     lines.append('3) %s' % ('tt_work op=assess … с оценкой 1…5 и основаниями.' if run.get('phase')=='assess'
-                            else 'По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
+                            else 'Если работа идёт дольше 40 минут — tt_work op=heartbeat. По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
+    if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
     return '\n'.join(lines)
+
+def mark_launched(ref, run_id, info):
+    """Сессия открыта сервером: время, процесс, рабочая копия. Это ещё не принятие — его делает claim."""
+    with locked():
+        s=state()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status']=='queued'),None)
+        if not run: raise ValueError('Запуск не ждёт исполнителя')
+        launches=list(run.get('launches') or [])
+        launches.append(dict(info, at=now().isoformat()))
+        run.update(launched_at=launches[-1]['at'], launches=launches[-5:], launch=launches[-1])
+        save('workflow.json',s)
+        return run
 
 def expire(s, ref, at, by):
     """Просроченная метка: запуск закрывается как expired, история остаётся."""
@@ -657,7 +680,9 @@ def action(req):
         if not run: raise ValueError('У задачи нет запуска, ждущего исполнителя')
         route=(run.get('packet') or {}).get('route') or recommendation(t, agent=run.get('agent'))
         project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
-        return dict(run=run['id'], phase=run.get('phase'), route=route, prompt=launch_prompt(t, run, route, project))
+        worker=req.get('worker') or (worker_id(run, run['agent']) if run.get('agent') else None)
+        return dict(run=run['id'], phase=run.get('phase'), route=route, agent=run.get('agent') or route.get('provider'),
+                    worker=worker, prompt=launch_prompt(t, run, route, project, worker, req.get('worktree') or (run.get('launch') or {}).get('worktree')))
     if op=='route':
         # Черновик формы: какой план модели получит задача, ничего не записывая.
         draft=req.get('task')
@@ -841,10 +866,15 @@ def action(req):
 
 def main(args=None):
     parser=argparse.ArgumentParser(description='Доски: list/next/packet; изменения через request JSON')
-    parser.add_argument('op',choices=['list','next','packet','queue','models','request']); parser.add_argument('value',nargs='?')
+    parser.add_argument('op',choices=['list','next','packet','queue','models','request','worktree']); parser.add_argument('value',nargs='?')
     parser.add_argument('--agent',choices=sorted(PROVIDERS),help='ИИ, для которого строится маршрут (next, packet, queue)')
     a=parser.parse_args(args)
     try:
+        if a.op=='worktree':
+            import launcher
+            t=task_for(a.value or ''); p=read('projects.json',{})['projects'][t['project']]
+            agent=a.agent or t.get('executor') or settings()['default_executor']
+            print(json.dumps(launcher.ensure_worktree(p.get('path'), agent, t['id']) or {'note':'Не git: работа идёт в папке проекта'},ensure_ascii=False,indent=2)); return 0
         if a.op=='request': req=json.loads(Path(a.value).read_text(encoding='utf-8-sig'))
         else:
             req=dict(op=a.op,ref=a.value)

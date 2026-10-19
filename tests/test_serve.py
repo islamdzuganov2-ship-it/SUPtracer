@@ -72,6 +72,16 @@ class Server(unittest.TestCase):
         with mock.patch.object(workflow,'action',side_effect=ValueError('invalid')):
             self.assertEqual(self.req('POST','/api/work','{}',{'X-TaskTreker':'1'})[0],400)
 
+    def test_launch_requires_header_and_reports_errors(self):
+        self.assertEqual(self.req('POST','/api/launch','{}')[0],403)
+        with mock.patch.object(serve,'launch_session',return_value={'run':'RUN-1','pid':7}) as launch:
+            code,body=self.req('POST','/api/launch',json.dumps({'ref':'a/B-1','agent':'claude'}),{'X-TaskTreker':'1'})
+        self.assertEqual((code,json.loads(body)['data']['pid']),(200,7))
+        launch.assert_called_once_with({'ref':'a/B-1','agent':'claude'})
+        with mock.patch.object(serve,'launch_session',side_effect=ValueError('Командная строка не найдена')):
+            code,body=self.req('POST','/api/launch','{}',{'X-TaskTreker':'1'})
+        self.assertEqual((code,json.loads(body)['error']),(400,'Командная строка не найдена'))
+
     def test_integrations_status(self):
         with mock.patch.object(serve, "integration_status", return_value={"codex": {"connected": True}}):
             code, body = self.req("GET", "/api/integrations")

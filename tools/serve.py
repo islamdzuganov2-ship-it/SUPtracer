@@ -71,6 +71,37 @@ def run_pm(args, timeout=900):
         return False, "Не удалось запустить обновление: %r" % e, round(time.time() - t0, 1)
 
 
+def launch_session(req):
+    """«Запустить» на доске: запуск в очереди, рабочая копия, окно сессии ИИ, отметка.
+
+    Окно открывается только здесь — по нажатию владельца на локальном сервере. MCP-инструмент
+    такой операции не имеет: ИИ не открывает сессии других ИИ."""
+    import workflow, launcher
+    ref = str(req.get("ref") or "")
+    t = workflow.task_for(ref)
+    agent = req.get("agent") or t.get("executor") or workflow.settings()["default_executor"]
+    workflow.check_executor(agent)
+    run = next((r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued"), None)
+    if run and run.get("agent") and run["agent"] != agent:
+        raise ValueError("Запуск уже поставлен для ИИ %s: отмените его или выберите этот ИИ" % run["agent"])
+    if not run:
+        workflow.action(dict(op="enqueue", ref=ref, agent=agent))
+        run = next(r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued")
+    project = workflow.read("projects.json", {})["projects"][t["project"]]
+    ws = workflow.workspace(t["project"], project)
+    base = ws["active_copy"] or ws["path"]
+    worktree = launcher.ensure_worktree(base, agent, t["id"]) if req.get("isolate", True) and base else None
+    cwd = (worktree or {}).get("path") or base
+    info = workflow.action(dict(op="prompt", ref=ref, worker=workflow.worker_id(run, agent), worktree=worktree))
+    # Данные системы — общие: сессия в рабочей копии самой системы не должна видеть пустой data/.
+    opened = launcher.launch(agent, info["route"]["model"], info["route"]["effort"], info["prompt"], cwd,
+                             env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix()})
+    workflow.mark_launched(ref, run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]),
+                                                 cwd=cwd, worktree=worktree, agent=agent))
+    return dict(run=run["id"], agent=agent, pid=opened["pid"], cwd=cwd, worktree=worktree,
+                route=info["route"], worker=info["worker"], prompt=info["prompt"])
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TaskTreker"
 
@@ -113,15 +144,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self.send_json(500, {"ok": False, "error": "Не удалось прочитать настройки подключения."})
         if path == "/api/work":
-            import workflow
-            return self.send_json(200, {"ok": True, "data": workflow.snapshot()})
+            import workflow, launcher
+            return self.send_json(200, {"ok": True, "data": dict(workflow.snapshot(), launchers=launcher.status())})
         self.send_json(404, {"ok": False, "error": "нет такого адреса"})
 
     def do_POST(self):
         if not self.local_only():
             return
         path = self.path.split("?")[0]
-        if path not in ("/api/refresh", "/api/connect", "/api/work"):
+        if path not in ("/api/refresh", "/api/connect", "/api/work", "/api/launch"):
             return self.send_json(404, {"ok": False, "error": "нет такого адреса"})
         if self.headers.get("X-TaskTreker") != "1":
             # Форма с чужого сайта такой заголовок поставить не может.
@@ -135,6 +166,11 @@ class Handler(BaseHTTPRequestHandler):
             req = {}
         if not isinstance(req, dict):
             req = {}
+        if path == "/api/launch":
+            try:
+                return self.send_json(200, {"ok": True, "data": launch_session(req)})
+            except (ValueError, TypeError, KeyError, OSError) as e:
+                return self.send_json(400, {"ok": False, "error": str(e)})
         if path == "/api/work":
             import workflow
             try:

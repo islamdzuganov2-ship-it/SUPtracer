@@ -130,7 +130,9 @@ class LauncherTests(DataCase):
         with mock.patch.object(launcher,'find_cli',return_value='C:/bin/claude.exe'), mock.patch.object(launcher,'open_window',return_value=1):
             serve.launch_session(dict(ref='alpha-api/AL-03',agent='claude'))
         w.action(dict(op='claim',ref='alpha-api/AL-03',run='RUN-1',worker='claude-cli:RUN-1',model='claude-haiku-5-5'))
-        r=w.action(dict(op='finish',ref='alpha-api/AL-03',run='RUN-1',worker='claude-cli:RUN-1',evidence='Тесты прошли, коммит abc'))
+        with mock.patch.object(w,'spawn_autocheck') as spawn:
+            r=w.action(dict(op='finish',ref='alpha-api/AL-03',run='RUN-1',worker='claude-cli:RUN-1',evidence='Тесты прошли, коммит abc'))
+        spawn.assert_called_once_with('alpha-api/AL-03','RUN-1')
         self.assertEqual((r['status'],r['branch']),('review','ai/claude/al-03'))
         t=w.task_for('alpha-api/AL-03')
         self.assertEqual(t['status'],'review'); self.assertIn('ai/claude/al-03',t['status_note'])

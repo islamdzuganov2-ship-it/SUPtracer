@@ -98,6 +98,7 @@ class ReviewTests(DataCase):
     def test_approve_merges_branch_and_closes_task(self):
         self.work(); run = self.take_review()
         self.assertEqual(w.task_for(REF)['status'], 'review')   # ревью не переводит в «В работе»
+        self.assertTrue(w.task_for(REF)['status_note'].startswith('Идёт ревью'))
         r = self.verdict(run, 'approve')
         self.assertEqual((r['status'], r['merge']['ok']), ('done', True))
         self.assertEqual((self.repo/'src'/'app.py').read_text(encoding='utf-8'), 'x = 2\n')

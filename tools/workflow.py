@@ -620,7 +620,9 @@ def start_run(s, t, run, req, at):
     until=(at+timedelta(minutes=minutes)).isoformat()
     run.update(status='running',worker=worker,model=model,agent=agent,packet=p,phase=p['phase'],
                claimed_at=at.isoformat(),heartbeat_at=at.isoformat(),lease_until=until)
-    return dict(status='review' if p['phase']=='review' else 'in_progress',
+    note={'review':'Идёт ревью', 'assess':'Идёт оценка сложности'}.get(p['phase'],
+          'Доработка' if (t.get('auto_check') or {}).get('ok') is False or (t.get('review') or {}).get('verdict')=='changes' else None)
+    return dict(status='review' if p['phase']=='review' else 'in_progress', status_note=note and '%s: %s (%s)' % (note, PROVIDERS[agent]['name'], worker),
                 claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until))
 
 def new_run(s, ref, p, at):

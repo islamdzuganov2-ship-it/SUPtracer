@@ -18,9 +18,9 @@ from datetime import date, datetime, timedelta, timezone
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = 'https://developers.openai.com/api/docs/guides/model-selection'
 PROVIDERS = {
-    'codex': dict(name='GPT / Codex', client='Codex CLI, ChatGPT Desktop, расширение IDE',
+    'codex': dict(name='GPT / Codex', short='GPT', client='Codex CLI, ChatGPT Desktop, расширение IDE',
                   source=SOURCE, verified='2026-10-19'),
-    'claude': dict(name='Claude', client='Claude Code (терминал, приложение, IDE)',
+    'claude': dict(name='Claude', short='Claude', client='Claude Code (терминал, приложение, IDE)',
                    source='skill claude-api, таблица моделей от 2026-10-06', verified='2026-10-19'),
 }
 MODELS = [
@@ -39,11 +39,14 @@ MODELS = [
 # Автоматический выбор: класс задачи -> модель линейки ИИ. Остальные модели — только явно.
 LINEUP = {'codex': {1: 'gpt-6-luna', 2: 'gpt-6.1-sol', 3: 'gpt-6-astra'},
           'claude': {1: 'claude-haiku-5-5', 2: 'claude-sonnet-5-5', 3: 'claude-opus-5-5'}}
+# Уровни усилий: у Claude 5.5 — low…max (skill claude-api); у Codex в каталоге — low…high.
+EFFORTS = {'claude': ('low', 'medium', 'high', 'xhigh', 'max'), 'codex': ('low', 'medium', 'high')}
+EFFORT_COST = {'low': .75, 'medium': 1., 'high': 1.25, 'xhigh': 1.5, 'max': 2.}  # ориентир бюджета, не тариф
 DEFAULT_EXECUTOR = 'codex'   # прежнее поведение; меняется op=settings
 LEASE_MINUTES = 45           # срок метки занятости без heartbeat
 LOCK_STALE_SECONDS = 120     # блокировка старше — след упавшего процесса
 WORK_TYPES = ('docs', 'test', 'implementation', 'architecture', 'research')
-POLICY = dict(version=2, verified='2026-10-19', source=SOURCE,
+POLICY = dict(version=3, verified='2026-10-19', source=SOURCE,
     sources={k: v['source'] for k, v in PROVIDERS.items()},
     availability='Снимок моделей Codex этого хоста и таблицы моделей Claude на 19.10.2026; проверять перед исполнением',
     evidence='Рекомендации — начальные эвристики, не результаты локального сравнения моделей',
@@ -56,7 +59,8 @@ POLICY = dict(version=2, verified='2026-10-19', source=SOURCE,
            'Закрывать задачу только с результатами проверок; учитывать полный расход вместе с повторами.',
            'Сравнивать модели на одинаковых критериях: качество, токены, время, доля повторов.',
            'Задачу с меткой claimed_by другого ИИ не брать и её область (scope) не править.',
-           'Работать в своей ветке/рабочей копии; продлевать аренду heartbeat, пока работа идёт.'])
+           'Работать в своей ветке/рабочей копии; продлевать аренду heartbeat, пока работа идёт.',
+           'Модель и усилия брать из плана модели задачи для своего ИИ; поднимать усилия раньше, чем класс модели.'])
 
 def data_dir():
     return Path(os.environ.get('TASKTREKER_DATA') or ROOT / 'data')
@@ -117,35 +121,87 @@ def check_executor(value):
     if value not in ('', None) and value not in PROVIDERS:
         raise ValueError('ИИ-исполнитель: ' + ', '.join(PROVIDERS) + ' или пусто')
 
+def task_tier(task):
+    size = task.get('size', 'M'); risk = task.get('risk', 'unknown'); kind = task.get('work_type', 'unknown')
+    if risk == 'high' or kind in ('architecture', 'research'):
+        return 3, 'Высокий риск или исследовательская неопределённость'
+    if size == 'S' and risk == 'low' and kind in ('docs', 'test', 'implementation'):
+        return 1, 'Малая задача с низким риском и проверяемым результатом'
+    return 2, 'Интеграция или недостаточно данных для уверенного выбора младшей модели'
+
+def task_effort(provider, tier, task):
+    """Достаточный уровень усилий внутри класса: усилия дешевле смены модели,
+    поэтому сначала подстраивается effort, а не модель."""
+    size = task.get('size', 'M'); risk = task.get('risk', 'unknown'); kind = task.get('work_type', 'unknown')
+    if tier == 1:
+        effort, why = ('low', 'документация по образцу') if kind == 'docs' else ('medium', 'проверяемая малая правка')
+    elif tier == 2:
+        effort, why = ('high', 'крупная или рискованная интеграция') if size == 'L' or risk == 'medium' else ('medium', 'обычная разработка')
+    elif risk == 'high' and kind in ('architecture', 'research') and size in ('M', 'L'):
+        effort, why = 'xhigh', 'высокий риск в архитектуре или исследовании'
+    else:
+        effort, why = 'high', 'трудная задача старшего класса'
+    allowed = EFFORTS[provider]
+    if effort not in allowed:   # у линейки GPT нет xhigh: берём старший доступный
+        effort, why = allowed[-1], why + '; у %s это старший доступный уровень' % PROVIDERS[provider]['short']
+    return effort, why
+
+def auto_plan(task, provider):
+    tier, reason = task_tier(task)
+    effort, why = task_effort(provider, tier, task)
+    return dict(model=LINEUP[provider][tier], effort=effort, reason=reason + '; усилия: ' + why, source='auto')
+
+def validate_plan_entry(provider, entry):
+    if not isinstance(entry, dict): raise ValueError('План модели %s: объект model, effort, reason' % provider)
+    m = model_entry(entry.get('model'))
+    if not m or m['provider'] != provider: raise ValueError('План модели %s: модель не из линейки этого ИИ' % provider)
+    if entry.get('effort') not in m.get('efforts', EFFORTS[provider]): raise ValueError('План модели %s: допустимые усилия %s' % (provider, ', '.join(EFFORTS[provider])))
+    if not isinstance(entry.get('reason'), str) or not entry['reason'].strip(): raise ValueError('План модели %s: обоснуйте ручной выбор' % provider)
+
+def model_plan(task):
+    """Модель и усилия под задачу для каждого ИИ. Ручные строки сохраняются,
+    автоматические пересчитываются при изменении размера, риска или вида работы."""
+    stored = task.get('model_plan') or {}
+    if not isinstance(stored, dict): raise ValueError('model_plan должен быть объектом по ИИ')
+    out = {}
+    for provider in PROVIDERS:
+        entry = stored.get(provider)
+        if entry and entry.get('source') != 'auto':
+            validate_plan_entry(provider, entry)
+            out[provider] = dict(model=entry['model'], effort=entry['effort'], reason=entry['reason'].strip(), source='manual')
+        else:
+            out[provider] = auto_plan(task, provider)
+    if set(stored) - set(PROVIDERS): raise ValueError('model_plan: только ' + ', '.join(PROVIDERS))
+    return out
+
+def budget_for(model, effort):
+    entry = model_entry(model)
+    base = {1: 6000, 2: 12000, 3: 24000}[entry['tier']]
+    return int(round(base * EFFORT_COST[effort] / EFFORT_COST[entry['effort']], -2))
+
 def recommendation(task, agent=None, default=None):
-    """Маршрут: какой ИИ, какая модель, какой бюджет.
+    """Маршрут: какой ИИ, какая модель, с какими усилиями, какой бюджет.
 
     ИИ берётся из назначения задачи, затем из того, кто спрашивает (agent),
-    затем из настройки по умолчанию. Явная модель задачи сильнее эвристики."""
-    size = task.get('size', 'M'); risk = task.get('risk', 'unknown')
-    kind = task.get('work_type', 'unknown')
+    затем из настройки по умолчанию. Модель и усилия — из плана модели задачи
+    (model_plan); прежнее поле model сильнее плана."""
+    risk = task.get('risk', 'unknown'); kind = task.get('work_type', 'unknown')
     executor = task.get('executor') or ''
     check_executor(executor)
     if agent is not None: check_executor(agent)
     provider = executor or agent or default or DEFAULT_EXECUTOR
-    if risk == 'high' or kind in ('architecture', 'research'):
-        tier, reason = 3, 'Высокий риск или исследовательская неопределённость'
-    elif size == 'S' and risk == 'low' and kind in ('docs', 'test', 'implementation'):
-        tier, reason = 1, 'Малая задача с низким риском и проверяемым результатом'
-    else:
-        tier, reason = 2, 'Интеграция или недостаточно данных для уверенного выбора младшей модели'
-    model = LINEUP[provider][tier]
+    plan = model_plan(task)[provider]
+    model, effort, reason, source = plan['model'], plan['effort'], plan['reason'], plan['source']
     if task.get('model'):
         owner = provider_of(task['model'])
         if executor and owner != executor:
             raise ValueError('Модель %s принадлежит ИИ %s, а задача назначена %s' % (task['model'], owner, executor))
         # Явная модель задаёт ИИ, если задача никому не назначена.
-        model, provider = task['model'], owner
+        model, provider, source = task['model'], owner, 'manual'
+        effort = model_plan(task)[owner]['effort'] if model_plan(task)[owner]['model'] == model else model_entry(model)['effort']
         reason = task.get('model_reason') or 'Явный выбор исполнителя'
-    entry = model_entry(model)
-    budget = {1: 6000, 2: 12000, 3: 24000}[entry['tier']]
-    return dict(model=model, provider=provider, effort=entry['effort'], reason=reason,
-                context_budget=2000, total_token_budget=budget, max_attempts=2,
+    return dict(model=model, provider=provider, effort=effort, reason=reason, source=source,
+                context_budget=2000, total_token_budget=budget_for(model, effort), max_attempts=2,
                 provisional=risk == 'unknown' or kind == 'unknown', policy_version=POLICY['version'])
 
 def parse_time(value):
@@ -191,6 +247,16 @@ def claim_view(run, at):
                 worker=run.get('worker'), model=run.get('model'), lease_until=run.get('lease_until'),
                 stale=not lease_alive(run, at))
 
+def routes(t):
+    """Рекомендация для каждого ИИ — то, что показывается рядом с «Запустить»."""
+    out = {}
+    for p in PROVIDERS:
+        legacy = t.get('model') if (model_entry(t.get('model')) or {}).get('provider') == p else None
+        try: r = recommendation(dict(t, executor=p, model=legacy), agent=p)
+        except ValueError: r = recommendation(dict(t, executor=p, model=None, model_plan=None), agent=p)
+        out[p] = {k: r[k] for k in ('model', 'effort', 'reason', 'source', 'total_token_budget')}
+    return out
+
 def snapshot():
     projects = read('projects.json', {}).get('projects', {}); s = state(); tasks = []
     conf = settings(s); at = now()
@@ -201,9 +267,10 @@ def snapshot():
             try: t['route'] = recommendation(t, default=conf['default_executor'])
             except ValueError as e:
                 # Ручная правка projects.json не должна ронять все доски.
-                t['route'] = dict(recommendation(dict(t, model=None, executor=None), default=conf['default_executor']), error=str(e))
+                t['route'] = dict(recommendation(dict(t, model=None, executor=None, model_plan=None), default=conf['default_executor']), error=str(e))
             if not t.get('executor') and not t.get('model'):
                 t['alternatives'] = {p: recommendation(t, agent=p)['model'] for p in PROVIDERS}
+            t['routes'] = routes(t)
             tasks.append(t)
     byref = {t['ref']: t for t in tasks}
     running = {r['ref']: r for r in s['runs'] if r['status'] == 'running'}
@@ -214,9 +281,10 @@ def snapshot():
         t['needs_plan'] = not bool(t.get('acceptance')) or not t.get('root') or t.get('size') == 'XL'
         t['review_required'] = review_required(t, t['route'], s['runs'])
         t['claim'] = claim_view(running[t['ref']], at) if t['ref'] in running else None
-        if t['claim'] and t['claim']['agent'] in PROVIDERS and not t.get('executor') and not t.get('model'):
-            # Карточка показывает то, на чём задача реально идёт, а не маршрут по умолчанию.
-            t['route'] = recommendation(t, agent=t['claim']['agent'])
+        held = t['claim']['agent'] if t['claim'] else queued[t['ref']].get('agent') if t['ref'] in queued else None
+        if held in PROVIDERS and not t.get('executor') and not t.get('model'):
+            # Карточка показывает то, на чём задача реально идёт или поставлена, а не маршрут по умолчанию.
+            t['route'] = recommendation(t, agent=held)
         t['queued_run'] = queued[t['ref']]['id'] if t['ref'] in queued else None
         priority = {'🔴': 0, '🟡': 1, '🟢': 2}.get(t.get('priority'), 1)
         t['rank'] = [0 if t['project'] in s['focus'] else 1, priority, {'S':1,'M':3,'L':8,'XL':20}.get(t.get('size'), 3), t['ref']]
@@ -225,7 +293,7 @@ def snapshot():
            if r.get('kind')=='запрос' and r.get('status')=='активна']
     return dict(projects={k:dict(name=p.get('name',k), path=p.get('path','')) for k,p in projects.items()},
                 tasks=tasks, roots=roots, focus=s['focus'], runs=s['runs'][-50:], models=MODELS, policy=POLICY,
-                providers=PROVIDERS, lineup=LINEUP, settings=conf)
+                providers=PROVIDERS, lineup=LINEUP, efforts=EFFORTS, settings=conf)
 
 def validate_details(task):
     due=task.get('due_date','')
@@ -382,6 +450,8 @@ def start_run(s, t, run, req, at):
     model=req.get('model'); worker=req.get('worker')
     if not isinstance(worker,str) or not worker.strip(): raise ValueError('Укажите исполнителя/чат')
     agent=provider_of(model)
+    if run['status']=='queued' and run.get('agent') and run['agent']!=agent:
+        raise ValueError('Запуск поставлен для ИИ %s' % run['agent'])
     if req.get('agent') and req['agent']!=agent: raise ValueError('Модель %s не принадлежит ИИ %s' % (model, req['agent']))
     if t.get('executor') and t['executor']!=agent:
         raise ValueError('Задача назначена ИИ %s; ИИ %s её не берёт' % (t['executor'], agent))
@@ -424,7 +494,7 @@ def action(req):
             known=[r['tokens'] for r in runs if r.get('tokens') is not None]
             metrics.append(dict(model=m['id'],provider=m['provider'],completed=len(runs),passed=sum(r['status']=='done' for r in runs),
                                 known_tokens=sum(known),usage_complete=len(known)==len(runs)))
-        return dict(models=MODELS,providers=PROVIDERS,lineup=LINEUP,policy=POLICY,settings=settings(),measurements=metrics)
+        return dict(models=MODELS,providers=PROVIDERS,lineup=LINEUP,efforts=EFFORTS,policy=POLICY,settings=settings(),measurements=metrics)
     if op=='queue':
         snap=snapshot(); byref={t['ref']:t for t in snap['tasks']}; at=now(); out=[]
         for r in active(state()['runs']):
@@ -434,6 +504,12 @@ def action(req):
             out.append(dict(r, executor=t.get('executor') or '', stale=r['status']=='running' and not lease_alive(r, at)))
         return out[:10]
     if op=='packet': return packet(req.get('ref',''), agent=agent)
+    if op=='route':
+        # Черновик формы: какой план модели получит задача, ничего не записывая.
+        draft=req.get('task')
+        if not isinstance(draft,dict): raise ValueError('route: нужен task с size, risk, work_type')
+        draft={k:draft.get(k) for k in ('size','risk','work_type','model_plan') if draft.get(k) is not None}
+        return dict(model_plan=model_plan(draft), efforts=EFFORTS)
     if op=='next':
         snap=snapshot(); at=now(); s=state(); out=[]
         for t in snap['tasks']:
@@ -450,7 +526,8 @@ def action(req):
         if op=='plan':
             project=req.get('project'); tasks=req.get('tasks'); validate_plan(project,tasks)
             d=read('projects.json',{}); b=d['projects'][project].setdefault('backlog',[])
-            b.extend(dict(t,status='queued') for t in tasks); save('projects.json',d)
+            # План модели прорабатывается сразу: для каждого ИИ — модель и усилия под задачу.
+            b.extend(dict(t,status='queued',model_plan=model_plan(t)) for t in tasks); save('projects.json',d)
             return dict(ok=True, added=[t['id'] for t in tasks])
         if op=='focus':
             keys=req.get('projects'); known=snapshot()['projects']
@@ -477,7 +554,7 @@ def action(req):
             patch={}
             if op=='update':
                 changes=req.get('changes',{})
-                if not isinstance(changes,dict) or set(changes)-{'priority','model','model_reason','acceptance','acceptance_done','risk','work_type','due_date','root','title','why','executor','scope'}: raise ValueError('Недопустимые поля изменения')
+                if not isinstance(changes,dict) or set(changes)-{'priority','model','model_reason','model_plan','acceptance','acceptance_done','risk','work_type','due_date','root','title','why','executor','scope'}: raise ValueError('Недопустимые поля изменения')
                 for field in ('title','why'):
                     if field in changes and (not isinstance(changes[field],str) or not changes[field].strip() or len(changes[field])>1000): raise ValueError('Заполните '+field)
                 if 'root' in changes and not any(r.get('id')==changes['root'] and r.get('project')==t['project'] for r in read('memory/index.json',{}).get('records',[])): raise ValueError('Корень должен принадлежать проекту')
@@ -489,7 +566,16 @@ def action(req):
                 if changes.get('model') and not changes.get('model_reason'): raise ValueError('Обоснуйте выбор модели')
                 if 'acceptance' in changes and changes['acceptance']!=t.get('acceptance'):
                     changes['acceptance_done']=[]  # Переформулировка требует новой проверки.
+                if 'model_plan' in changes:
+                    # Частичная правка: строка ИИ заменяется, None возвращает автоматический выбор.
+                    if not isinstance(changes['model_plan'],dict) or set(changes['model_plan'])-set(PROVIDERS): raise ValueError('model_plan: только '+', '.join(PROVIDERS))
+                    merged=dict(t.get('model_plan') or {})
+                    for k,v in changes['model_plan'].items():
+                        if v is None: merged.pop(k,None)
+                        else: merged[k]=dict(v,source='manual')
+                    changes['model_plan']=merged
                 validate_details(dict(t,**changes)); recommendation(dict(t,**changes)); patch.update(changes)
+                patch['model_plan']=model_plan(dict(t,**changes))
             elif op=='complete':
                 packet(ref)
                 if t.get('status') in ('done','cancelled'): raise ValueError('Задача уже закрыта')
@@ -498,10 +584,12 @@ def action(req):
                 if not isinstance(req.get('evidence'),str) or not req['evidence'].strip(): raise ValueError('Опишите результат проверки')
                 patch.update(status='done',evidence=req['evidence'],completed_at=at.isoformat())
             elif op=='enqueue':
+                if agent and t.get('executor') and agent!=t['executor']: raise ValueError('Задача назначена ИИ %s' % t['executor'])
                 p=packet(ref, agent=agent or t.get('executor') or None)
                 if t.get('status') in ('done','cancelled','in_progress','review','blocked'): raise ValueError('Статус не допускает запуск')
                 if any(r['ref']==ref and r['status'] in ('queued','running') for r in s['runs']): raise ValueError('Задача уже запущена или ожидает исполнителя')
-                new_run(s, ref, p, at)
+                run=new_run(s, ref, p, at)
+                if agent: run['agent']=agent   # запуск с доски закреплён за выбранным ИИ
             elif op=='take':
                 # Атомарно: два ИИ, получившие одну задачу из next, не возьмут её оба.
                 if t.get('status') in ('done','cancelled','review','blocked'): raise ValueError('Статус не допускает запуск')

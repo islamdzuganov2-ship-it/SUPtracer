@@ -309,9 +309,14 @@
     const agents=Object.keys(providers());
     try{
       const r=await api({op:'split',project:k,agents,dry_run:true});
-      modal('Распределение: '+data.projects[k].name,`<p>Связанные задачи (зависимости, общая область scope) уходят одному ИИ целиком; группы раскладываются по наименьшей загрузке в очках размера S=1, M=3, L=8. Назначенные вручную, занятые и закрытые задачи не меняются.</p><p>${agents.map(a=>`${esc(aiName(a))}: ${r.load[a]} очк.`).join(' · ')}</p>${r.groups.map(g=>`<p><b>${esc(aiName(g.agent))}</b> · ${g.points} очк. · ${esc(g.why)}<br>${g.tasks.map(esc).join(', ')}</p>`).join('')||'<p>Свободных задач для распределения нет.</p>'}${r.groups.length?'<button id="board-split-apply">Применить распределение</button>':''}`);
+      modal('Распределение: '+data.projects[k].name,`<p>Связанные задачи (зависимости, общая область scope) уходят одному ИИ целиком; группы раскладываются по наименьшей загрузке в очках размера S=1, M=3, L=8. Назначенные вручную, занятые и закрытые задачи не меняются.</p><p>${agents.map(a=>`${esc(aiName(a))}: ${r.load[a]} очк.`).join(' · ')}</p>${r.groups.map((g,i)=>`<p><label>ИИ: <select data-split-group="${i}">${agents.map(a=>`<option value="${esc(a)}"${a===g.agent?' selected':''}>${esc(aiName(a))}</option>`).join('')}</select></label> · ${g.points} очк. · ${esc(g.why)}<br>${g.tasks.map(esc).join(', ')}</p>`).join('')||'<p>Свободных задач для распределения нет.</p>'}${r.groups.length?'<p><small>Переключатель меняет ИИ сразу у всей группы. Применяется показанное здесь.</small></p><button id="board-split-apply">Применить распределение</button>':''}`);
       const apply=dialog.querySelector('#board-split-apply');
-      if(apply)apply.onclick=async()=>{dialog.close();await change({op:'split',project:k,agents,dry_run:false});};
+      if(apply)apply.onclick=async()=>{
+        // Берём распределение из переключателей, а не пересчитываем: что показано, то и записывается.
+        const assign={};
+        dialog.querySelectorAll('select[data-split-group]').forEach(sel=>r.groups[+sel.dataset.splitGroup].tasks.forEach(ref=>{assign[ref]=sel.value;}));
+        dialog.close();await change({op:'split',project:k,agents,dry_run:false,assign});
+      };
     }catch(e){message.textContent=e.message;}
   }
   function plan(){ BOARD_EXTRAS.form({data,project,modal,dialog,api,refresh}); }

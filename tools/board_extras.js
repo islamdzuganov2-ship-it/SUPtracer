@@ -5,28 +5,15 @@ window.BOARD_EXTRAS = (() => {
   let timer=load('tt-focus-timer',{state:'idle',remaining:1500000,end:null,project:''});
   let view=load('tt-board-view','board');
   const palette=['#8b7cf8','#36a7e7','#e55b95','#36b695','#e6a34c','#8596bb'];
-  const style=document.createElement('style');style.textContent=`
-  #boards-root{padding:22px;border:1px solid var(--line);border-radius:24px;background:radial-gradient(ellipse at top right,color-mix(in srgb,var(--accent) 9%,transparent),transparent 65%)}
-  .board-column{border:1px solid var(--line);border-radius:18px!important;background:color-mix(in srgb,var(--panel2) 85%,transparent)!important;min-height:170px;align-self:start}.board-column h3{font-size:13px}.board-task{border-radius:15px!important;box-shadow:var(--shadow)}.board-task h4{font-size:13px;line-height:1.5}.board-task small{font-size:11px}.board-project h2{font-size:17px!important}.board-task .route-detail{display:none}.board-tag{display:inline-block;background:color-mix(in srgb,var(--project-color) 18%,transparent);border-radius:6px;padding:4px 7px;font-size:10px;color:var(--ink2)}
-  .board-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:20px 0}.board-stat{padding:16px;border:1px solid var(--line);border-radius:15px;background:var(--panel)}.board-stat small{display:block;color:var(--ink3)}.board-stat strong{font-size:27px;display:block;margin-top:5px}.board-actions{display:flex;gap:8px;flex-wrap:wrap;margin:15px 0}.board-actions [aria-pressed=true]{background:var(--accent)!important;color:white!important}
-  #boards-root[data-view=list] .board-columns{display:block}#boards-root[data-view=list] .board-column{max-height:none!important;margin:10px 0;min-height:0}#boards-root[data-view=list] .board-task{display:flex;align-items:center;gap:12px;margin:8px 0}#boards-root[data-view=list] .board-task h4{flex:1;min-width:180px}#boards-root[data-view=list] .board-task small{display:none}#boards-root[data-view=list] .board-task>div{min-width:120px}#boards-root[data-view=list] .board-task .board-tag{min-width:90px}
-  .board-progress{height:4px;background:var(--line);border-radius:5px;overflow:hidden}.board-progress span{display:block;height:100%;background:var(--project-color)}.board-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--ink3);gap:8px;margin:9px 0}.board-overdue{color:var(--bad)}
-  .board-dialog{border-radius:20px!important}.board-dialog::backdrop{background:rgba(0,0,0,.5);backdrop-filter:blur(3px)}.board-form{display:grid;grid-template-columns:1fr 1fr;gap:12px}.board-form label{display:flex;flex-direction:column;gap:6px;font-size:12px}.board-form .wide{grid-column:1/-1}.board-form input,.board-form select,.board-form textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--ink);font:inherit;box-sizing:border-box}.board-form textarea{min-height:90px}.board-dialog [role=alert]{color:var(--bad)}.board-checklist label{display:flex;gap:8px;margin:10px 0}.board-model-plan{border:1px solid var(--line);border-radius:12px;padding:10px 14px;display:grid;gap:10px}.board-model-plan legend{font-size:12px;padding:0 6px}.board-plan-row{display:grid;grid-template-columns:110px 1fr 1fr;gap:10px;align-items:end}.board-plan-row .board-plan-rec{grid-column:1/-1;color:var(--ink3);font-size:11px}.board-plan-off{opacity:.45}.board-star{color:var(--bad);font-weight:700}.board-form.tried :invalid,.board-form .is-missing{border-color:var(--bad)!important;box-shadow:0 0 0 2px color-mix(in srgb,var(--bad) 25%,transparent)}.board-form fieldset{border:1px solid var(--line);border-radius:12px;padding:10px 14px}.board-form legend{font-size:12px;padding:0 6px}.board-types{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}.board-type{flex-direction:row!important;align-items:flex-start;gap:8px!important;border:1px solid var(--line);border-radius:10px;padding:9px;cursor:pointer}.board-type input{width:auto!important;margin-top:3px}.board-type span{display:flex;flex-direction:column;gap:3px}.board-type small{color:var(--ink3)}.board-type.is-active{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent)}.board-inline{display:inline-flex!important;flex-direction:row!important;align-items:center;gap:6px!important;margin-right:16px}.board-inline input,.board-dirs input{width:auto!important}.board-root>div{display:grid;gap:10px;margin-top:8px}.board-dirs{display:flex;flex-wrap:wrap;gap:10px 18px}.board-dirs label{flex-direction:row!important;align-items:center;gap:6px!important}.board-workspace{display:flex;flex-direction:column;gap:3px;font-size:12px;padding:10px 12px;border-radius:10px;background:var(--panel2);overflow-wrap:anywhere}.board-workspace code{font-size:11px}.board-type-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.board-type-fields:empty{display:none}.board-muted{color:var(--ink3);font-size:12px;margin:0}@media(max-width:650px){.board-type-fields{grid-template-columns:1fr}}@media(max-width:650px){.board-plan-row{grid-template-columns:1fr}}
-  .board-timer{display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;margin:15px 0;padding:16px 20px;background:var(--panel2);border:1px solid var(--line);border-radius:16px}.board-timer strong{display:block;font-size:28px;font-variant-numeric:tabular-nums}.board-timer small{color:var(--ink3)}.board-timer button{margin:3px}
-  @media(max-width:650px){#boards-root{padding:12px}.board-stats{grid-template-columns:1fr 1fr}.board-form{grid-template-columns:1fr}.board-form .wide{grid-column:auto}#boards-root[data-view=list] .board-task{flex-wrap:wrap}.board-tools select{max-width:100%}}
-  `;document.head.append(style);
   const date=d=>[d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');
-  function decorate(root,data,visible,project){
-    root.dataset.view=view;
+  // Статистика и карточки зависят от фильтров: их можно обновить, не трогая панель инструментов.
+  function decorateList(root,data,visible){
     const today=date(new Date()),last=new Date();last.setDate(last.getDate()+7);
     const open=visible.filter(t=>!['done','cancelled'].includes(t.status));
     const stats=document.createElement('div');stats.className='board-stats';
     stats.innerHTML=[['Открыто',open.length],['На ближайшие 7 дней',open.filter(t=>t.due_date&&t.due_date>=today&&t.due_date<=date(last)).length],['Просрочено',open.filter(t=>t.due_date&&t.due_date<today).length],['Завершено',visible.filter(t=>t.status==='done').length]].map(([label,n])=>`<div class="board-stat"><small>${label}</small><strong>${n}</strong></div>`).join('');
+    root.querySelector('.board-stats')?.remove();
     root.insertBefore(stats,root.querySelector('.board-tools'));
-    const actions=document.createElement('div');actions.className='board-actions';actions.innerHTML=`<button id="board-view" aria-pressed="${view==='board'}">▥ Доска</button><button id="board-list-view" aria-pressed="${view==='list'}">☷ Список</button><button id="board-appearance">Оформление</button>`;
-    root.insertBefore(actions,root.querySelector('#board-list'));
-    for(const [id,mode] of [['board-view','board'],['board-list-view','list']])root.querySelector('#'+id).onclick=()=>{view=mode;save('tt-board-view',view);root.dataset.view=view;actions.querySelector('#board-view').setAttribute('aria-pressed',view==='board');actions.querySelector('#board-list-view').setAttribute('aria-pressed',view==='list');};
-    root.querySelector('#board-appearance').onclick=()=>{const next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('tt-theme',next);}catch{}};
     root.querySelectorAll('.board-task').forEach(el=>{
       const index=Number(el.querySelector('[data-detail]').dataset.detail),t=data.tasks[index],color=palette[Object.keys(data.projects).indexOf(t.project)%palette.length];
       el.style.setProperty('--project-color',color);
@@ -35,6 +22,14 @@ window.BOARD_EXTRAS = (() => {
       const total=(t.acceptance||[]).length,done=(t.acceptance_done||[]).length;
       const meta=document.createElement('div');meta.innerHTML=`${total?`<div class="board-progress" role="progressbar" aria-label="Проверены критерии" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><span style="width:${100*done/total}%"></span></div>`:''}<div class="board-meta"><span class="${t.due_date&&t.due_date<today&&t.status!=='done'?'board-overdue':''}">${esc(t.due_date||'Без срока')}</span><span>${total?done+' / '+total:''}</span></div>`;el.insertBefore(meta,el.querySelector(':scope > button'));
     });
+  }
+  // Панель инструментов строится один раз за полную отрисовку, поиск её не трогает.
+  function decorateToolbar(root,data,project){
+    root.dataset.view=view;
+    const actions=document.createElement('div');actions.className='board-actions';actions.innerHTML=`<button id="board-view" aria-pressed="${view==='board'}">▥ Доска</button><button id="board-list-view" aria-pressed="${view==='list'}">☷ Список</button><button id="board-appearance">Оформление</button>`;
+    root.insertBefore(actions,root.querySelector('#board-list'));
+    for(const [id,mode] of [['board-view','board'],['board-list-view','list']])root.querySelector('#'+id).onclick=()=>{view=mode;save('tt-board-view',view);root.dataset.view=view;actions.querySelector('#board-view').setAttribute('aria-pressed',view==='board');actions.querySelector('#board-list-view').setAttribute('aria-pressed',view==='list');};
+    root.querySelector('#board-appearance').onclick=()=>{const next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('tt-theme',next);}catch{}};
     const box=document.createElement('div');box.className='board-timer';box.innerHTML='<div><small id="focus-caption">Фокус-сессия</small><strong id="focus-clock"></strong></div><div><button id="focus-start">Начать 25 минут</button><button id="focus-pause">Пауза</button><button id="focus-add">＋ 5 минут</button><button id="focus-stop">Завершить</button></div>';root.insertBefore(box,actions);
     const persist=()=>{save('tt-focus-timer',timer);tick();};
     box.querySelector('#focus-start').onclick=()=>{timer={state:'running',remaining:1500000,end:Date.now()+1500000,project:data.projects[project]?.name||data.projects[data.focus[0]]?.name||''};persist();};
@@ -46,13 +41,12 @@ window.BOARD_EXTRAS = (() => {
   setInterval(tick,1000);addEventListener('storage',e=>{if(e.key==='tt-focus-timer'){timer=load('tt-focus-timer',timer);tick();}});
   // Форма задачи. Проект задаёт рабочее место ИИ, тип — набор обязательных полей,
   // исходный запрос по умолчанию новый. Обязательное помечено «*» и подсвечивается.
-  function form({data,project,task,modal,dialog,api,refresh}){
-    const types=data.task_types||{}, dirs=data.directions||[];
-    const k=task?.project||project||'';
-    const val=(key,d='')=>esc(task?.[key]??d);
-    const options=(rows,current)=>rows.map(([v,label])=>`<option value="${esc(v)}" ${v===current?'selected':''}>${esc(label)}</option>`).join('');
-    const star='<b class="board-star" aria-hidden="true">*</b>';
-    const kinds={implementation:'Разработка',test:'Проверка',docs:'Документация',architecture:'Архитектура',research:'Исследование'};
+  // Шаблоны формы: чистые функции от данных, без обращения к DOM.
+  const options=(rows,current)=>rows.map(([v,label])=>`<option value="${esc(v)}" ${v===current?'selected':''}>${esc(label)}</option>`).join('');
+  const star='<b class="board-star" aria-hidden="true">*</b>';
+  const kinds={implementation:'Разработка',test:'Проверка',docs:'Документация',architecture:'Архитектура',research:'Исследование'};
+  const formContext=(data,project,task)=>({data,task,types:data.task_types||{},dirs:data.directions||[],k:task?.project||project||'',val:(key,d='')=>esc(task?.[key]??d)});
+  function typeFieldTemplates({types,dirs,task,val}){
     // Поля типа: подпись берётся из каталога сервера, чтобы не расходиться с проверкой.
     const typeFields={
       dev_by_spec:()=>`<label class="wide"><span>${esc(types.dev_by_spec.fields.spec_ref)} ${star}</span><input id="task-spec_ref" value="${val('spec_ref')}" required maxlength="2000" placeholder="docs/ТЗ_01.md §4, требования ИНТ-06…08"></label>`,
@@ -60,8 +54,14 @@ window.BOARD_EXTRAS = (() => {
       decomposition:()=>`<fieldset class="wide board-dirs" id="task-directions"><legend>${esc(types.decomposition.fields.directions)} ${star}</legend>${dirs.map(d=>`<label><input type="checkbox" value="${esc(d)}" ${(task?.directions||[]).includes(d)?'checked':''}> ${esc(d)}</label>`).join('')}</fieldset>`,
       direction_task:()=>`<label><span>${esc(types.direction_task.fields.direction)} ${star}</span><select id="task-direction" required><option value="">Выберите</option>${options(dirs.map(d=>[d,d]),task?.direction||'')}</select></label><label class="wide"><span>${esc(types.direction_task.fields.deliverable)} ${star}</span><input id="task-deliverable" value="${val('deliverable')}" required maxlength="2000"></label>`,
     };
-    const typeCards=Object.entries(types).map(([id,t])=>`<label class="board-type"><input type="radio" name="task-type" value="${esc(id)}" ${task?.task_type===id?'checked':''} ${!task||task.task_type?'required':''}><span><b>${esc(t.name)}</b><small>${esc(t.hint)}</small></span></label>`).join('');
-    modal(task?'Редактирование задачи':'Новая задача',`<p>Поля со ${star} обязательны. Набор полей зависит от типа задачи.</p>
+    return typeFields;
+  }
+  function typeCardsTemplate({types,task}){
+    return Object.entries(types).map(([id,t])=>`<label class="board-type"><input type="radio" name="task-type" value="${esc(id)}" ${task?.task_type===id?'checked':''} ${!task||task.task_type?'required':''}><span><b>${esc(t.name)}</b><small>${esc(t.hint)}</small></span></label>`).join('');
+  }
+  function formTemplate({data,task,types,dirs,k,val}){
+    const typeCards=typeCardsTemplate({types,task});
+    return `<p>Поля со ${star} обязательны. Набор полей зависит от типа задачи.</p>
 <form id="board-form" class="board-form" novalidate>
  <label class="wide"><span>Проект — где работает ИИ ${star}</span><select id="task-project" required ${task?'disabled':''}><option value="">Выберите проект</option>${options(Object.entries(data.projects).map(([key,p])=>[key,p.name]),k)}</select></label>
  <div class="wide board-workspace" id="task-workspace"></div>
@@ -88,7 +88,12 @@ window.BOARD_EXTRAS = (() => {
  <label class="wide" id="task-constraints-box" hidden>Ограничения и рамки<textarea id="task-constraints" maxlength="2000">${val('constraints')}</textarea></label>
  <fieldset class="wide board-model-plan"><legend>План модели — модель и усилия под эту задачу для каждого ИИ</legend>${Object.entries(data.providers||{}).map(([key,p])=>{const m=task?.model_plan?.[key],manual=m&&m.source==='manual';return `<div class="board-plan-row" data-plan="${esc(key)}"><b>${esc(p.name)}</b><label>Модель<select id="plan-model-${esc(key)}"><option value="">Рекомендованная</option>${options(data.models.filter(x=>x.provider===key).map(x=>[x.id,x.id]),manual?m.model:'')}</select></label><label>Усилия<select id="plan-effort-${esc(key)}"><option value="">Рекомендованные</option>${options(((data.efforts||{})[key]||[]).map(e=>[e,e]),manual?m.effort:'')}</select></label><small id="plan-rec-${esc(key)}" class="board-plan-rec"></small></div>`;}).join('')}<label>Обоснование ручного выбора (нужно, если меняете рекомендацию)<input id="task-model-reason" value="${esc(Object.values(task?.model_plan||{}).find(m=>m.source==='manual')?.reason||task?.model_reason||'')}"></label></fieldset>
  <div class="wide"><button id="board-save" type="submit">Сохранить задачу</button><p id="board-plan-error" role="alert"></p></div>
-</form>`);
+</form>`;
+  }
+  function form({data,project,task,modal,dialog,api,refresh}){
+    const ctx=formContext(data,project,task), {types,dirs}=ctx;
+    const typeFields=typeFieldTemplates(ctx);
+    modal(task?'Редактирование задачи':'Новая задача',formTemplate(ctx));
     const $=sel=>dialog.querySelector(sel), f=$('#board-form');
     const typeOf=()=>f.querySelector('[name=task-type]:checked')?.value||'';
     const rootMode=()=>f.querySelector('[name=root-mode]:checked')?.value||'existing';
@@ -174,5 +179,5 @@ window.BOARD_EXTRAS = (() => {
     box.querySelectorAll('input').forEach(el=>el.onchange=async()=>{try{const indices=[...box.querySelectorAll('input:checked')].map(v=>Number(v.dataset.criterion));await api({op:'update',ref:task.ref,changes:{acceptance_done:indices}});task.acceptance_done=indices;await refresh();}catch(e){el.checked=!el.checked;error.textContent=e.message;}});
     if(!['done','cancelled'].includes(task.status)){const complete=document.createElement('button');complete.textContent='Завершить с проверкой';complete.id='board-complete';error.after(complete);complete.onclick=()=>{dialog.close();modal('Результат проверки','<label>Что проверено и какой результат<textarea id="board-evidence" aria-label="Результат проверки"></textarea></label><button id="board-confirm">Завершить задачу</button><p id="board-complete-error" role="alert"></p>');dialog.querySelector('#board-confirm').onclick=async()=>{try{await api({op:'complete',ref:task.ref,evidence:dialog.querySelector('textarea').value});dialog.close();await refresh();}catch(e){dialog.querySelector('#board-complete-error').textContent=e.message;}};};}
   }
-  return {decorate,form,checklist};
+  return {decorateToolbar,decorateList,form,checklist};
 })();

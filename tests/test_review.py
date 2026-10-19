@@ -89,6 +89,9 @@ class ReviewTests(DataCase):
         self.assertEqual(t['status'], 'queued')
         self.assertIn('Автопроверка не пройдена', t['status_note'])
         self.assertFalse(any(r.get('phase') == 'review' for r in w.state()['runs']))
+        fb = w.packet(REF, agent='claude')['auto_check_feedback']
+        self.assertEqual({f['name'].split(':')[0] for f in fb['failed']}, {'Изменения в области задачи', 'Проверки проекта'})
+        self.assertIn('ai/claude/al-03', fb['instructions'])
 
     # --- ревью
 

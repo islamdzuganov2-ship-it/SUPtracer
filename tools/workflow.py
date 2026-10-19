@@ -439,6 +439,13 @@ def packet(ref, agent=None):
             verdicts='approve — всё выполнено по ТЗ; spec_change — выполнено, но решение в коде отклоняется от ТЗ и ТЗ нужно изменить (spec: deviation, proposal); changes — нужна доработка.',
             call='tt_work op=review ref=%s run=<RUN> worker=<ты> verdict=… criteria=[{ok, note} на каждый критерий по порядку] conclusion=… [spec={deviation, proposal}]' % t['ref'],
             after='approve и spec_change при пройденной автопроверке сливают ветку и закрывают задачу; changes возвращает её на доработку.')
+    ac=t.get('auto_check') or {}
+    if phase=='execute' and ac.get('ok') is False:
+        failed=[dict(name=c['name'], detail=c['detail'][-300:]) for c in ac.get('checks',[]) if not c['ok']]
+        result['auto_check_feedback']=dict(failed=failed,
+            instructions=('Доработай ту же ветку %s. ' % ac.get('branch','')) +
+                         ('Сначала влей в неё базовую ветку (git merge %s) и разреши конфликты, сохранив обе стороны. ' % ac.get('base','') if any(c['key']=='merge' and not c['ok'] for c in ac.get('checks',[])) else '') +
+                         'Исправь остальные провалы, прогони проверки, закоммить и пришли finish — автопроверка повторится сама.')
     if t.get('review') and t['review'].get('verdict')=='changes' and phase=='execute':
         result['review_feedback']=dict(conclusion=t['review']['conclusion'], criteria=t['review']['criteria'])
     if t.get('task_type')=='decomposition':

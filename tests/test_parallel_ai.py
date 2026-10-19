@@ -27,7 +27,9 @@ class ParallelAITests(DataCase):
     def test_route_follows_selected_ai(self):
         self.assertEqual(w.recommendation(self.base, agent='claude')['model'],'claude-haiku-5-5')
         self.assertEqual(w.recommendation(dict(self.base,size='M'), agent='claude')['model'],'claude-sonnet-5-5')
-        self.assertEqual(w.recommendation(dict(self.base,risk='high'), agent='claude')['model'],'claude-opus-5-5')
+        # Высокий риск малой правки — средний класс с усилиями выше; с архитектурой — старший.
+        self.assertEqual(w.recommendation(dict(self.base,risk='high'), agent='claude')['model'],'claude-sonnet-5-5')
+        self.assertEqual(w.recommendation(dict(self.base,risk='high',size='M',work_type='architecture'), agent='claude')['model'],'claude-opus-5-5')
         self.assertEqual(w.recommendation(dict(self.base,executor='claude'), agent='codex')['provider'],'claude')
         self.assertEqual(w.recommendation(self.base)['provider'],'codex')  # прежнее поведение по умолчанию
 

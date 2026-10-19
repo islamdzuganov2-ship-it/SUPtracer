@@ -212,6 +212,27 @@ def _one_line(k, P, U, E):
         money(e.get("remaining_usd", 0)), len(left))
 
 
+
+def _queued(focus):
+    """Запуски с доски, которые ждут ИИ: новая сессия должна их увидеть и принять."""
+    try:
+        import workflow
+        runs = [r for r in workflow.state().get("runs", []) if r.get("status") == "queued"
+                and (not focus or r.get("ref", "").split("/")[0] == focus)]
+    except Exception:
+        return []
+    if not runs:
+        return []
+    out = ["ЖДУТ ИСПОЛНИТЕЛЯ (запущены с доски) — прими, если это твой ИИ:"]
+    for r in runs[:5]:
+        route = (r.get("packet") or {}).get("route") or {}
+        out.append("  %s · %s · %s · %s %s → tt_work op=claim ref=%s run=%s model=%s worker=<эта сессия>" % (
+            r["ref"], r["id"], "оценка" if r.get("phase") == "assess" else "исполнение",
+            r.get("agent") or route.get("provider") or "любой ИИ", route.get("model", "?"),
+            r["ref"], r["id"], route.get("model", "?")))
+    return out
+
+
 def _commands(hook):
     """В чужом проекте относительный tools/pm.py не сработает — даём абсолютный путь
     и имена инструментов MCP-сервера, если он подключён."""
@@ -267,6 +288,8 @@ def build(budget=4000, project=None, with_memory=True, focus=None, hook=False):
     for c in _commands(hook):
         put(c)
     put("Перед реализацией: tt_work queue → plan/next → take (agent — свой ИИ); чужую метку claimed_by не трогать, heartbeat пока работаешь, finish только с проверками. CLI: pm.py work next --agent claude.")
+    for line in _queued(focus):
+        put(line)
     if any(u.get("cost_complete") is False for u in U.values()):
         put("Стоимость части расхода неизвестна: суммы в $ показывают только оценённую часть, не полную цену.")
     put("")

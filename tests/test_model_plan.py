@@ -34,7 +34,7 @@ class ModelPlanTests(DataCase):
 
     def test_budget_scales_with_effort(self):
         r=w.recommendation(dict(self.base,size='M',risk='high',work_type='architecture'),agent='claude')
-        self.assertEqual((r['model'],r['effort'],r['total_token_budget']),('claude-opus-5-5','xhigh',28800))
+        self.assertEqual((r['model'],r['effort'],r['total_token_budget']),('claude-opus-5-5','xhigh',28800))   # высокий риск — ступенью выше
         self.assertEqual(w.recommendation(self.base)['total_token_budget'],6000)  # прежние ориентиры
 
     def test_manual_plan_needs_reason_and_survives_recalc(self):
@@ -80,5 +80,5 @@ class ModelPlanTests(DataCase):
 
     def test_mcp_route(self):
         import json, mcp_server
-        r=mcp_server.call_tool('tt_work',dict(op='route',task=dict(size='S',risk='low',work_type='docs')))
+        r=mcp_server.call_tool('tt_work',dict(op='route',task=dict(size='S',risk='low',work_type='docs',acceptance=['Раздел обновлён'])))
         self.assertEqual(json.loads(r['content'][0]['text'])['model_plan']['claude']['effort'],'low')

@@ -28,7 +28,8 @@ class WorkflowTests(DataCase):
     def test_routing_does_not_default_to_flagship(self):
         self.assertEqual(w.recommendation(self.task)['model'],'gpt-6-luna')
         self.assertEqual(w.recommendation(dict(self.task,size='M'))['model'],'gpt-6.1-sol')
-        self.assertEqual(w.recommendation(dict(self.task,risk='high'))['model'],'gpt-6-astra')
+        self.assertEqual(w.recommendation(dict(self.task,risk='high'))['model'],'gpt-6.1-sol')
+        self.assertEqual(w.recommendation(dict(self.task,risk='high',size='M',work_type='architecture'))['model'],'gpt-6-astra')
 
     def test_dependency_blocks_launch(self):
         self.plan([dict(self.task,depends_on=['AL-01'])])

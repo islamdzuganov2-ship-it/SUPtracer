@@ -14,6 +14,7 @@ from pathlib import Path
 import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
+import complexity as cx
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = 'https://developers.openai.com/api/docs/guides/model-selection'
@@ -43,6 +44,10 @@ LINEUP = {'codex': {1: 'gpt-6-luna', 2: 'gpt-6.1-sol', 3: 'gpt-6-astra'},
 EFFORTS = {'claude': ('low', 'medium', 'high', 'xhigh', 'max'), 'codex': ('low', 'medium', 'high')}
 EFFORT_COST = {'low': .75, 'medium': 1., 'high': 1.25, 'xhigh': 1.5, 'max': 2.}  # ориентир бюджета, не тариф
 DEFAULT_EXECUTOR = 'codex'   # прежнее поведение; меняется op=settings
+STATUS_LABELS = {'queued': 'К выполнению', 'in_progress': 'В работе', 'review': 'Проверка',
+                 'blocked': 'Заблокировано', 'done': 'Готово', 'cancelled': 'Отменено'}
+MANUAL_STATUSES = ('queued', 'in_progress', 'review', 'blocked', 'cancelled')   # «Готово» — только с проверкой
+ASSESS_BUDGET = 4000         # оценка сложности короче исполнения
 LEASE_MINUTES = 45           # срок метки занятости без heartbeat
 LOCK_STALE_SECONDS = 120     # блокировка старше — след упавшего процесса
 WORK_TYPES = ('docs', 'test', 'implementation', 'architecture', 'research')
@@ -144,35 +149,12 @@ def check_executor(value):
     if value not in ('', None) and value not in PROVIDERS:
         raise ValueError('ИИ-исполнитель: ' + ', '.join(PROVIDERS) + ' или пусто')
 
-def task_tier(task):
-    size = task.get('size', 'M'); risk = task.get('risk', 'unknown'); kind = task.get('work_type', 'unknown')
-    if risk == 'high' or kind in ('architecture', 'research'):
-        return 3, 'Высокий риск или исследовательская неопределённость'
-    if size == 'S' and risk == 'low' and kind in ('docs', 'test', 'implementation'):
-        return 1, 'Малая задача с низким риском и проверяемым результатом'
-    return 2, 'Интеграция или недостаточно данных для уверенного выбора младшей модели'
-
-def task_effort(provider, tier, task):
-    """Достаточный уровень усилий внутри класса: усилия дешевле смены модели,
-    поэтому сначала подстраивается effort, а не модель."""
-    size = task.get('size', 'M'); risk = task.get('risk', 'unknown'); kind = task.get('work_type', 'unknown')
-    if tier == 1:
-        effort, why = ('low', 'документация по образцу') if kind == 'docs' else ('medium', 'проверяемая малая правка')
-    elif tier == 2:
-        effort, why = ('high', 'крупная или рискованная интеграция') if size == 'L' or risk == 'medium' else ('medium', 'обычная разработка')
-    elif risk == 'high' and kind in ('architecture', 'research') and size in ('M', 'L'):
-        effort, why = 'xhigh', 'высокий риск в архитектуре или исследовании'
-    else:
-        effort, why = 'high', 'трудная задача старшего класса'
-    allowed = EFFORTS[provider]
-    if effort not in allowed:   # у линейки GPT нет xhigh: берём старший доступный
-        effort, why = allowed[-1], why + '; у %s это старший доступный уровень' % PROVIDERS[provider]['short']
-    return effort, why
-
 def auto_plan(task, provider):
-    tier, reason = task_tier(task)
-    effort, why = task_effort(provider, tier, task)
-    return dict(model=LINEUP[provider][tier], effort=effort, reason=reason + '; усилия: ' + why, source='auto')
+    """Модель и усилия из многофакторной оценки сложности (complexity.py)."""
+    c = cx.assess(task)
+    effort, why = cx.effort_for(c, EFFORTS[provider], task)
+    return dict(model=LINEUP[provider][c['tier']], effort=effort,
+                reason=cx.summary(c) + '; усилия: ' + why, source='auto')
 
 def validate_plan_entry(provider, entry):
     if not isinstance(entry, dict): raise ValueError('План модели %s: объект model, effort, reason' % provider)
@@ -287,6 +269,8 @@ def snapshot():
         for original in project.get('backlog', []):
             t = dict(original); ref = key + '/' + t['id']
             t.update(s['tasks'].get(ref, {})); t.update(project=key, ref=ref)
+            if t.get('status') == 'in-progress': t['status'] = 'in_progress'   # прежнее написание из Obsidian
+            t['complexity'] = cx.assess(t)
             try: t['route'] = recommendation(t, default=conf['default_executor'])
             except ValueError as e:
                 # Ручная правка projects.json не должна ронять все доски.
@@ -332,6 +316,7 @@ def validate_details(task):
     check_executor(task.get('executor', ''))
     if 'scope' in task: validate_scope(task['scope'])
     validate_type(task)
+    if task.get('assessment') is not None: cx.validate_assessment(task['assessment'])
 
 def validate_type(task):
     kind = task.get('task_type')
@@ -404,6 +389,7 @@ def others_active(t, runs, at, worker=None):
 def packet(ref, agent=None):
     t=task_for(ref); s=state(); at=now()
     route=recommendation(t, agent=agent, default=settings(s)['default_executor'])
+    phase='assess' if t['complexity']['needs_assessment'] else 'execute' 
     if t['needs_plan']: raise ValueError('Сначала заполните root, критерии приёмки и разбейте XL')
     if review_required(t, route, s['runs']): raise ValueError('Лимит попыток/токенов достигнут: разбейте задачу или обоснуйте другую модель')
     if t['blocked_by']: raise ValueError('Не закрыты зависимости: '+', '.join(t['blocked_by']))
@@ -426,6 +412,18 @@ def packet(ref, agent=None):
         note=('Параллельно работают другие исполнители: не правь их scope, держи изменения в своей ветке.'
               if parallel else 'Других активных исполнителей в проекте нет.')
              + ('' if t.get('scope') else ' Область задачи (scope) не указана — пересечения не проверяются.'))
+    result['phase']=phase
+    result['complexity']={k:t['complexity'][k] for k in ('score','tier','confidence','conflicts','unknown')}
+    if phase=='assess':
+        # Оценка идёт на текущей модели как есть; после неё план пересчитывается.
+        route=dict(route, total_token_budget=ASSESS_BUDGET); result['route']=route
+        result['assess']=dict(
+            task='Не реализуй задачу. Оцени её: complexity, uncertainty, breadth — целые 1…5, reasons — основания.',
+            scale='1 — тривиально/ясно/одно место; 3 — обычная работа; 5 — трудно/много неизвестного/широко по системе.',
+            call='tt_work op=assess ref=%s run=<RUN> worker=<ты> assessment={complexity, uncertainty, breadth, reasons}' % t['ref'],
+            after='Сервер назначит модель и усилия и поставит запуск исполнения. Если назначенная модель не твоя — остановись и сообщи владельцу.')
+    if t.get('task_type')=='decomposition':
+        result['decomposition']='Создавай подзадачи через tt_work op=plan с task_type, root=%s и assessment {complexity, uncertainty, breadth, reasons} у каждой — модель и усилия подзадачи считаются по её сложности.' % t['root']
     result['launch']='Исполнитель проверяет доступность модели, принимает запуск через take/claim и выполняет критерии. Пакет не меняет модель текущего чата.'
     # Approximation is deliberately conservative and explicitly not billing tokens.
     if len(json.dumps(result,ensure_ascii=False)) > 6000:
@@ -594,13 +592,29 @@ def start_run(s, t, run, req, at):
     if conflict: raise ValueError('Область задачи пересекается с работой: '+conflict)
     minutes=settings(s)['lease_minutes']
     until=(at+timedelta(minutes=minutes)).isoformat()
-    run.update(status='running',worker=worker,model=model,agent=agent,packet=p,
+    run.update(status='running',worker=worker,model=model,agent=agent,packet=p,phase=p['phase'],
                claimed_at=at.isoformat(),heartbeat_at=at.isoformat(),lease_until=until)
     return dict(status='in_progress', claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until))
 
 def new_run(s, ref, p, at):
     run=dict(id='RUN-'+str(len(s['runs'])+1),ref=ref,status='queued',packet=p,created_at=at.isoformat())
+    if p: run['phase']=p['phase']
     s['runs'].append(run); return run
+
+def launch_prompt(t, run, route, project):
+    """Задание для ИИ: вставляется в чат Claude Code или Codex, если запуск сделан с доски."""
+    ai=PROVIDERS[route['provider']]['name']; ref=t['ref']; ws=workspace(t['project'], project)
+    lines=['Задача TaskTreker %s «%s» запущена для тебя (%s).' % (ref, t['title'], ai),
+           'Рабочая папка: %s.' % (ws['active_copy'] or ws['path'] or 'не указана')]
+    if run.get('phase')=='assess':
+        lines.append('Сначала оценка сложности, не реализация. Модель как есть: %s, усилия %s.' % (route['model'], route['effort']))
+    else:
+        lines.append('Модель: %s, усилия: %s. Если у тебя другая модель — переключись (/model) или сообщи.' % (route['model'], route['effort']))
+    lines.append('1) tt_work op=claim ref=%s run=%s model=%s worker=<id этой сессии>' % (ref, run['id'], route['model']))
+    lines.append('2) tt_work op=packet ref=%s agent=%s — и действуй строго по паспорту.' % (ref, route['provider']))
+    lines.append('3) %s' % ('tt_work op=assess … с оценкой 1…5 и основаниями.' if run.get('phase')=='assess'
+                            else 'По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
+    return '\n'.join(lines)
 
 def expire(s, ref, at, by):
     """Просроченная метка: запуск закрывается как expired, история остаётся."""
@@ -636,12 +650,21 @@ def action(req):
             out.append(dict(r, executor=t.get('executor') or '', stale=r['status']=='running' and not lease_alive(r, at)))
         return out[:10]
     if op=='packet': return packet(req.get('ref',''), agent=agent)
+    if op=='prompt':
+        # Задание для ждущего запуска — повторно, если владелец закрыл окно после «Запустить».
+        t=task_for(req.get('ref',''))
+        run=next((r for r in state()['runs'] if r['ref']==t['ref'] and r['status']=='queued'),None)
+        if not run: raise ValueError('У задачи нет запуска, ждущего исполнителя')
+        route=(run.get('packet') or {}).get('route') or recommendation(t, agent=run.get('agent'))
+        project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
+        return dict(run=run['id'], phase=run.get('phase'), route=route, prompt=launch_prompt(t, run, route, project))
     if op=='route':
         # Черновик формы: какой план модели получит задача, ничего не записывая.
         draft=req.get('task')
         if not isinstance(draft,dict): raise ValueError('route: нужен task с size, risk, work_type')
-        draft={k:draft.get(k) for k in ('size','risk','work_type','model_plan') if draft.get(k) is not None}
-        return dict(model_plan=model_plan(draft), efforts=EFFORTS)
+        keys=('size','risk','work_type','model_plan','task_type','title','why','acceptance','scope','depends_on','assessment',*TYPE_FIELDS)
+        draft={k:draft.get(k) for k in keys if draft.get(k) not in (None,'',[])}
+        return dict(model_plan=model_plan(draft), efforts=EFFORTS, complexity=cx.assess(draft))
     if op=='next':
         snap=snapshot(); at=now(); s=state(); out=[]
         for t in snap['tasks']:
@@ -653,6 +676,7 @@ def action(req):
             out.append(dict(t, route=route))
             if len(out)==5: break
         return out
+    extra={}
     with locked():
         s=state(); at=now()
         if op=='plan':
@@ -687,7 +711,10 @@ def action(req):
             patch={}
             if op=='update':
                 changes=req.get('changes',{})
-                if not isinstance(changes,dict) or set(changes)-{'priority','model','model_reason','model_plan','acceptance','acceptance_done','risk','work_type','due_date','root','title','why','executor','scope','task_type','new_root',*TYPE_FIELDS}: raise ValueError('Недопустимые поля изменения')
+                if not isinstance(changes,dict) or set(changes)-{'priority','model','model_reason','model_plan','acceptance','acceptance_done','risk','work_type','due_date','root','title','why','executor','scope','task_type','new_root','assessment',*TYPE_FIELDS}: raise ValueError('Недопустимые поля изменения')
+                if changes.get('assessment'):
+                    cx.validate_assessment(changes['assessment'])
+                    changes['assessment']=dict(changes['assessment'],reasons=changes['assessment']['reasons'].strip(),by=dict(agent='владелец'),at=at.isoformat())
                 new_root=None
                 if 'new_root' in changes:
                     if 'root' in changes: raise ValueError('Укажите либо существующий запрос, либо новый')
@@ -729,6 +756,8 @@ def action(req):
                 if any(r['ref']==ref and r['status'] in ('queued','running') for r in s['runs']): raise ValueError('Задача уже запущена или ожидает исполнителя')
                 run=new_run(s, ref, p, at)
                 if agent: run['agent']=agent   # запуск с доски закреплён за выбранным ИИ
+                project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
+                extra=dict(run=run['id'], phase=run.get('phase'), route=p['route'], prompt=launch_prompt(t, run, p['route'], project))
             elif op=='take':
                 # Атомарно: два ИИ, получившие одну задачу из next, не возьмут её оба.
                 if t.get('status') in ('done','cancelled','review','blocked'): raise ValueError('Статус не допускает запуск')
@@ -740,7 +769,26 @@ def action(req):
                 elif t.get('status')=='in_progress' and not run: raise ValueError('Задача в работе вне очереди: сначала смените статус')
                 if run is None: run=new_run(s, ref, None, at)
                 patch.update(start_run(s, t, run, req, at))
-            elif op in ('claim','heartbeat','finish','fail','cancel'):
+            elif op=='status':
+                target=req.get('status'); reason=(req.get('reason') or '').strip()
+                if target not in MANUAL_STATUSES: raise ValueError('Статус: %s; «Готово» — через завершение с проверкой' % ', '.join(STATUS_LABELS[k] for k in MANUAL_STATUSES))
+                current=t.get('status') or 'queued'
+                if target==current: raise ValueError('Задача уже в статусе «%s»' % STATUS_LABELS.get(target,target))
+                if target in ('blocked','cancelled') and not reason: raise ValueError('Укажите причину: она видна исполнителям и в истории')
+                if current=='done' and (target!='queued' or not reason): raise ValueError('Закрытую задачу можно только вернуть в «К выполнению» с причиной')
+                if len(reason)>1000: raise ValueError('Причина — до 1000 символов')
+                for r in s['runs']:
+                    if r['ref']!=ref or r['status'] not in ('queued','running'): continue
+                    if r['status']=='running' and lease_alive(r, at) and target!='cancelled':
+                        raise ValueError('Задачу выполняет %s (%s): сначала отмените запуск или дождитесь его завершения' % (r.get('agent') or '?', r.get('worker') or '?'))
+                    r.update(status='cancelled', finished_at=at.isoformat(),
+                             evidence='Владелец перевёл задачу в «%s»%s' % (STATUS_LABELS[target], ': '+reason if reason else ''))
+                history=list(t.get('status_history') or [])[-19:]
+                history.append(dict(at=at.isoformat(), from_status=current, to=target, reason=reason, by='владелец'))
+                patch.update(status=target, claimed_by=None, status_history=history,
+                             status_note=reason if target in ('blocked','cancelled') else None)
+                if current=='done': patch.update(completed_at=None)
+            elif op in ('claim','heartbeat','finish','fail','cancel','assess'):
                 run=next((r for r in s['runs'] if r['id']==req.get('run') and r['ref']==ref),None)
                 if not run: raise ValueError('Запуск не найден')
                 if op=='claim':
@@ -754,7 +802,30 @@ def action(req):
                     until=(at+timedelta(minutes=minutes)).isoformat()
                     run.update(heartbeat_at=at.isoformat(), lease_until=until)
                     patch['claimed_by']=dict(t.get('claimed_by') or {}, agent=run.get('agent'), worker=run['worker'], run=run['id'], model=run.get('model'), lease_until=until)
+                elif op=='assess':
+                    if run['status']!='running' or run.get('phase')!='assess': raise ValueError('Оценку принимает только выполняемый запуск оценки')
+                    if req.get('worker')!=run.get('worker'): raise ValueError('Оценку присылает принявший запуск исполнитель')
+                    a=req.get('assessment'); cx.validate_assessment(a)
+                    tokens=req.get('tokens')
+                    if tokens is not None and (type(tokens)!=int or tokens<0): raise ValueError('Токены должны быть целым неотрицательным числом')
+                    assessment=dict(complexity=a['complexity'], uncertainty=a['uncertainty'], breadth=a['breadth'],
+                                    reasons=a['reasons'].strip(), at=at.isoformat(),
+                                    by=dict(agent=run.get('agent'), model=run.get('model'), worker=run.get('worker')))
+                    run.update(status='done', evidence='Оценка сложности: '+assessment['reasons'], tokens=tokens,
+                               finished_at=at.isoformat(), assessment=assessment)
+                    after=dict(t, assessment=assessment)
+                    patch.update(assessment=assessment, status='queued', claimed_by=None, model_plan=model_plan(after))
+                    # Исполнение — новым запуском того же ИИ на назначенной модели.
+                    route=recommendation(dict(after, model_plan=patch['model_plan']), agent=run.get('agent'))
+                    nxt=new_run(s, ref, dict(route=route, phase='execute'), at); nxt['agent']=run.get('agent')
+                    project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
+                    extra=dict(run=nxt['id'], route=route, switch=route['model']!=run.get('model'),
+                               complexity={k:v for k,v in cx.assess(after).items() if k in ('score','tier','confidence')},
+                               prompt=launch_prompt(after, nxt, route, project),
+                               next=('Модель та же — можно сразу claim %s.' % nxt['id']) if route['model']==run.get('model')
+                                    else 'Назначена %s · %s: исполнение — в сессии с этой моделью; запуск %s ждёт.' % (route['model'], route['effort'], nxt['id']))
                 else:
+                    if op=='finish' and run.get('phase')=='assess': raise ValueError('Это запуск оценки: пришлите результат через op=assess')
                     if run['status'] not in (('queued','running') if op=='cancel' else ('running',)): raise ValueError('Запуск не выполняется')
                     if op!='cancel' and run.get('worker') and req.get('worker') and req['worker']!=run['worker']: raise ValueError('Завершает запуск принявший исполнитель')
                     if not isinstance(req.get('evidence'),str) or not req['evidence'].strip(): raise ValueError('Нужны результаты проверок или причина остановки')
@@ -766,7 +837,7 @@ def action(req):
             else: raise ValueError('Неизвестная операция')
             write_patches(s, {ref:patch} if patch else {})
         save('workflow.json',s)
-    return dict(ok=True)
+    return dict(ok=True, **extra)
 
 def main(args=None):
     parser=argparse.ArgumentParser(description='Доски: list/next/packet; изменения через request JSON')

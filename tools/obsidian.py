@@ -419,6 +419,8 @@ def cmd_push(args):
     T = load("tree.json", {})
     idx = mem.load_index()
     by_id = {y["id"]: y for y in idx.get("records", [])}
+    MEMORY_NAMES.clear()
+    MEMORY_NAMES.update(memory_note_names(idx.get("records", [])))
     written, copies = [], []
     state = jload(STATE, {"files": {}})
     ledger = state.setdefault("pushed", {})           # ОБС-07: что система записала в прошлый раз
@@ -634,8 +636,34 @@ def _icon(kind):
             "задача": "🌿", "почки": "🔵", "предложение": "🔵", "коммит": "🔸"}.get(kind, "·")
 
 
-def memory_note_name(rec):
+MEMORY_NAMES = {}        # id записи -> имя её заметки; заполняет cmd_push (см. memory_note_names)
+
+
+def _plain_memory_name(rec):
     return safe_name("%s — %s" % (rec.get("kind", "заметка"), rec.get("title", rec.get("id"))))
+
+
+def memory_note_names(records):
+    """Имена заметок памяти. Windows не различает регистр, поэтому «Продолжай» и
+    «продолжай» дают одно имя файла, и вторая запись затирала первую. Одинаковые
+    без учёта регистра имена получают суффикс id — у каждой записи свой. Остальные
+    имена не меняются, ссылки на них остаются прежними."""
+    groups = {}
+    for x in records:
+        if not from_vault_source(x):
+            groups.setdefault(_plain_memory_name(x).casefold(), []).append(x)
+    names = {}
+    for same in groups.values():
+        for x in same:
+            if len(same) == 1:
+                names[x["id"]] = _plain_memory_name(x)
+            else:
+                names[x["id"]] = "%s — %s" % (_plain_memory_name(x)[:60].rstrip(), x["id"])
+    return names
+
+
+def memory_note_name(rec):
+    return MEMORY_NAMES.get(rec["id"]) or _plain_memory_name(rec)
 
 
 PAGE_ROOTS = 60          # сколько корней памяти перечислять на странице проекта

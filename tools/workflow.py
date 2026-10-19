@@ -46,6 +46,29 @@ DEFAULT_EXECUTOR = 'codex'   # прежнее поведение; меняетс
 LEASE_MINUTES = 45           # срок метки занятости без heartbeat
 LOCK_STALE_SECONDS = 120     # блокировка старше — след упавшего процесса
 WORK_TYPES = ('docs', 'test', 'implementation', 'architecture', 'research')
+DIRECTIONS = ('аналитика', 'разработка', 'дизайн', 'маркетинг', 'продажи', 'эксплуатация', 'другое')
+# Тип задачи определяет, какие входные данные нужны исполнителю. Поля типа
+# обязательны: без ТЗ разработка, а без вопроса аналитика идут вслепую.
+TASK_TYPES = {
+    'dev_by_spec': dict(name='Разработка по готовому ТЗ', direction='разработка',
+        hint='ТЗ уже есть: реализовать требования, проверить критерии.',
+        work_types=('implementation', 'test', 'docs'),
+        fields=dict(spec_ref='ТЗ: файл, раздел или коды требований')),
+    'analysis_spec': dict(name='Аналитика и создание ТЗ', direction='аналитика',
+        hint='Исследовать вопрос и записать ТЗ, по которому потом пойдёт разработка.',
+        work_types=('research', 'docs', 'architecture'),
+        fields=dict(question='Предмет аналитики: что нужно выяснить или решить',
+                    inputs='Источники и входные данные', deliverable='Куда записать ТЗ: файл или раздел')),
+    'decomposition': dict(name='Проработка и декомпозиция на задачи', direction=None,
+        hint='Разобрать цель и создать задачи по направлениям: аналитика, разработка, дизайн, маркетинг, продажи…',
+        work_types=('architecture', 'research'),
+        fields=dict(directions='Направления, по которым создать задачи')),
+    'direction_task': dict(name='Задача направления: дизайн, маркетинг, продажи…', direction=None,
+        hint='Работа одного направления с понятным результатом.',
+        work_types=('implementation', 'docs', 'research', 'test'),
+        fields=dict(direction='Направление', deliverable='Ожидаемый результат: что и где будет готово')),
+}
+TYPE_FIELDS = ('spec_ref', 'question', 'inputs', 'deliverable', 'directions', 'direction', 'constraints')
 POLICY = dict(version=3, verified='2026-10-19', source=SOURCE,
     sources={k: v['source'] for k, v in PROVIDERS.items()},
     availability='Снимок моделей Codex этого хоста и таблицы моделей Claude на 19.10.2026; проверять перед исполнением',
@@ -291,7 +314,8 @@ def snapshot():
     tasks.sort(key=lambda t:t['rank'])
     roots=[{k:r.get(k) for k in ('id','title','project')} for r in read('memory/index.json',{}).get('records',[])
            if r.get('kind')=='запрос' and r.get('status')=='активна']
-    return dict(projects={k:dict(name=p.get('name',k), path=p.get('path','')) for k,p in projects.items()},
+    return dict(projects={k:dict(workspace(k,p), next_id=next_id(p)) for k,p in projects.items()},
+                task_types=TASK_TYPES, directions=DIRECTIONS,
                 tasks=tasks, roots=roots, focus=s['focus'], runs=s['runs'][-50:], models=MODELS, policy=POLICY,
                 providers=PROVIDERS, lineup=LINEUP, efforts=EFFORTS, settings=conf)
 
@@ -307,6 +331,65 @@ def validate_details(task):
         raise ValueError('Неверные отметки критериев')
     check_executor(task.get('executor', ''))
     if 'scope' in task: validate_scope(task['scope'])
+    validate_type(task)
+
+def validate_type(task):
+    kind = task.get('task_type')
+    if kind in (None, ''):
+        return   # задачи до появления типов и планы ассистентов без типа остаются законными
+    if kind not in TASK_TYPES: raise ValueError('Тип задачи: ' + ', '.join(TASK_TYPES))
+    spec = TASK_TYPES[kind]
+    for field, label in spec['fields'].items():
+        value = task.get(field)
+        if field == 'directions':
+            if not isinstance(value, list) or not value or any(v not in DIRECTIONS for v in value) or len(set(value)) != len(value):
+                raise ValueError('Не заполнено поле «%s»: одно или несколько из %s' % (label, ', '.join(DIRECTIONS)))
+        elif field == 'direction':
+            if value not in DIRECTIONS: raise ValueError('Не заполнено поле «%s»' % label)
+        elif not isinstance(value, str) or not value.strip() or len(value) > 2000:
+            raise ValueError('Не заполнено поле «%s»' % label)
+    if task.get('work_type') not in spec['work_types']:
+        raise ValueError('Вид работы для типа «%s»: %s' % (spec['name'], ', '.join(spec['work_types'])))
+    if task.get('constraints') is not None and (not isinstance(task['constraints'], str) or len(task['constraints']) > 2000):
+        raise ValueError('Ограничения — текст до 2000 символов')
+
+def git_remote(path):
+    """URL origin из .git/config без запуска git: рабочее место ИИ, не сбор фактов."""
+    if not path: return None
+    cfg = Path(path) / '.git'
+    try:
+        if cfg.is_file():   # рабочая копия: .git — файл со ссылкой на каталог
+            cfg = Path(cfg.read_text(encoding='utf-8').split('gitdir:', 1)[1].strip()).parents[1]
+        section = None
+        for line in (cfg / 'config').read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if line.startswith('['): section = line
+            elif section == '[remote "origin"]' and line.startswith('url'):
+                return line.split('=', 1)[1].strip()
+    except (OSError, IndexError):
+        return None
+    return None
+
+def workspace(key, project):
+    """Где ИИ работает над задачей: выбор проекта однозначно задаёт папку и репозиторий."""
+    path = project.get('inspection_path') or project.get('path') or ''
+    return dict(project=key, name=project.get('name', key), path=project.get('path', ''),
+                active_copy=project.get('inspection_path') or '', repo=git_remote(path) or git_remote(project.get('path')),
+                exists=bool(path) and Path(path).exists())
+
+def next_id(project, taken=()):
+    """Следующий номер в серии проекта: id_prefix или самый частый префикс бэклога."""
+    import re
+    ids = [t.get('id', '') for t in project.get('backlog', [])] + list(taken)
+    found = [m.groups() for m in (re.match(r'^(.*?)(\d+)$', i) for i in ids) if m]
+    prefix = project.get('id_prefix')
+    if not prefix:
+        counts = {}
+        for pre, _ in found: counts[pre] = counts.get(pre, 0) + 1
+        prefix = max(counts, key=lambda k: (counts[k], k)) if counts else 'T-'
+    numbers = [int(n) for pre, n in found if pre == prefix]
+    width = max((len(n) for pre, n in found if pre == prefix), default=2)
+    return prefix + str(max(numbers, default=0) + 1).zfill(width)
 
 def task_for(ref):
     t = next((t for t in snapshot()['tasks'] if t['ref'] == ref), None)
@@ -325,6 +408,11 @@ def packet(ref, agent=None):
     if review_required(t, route, s['runs']): raise ValueError('Лимит попыток/токенов достигнут: разбейте задачу или обоснуйте другую модель')
     if t['blocked_by']: raise ValueError('Не закрыты зависимости: '+', '.join(t['blocked_by']))
     result={k:t.get(k) for k in ('ref','title','why','root','acceptance','depends_on','scope')}
+    if t.get('task_type') in TASK_TYPES:
+        result['task_type']=dict(id=t['task_type'], name=TASK_TYPES[t['task_type']]['name'],
+                                 **{k:t[k] for k in TYPE_FIELDS if t.get(k) not in (None,'',[])})
+    project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
+    result['workspace']=dict(workspace(t['project'],project), note='Работать только в этом проекте и его папке; путь active_copy, если указан, — текущая рабочая копия.')
     result['route']=route
     result['instructions']=POLICY['rules']
     result['read_next']=['tt_context(project='+t['project']+', budget=1200)', 'tt_recall(query='+t['root']+')']
@@ -344,15 +432,59 @@ def packet(ref, agent=None):
         raise ValueError('Паспорт слишком велик: сократите критерии и вынесите детали в память')
     return result
 
+def prepare_plan(project, tasks):
+    """Заполнить то, что выводится однозначно: номер, вид работы по типу."""
+    projects=read('projects.json',{}).get('projects',{})
+    if project not in projects: raise ValueError('Выберите проект: он задаёт папку и репозиторий для ИИ')
+    if not isinstance(tasks,list): raise ValueError('План: от 1 до 50 задач')
+    out=[]; taken=[]
+    for t in tasks:
+        if not isinstance(t,dict): raise ValueError('Задача должна быть объектом')
+        t=dict(t)
+        if not t.get('id'):
+            t['id']=next_id(projects[project], taken)
+        taken.append(t['id'])
+        kind=TASK_TYPES.get(t.get('task_type'))
+        if kind and not t.get('work_type'): t['work_type']=kind['work_types'][0]
+        if kind and kind['direction'] and not t.get('direction'): t['direction']=kind['direction']
+        out.append(t)
+    return out
+
+def validate_new_root(t):
+    nr=t.get('new_root')
+    if not isinstance(nr,dict): raise ValueError('Новый запрос: нужны заголовок и текст')
+    for key,label in (('title','заголовок запроса'),('text','текст запроса')):
+        if not isinstance(nr.get(key),str) or not nr[key].strip() or len(nr[key])>(200 if key=='title' else 5000):
+            raise ValueError('Не заполнено поле «%s»' % label)
+
+def create_roots(project, tasks):
+    """Новые исходные запросы — записи памяти вида «запрос» в проекте задачи."""
+    if not any('new_root' in t for t in tasks): return tasks
+    import memory as mem, mdparse as md
+    stamp=now().isoformat()
+    for i,t in enumerate(tasks):
+        if 'new_root' not in t: continue
+        nr=t.pop('new_root')
+        text,_=md.redact_secrets(nr['text'].strip())
+        # Соль со временем: одинаковый заголовок не перезапишет чужой запрос.
+        rec=mem.new_record(nr['title'].strip(), text, project=project, kind='запрос', source='board',
+                           id=mem.make_id(nr['title'], project, 'board:%s:%d' % (stamp, i)))
+        mem.save(rec); t['root']=rec['id']
+    mem.build_index()
+    return tasks
+
 def validate_plan(project, tasks):
     projects=read('projects.json',{}).get('projects',{})
-    if project not in projects: raise ValueError('Неизвестный проект')
+    if project not in projects: raise ValueError('Выберите проект: он задаёт папку и репозиторий для ИИ')
     if not isinstance(tasks,list) or not 1 <= len(tasks) <= 50: raise ValueError('План: от 1 до 50 задач')
     existing={t['id']:t for t in projects[project].get('backlog',[])}
     records=read('memory/index.json',{}).get('records',[])
     ids=set()
     for t in tasks:
         if not isinstance(t,dict): raise ValueError('Задача должна быть объектом')
+        if 'new_root' in t:
+            if t.get('root'): raise ValueError('Укажите либо существующий запрос, либо новый')
+            validate_new_root(t); t=dict(t,root='новый запрос')
         for key in ('id','title','why','root'):
             if not isinstance(t.get(key),str) or not t[key].strip() or len(t[key])>1000: raise ValueError('Не заполнено поле '+key)
         if '/' in t['id'] or t['id'] in ids or t['id'] in existing: raise ValueError('Повтор или неверный id')
@@ -365,7 +497,7 @@ def validate_plan(project, tasks):
         if not isinstance(a,list) or not a or any(not isinstance(v,str) or not v.strip() for v in a): raise ValueError('Нужны критерии приёмки')
         deps=t.get('depends_on',[])
         if not isinstance(deps,list) or any(not isinstance(v,str) for v in deps): raise ValueError('depends_on должен быть списком id')
-        if not any(r.get('id')==t['root'] and r.get('project')==project for r in records): raise ValueError('root должен ссылаться на память этого проекта')
+        if t['root']!='новый запрос' and not any(r.get('id')==t['root'] and r.get('project')==project for r in records): raise ValueError('Исходный запрос должен быть из памяти этого проекта — или создайте новый')
         validate_details(t)
         recommendation(t)
     graph={**{k:v.get('depends_on',[]) for k,v in existing.items()}, **{t['id']:t.get('depends_on',[]) for t in tasks}}
@@ -524,11 +656,12 @@ def action(req):
     with locked():
         s=state(); at=now()
         if op=='plan':
-            project=req.get('project'); tasks=req.get('tasks'); validate_plan(project,tasks)
+            project=req.get('project'); tasks=prepare_plan(project,req.get('tasks')); validate_plan(project,tasks)
+            tasks=create_roots(project,tasks)   # только после полной проверки: план атомарен
             d=read('projects.json',{}); b=d['projects'][project].setdefault('backlog',[])
             # План модели прорабатывается сразу: для каждого ИИ — модель и усилия под задачу.
             b.extend(dict(t,status='queued',model_plan=model_plan(t)) for t in tasks); save('projects.json',d)
-            return dict(ok=True, added=[t['id'] for t in tasks])
+            return dict(ok=True, added=[t['id'] for t in tasks], roots=sorted({t['root'] for t in tasks}))
         if op=='focus':
             keys=req.get('projects'); known=snapshot()['projects']
             if not isinstance(keys,list) or any(not isinstance(k,str) or k not in known for k in keys): raise ValueError('Неизвестные проекты фокуса')
@@ -554,7 +687,11 @@ def action(req):
             patch={}
             if op=='update':
                 changes=req.get('changes',{})
-                if not isinstance(changes,dict) or set(changes)-{'priority','model','model_reason','model_plan','acceptance','acceptance_done','risk','work_type','due_date','root','title','why','executor','scope'}: raise ValueError('Недопустимые поля изменения')
+                if not isinstance(changes,dict) or set(changes)-{'priority','model','model_reason','model_plan','acceptance','acceptance_done','risk','work_type','due_date','root','title','why','executor','scope','task_type','new_root',*TYPE_FIELDS}: raise ValueError('Недопустимые поля изменения')
+                new_root=None
+                if 'new_root' in changes:
+                    if 'root' in changes: raise ValueError('Укажите либо существующий запрос, либо новый')
+                    validate_new_root(changes); new_root=changes.pop('new_root')
                 for field in ('title','why'):
                     if field in changes and (not isinstance(changes[field],str) or not changes[field].strip() or len(changes[field])>1000): raise ValueError('Заполните '+field)
                 if 'root' in changes and not any(r.get('id')==changes['root'] and r.get('project')==t['project'] for r in read('memory/index.json',{}).get('records',[])): raise ValueError('Корень должен принадлежать проекту')
@@ -576,6 +713,8 @@ def action(req):
                     changes['model_plan']=merged
                 validate_details(dict(t,**changes)); recommendation(dict(t,**changes)); patch.update(changes)
                 patch['model_plan']=model_plan(dict(t,**changes))
+                if new_root:   # запись памяти — только после всех проверок правки
+                    patch['root']=create_roots(t['project'],[dict(new_root=new_root)])[0]['root']
             elif op=='complete':
                 packet(ref)
                 if t.get('status') in ('done','cancelled'): raise ValueError('Задача уже закрыта')

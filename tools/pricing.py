@@ -29,6 +29,36 @@ DEFAULT = {"in": 5.0, "out": 25.0, "read_mult": 0.1}
 WRITE_5M = 1.25
 WRITE_1H = 2.0
 
+# Standard API-equivalent rates, verified against official model pages.
+# Subscription invoices and native app processing tiers are not inferred.
+OPENAI_CHECKED = "2026-10-14"
+OPENAI_SOURCE = "https://developers.openai.com/api/docs/pricing"
+OPENAI_PRICES = {
+    "gpt-6-astra": {"in": 10., "read": 1., "write": 12.5, "out": 50.},
+    "gpt-6.1-sol": {"in": 2., "read": .1, "write": 2.5, "out": 10.},
+    "gpt-6-luna": {"in": .1, "read": .01, "write": .125, "out": .5},
+    "gpt-5.5": {"in": 5., "read": .5, "write": 5., "out": 30.},
+    "gpt-5.3-codex": {"in": 1.75, "read": .175, "write": 1.75, "out": 14.},
+}
+
+
+def openai_price_for(model):
+    name = str(model or "").lower().strip()
+    for key in sorted(OPENAI_PRICES, key=len, reverse=True):
+        if name == key or (name.startswith(key + "-") and name[len(key) + 1:][:4].isdigit()):
+            return OPENAI_PRICES[key]
+    return None
+
+
+def openai_cost_usd(model, input_t=0, output_t=0, cache_read=0, cache_write=0, request_input=0):
+    p = openai_price_for(model)
+    if p is None:
+        return None
+    long_context = request_input > 272000 and model != "gpt-5.3-codex"
+    input_mult, output_mult = (2., 1.5) if long_context else (1., 1.)
+    return ((input_t * p["in"] + cache_read * p["read"] + cache_write * p["write"]) * input_mult
+            + output_t * p["out"] * output_mult) / 1e6
+
 
 def price_for(model: str):
     if not model:

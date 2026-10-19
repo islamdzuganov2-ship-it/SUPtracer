@@ -18,7 +18,7 @@ import sys
 from datetime import date, datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
 OK, FAIL, WARN = [], [], []
 
@@ -92,6 +92,53 @@ def t_readiness():
                 bad.append("%s.%s = %r (нужно целое 0..100)" % (k, f, v))
         if not (r.get("basis") or "").strip():
             bad.append("%s: пустой readiness.basis — значит цифра ничем не обоснована" % k)
+        review = r.get('review')
+        if review is not None:
+            if not isinstance(review, dict) or review.get('method') != 'checkpoints-v1':
+                bad.append('%s: неизвестная методика readiness.review' % k)
+                continue
+            try:
+                date.fromisoformat(review.get('date', ''))
+            except (ValueError, TypeError):
+                bad.append('%s: нет даты ревизии готовности' % k)
+            if r.get('assessed') is not True:
+                bad.append('%s: ревизия пунктов должна быть явно assessed=true' % k)
+            dimensions = review.get('dimensions')
+            if not isinstance(dimensions, dict):
+                bad.append('%s: нет пяти измерений ревизии' % k)
+                continue
+            for dim in ('functional', 'production', 'docs', 'tests', 'security'):
+                axis = dimensions.get(dim, {})
+                if not isinstance(axis, dict):
+                    bad.append('%s.%s: неверная структура оснований' % (k, dim))
+                    continue
+                yes, no = axis.get('confirmed'), axis.get('pending')
+                if not isinstance(yes, list) or not isinstance(no, list):
+                    bad.append('%s.%s: нет подтверждённых/открытых пунктов' % (k, dim))
+                    continue
+                if len(yes) + len(no) != 4 or any(not isinstance(s, str) or not s.strip() for s in yes + no):
+                    bad.append('%s.%s: нужны четыре содержательных пункта' % (k, dim))
+                if all(isinstance(s, str) for s in yes + no) and len(set(yes + no)) != len(yes + no):
+                    bad.append('%s.%s: повторяющиеся пункты ревизии' % (k, dim))
+                if r.get(dim) != 25 * len(yes):
+                    bad.append('%s.%s: число расходится с подтверждёнными пунктами' % (k, dim))
+                if not isinstance(axis.get('evidence'), str) or not axis['evidence'].strip():
+                    bad.append('%s.%s: отсутствуют основания пунктов' % (k, dim))
+    return bad
+
+
+@check('маршрутизация проектов не содержит конфликтующих владельцев')
+def t_project_routes():
+    from project_routes import conflicts, paths, resolve_path
+    projects = load('projects.json')['projects']
+    bad = ['Каталог %s закреплён за несколькими проектами: %s' % (path, ', '.join(owners))
+           for path, owners in conflicts(projects)]
+    for key, p in projects.items():
+        if p.get('inspection_path') and resolve_path(p['inspection_path'], paths(projects))['project'] != key:
+            bad.append('%s: каталог инспекции не принадлежит этому проекту' % key)
+    for provider, data in load('usage.json').get('providers', {}).items():
+        if data.get('routing_stale'):
+            bad.append('%s: источник собран по прежней маршрутизации; нужен refresh --source all' % provider)
     return bad
 
 
@@ -131,7 +178,8 @@ def t_usage_mapping():
     U = load("usage.json")["projects"]
     mapped = {usage_key(P, U, k) for k in P}
     orphan = [k for k in U if k not in mapped]
-    return ["расход проекта %s ($%.0f) ни к чему не привязан — добавь проект в projects.json "
+    return ["расход проекта %s ($%.0f) ни к чему не привязан — добавь проект в projects.json, "
+            "допиши каталог в usage_paths проекта, к которому относится работа, "
             "или поправь project_key_from_cwd в collect_usage.py" % (k, U[k]["usd"]) for k in orphan]
 
 
@@ -178,14 +226,94 @@ def t_no_secrets():
         r"sk-ant-[A-Za-z0-9\-_]{20,}", r"AKIA[0-9A-Z]{16}",
         r"ghp_[A-Za-z0-9]{30,}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----")]
     bad = []
-    for fn in sorted(os.listdir(DATA)):
-        if not fn.endswith(".json"):
+    files = [os.path.join(DATA, fn) for fn in sorted(os.listdir(DATA)) if fn.endswith(".json")]
+    mem = os.path.join(DATA, "memory")
+    if os.path.isdir(mem):
+        # БЕЗ-04: память набивается из чужих заметок, поэтому её проверяем наравне с данными.
+        files += [os.path.join(mem, fn) for fn in sorted(os.listdir(mem)) if fn.endswith((".md", ".json"))]
+    for path in files:
+        try:
+            with open(path, encoding="utf-8") as f:
+                txt = f.read()
+        except OSError:
             continue
-        with open(os.path.join(DATA, fn), encoding="utf-8") as f:
-            txt = f.read()
         for r in rx:
             if r.search(txt):
-                bad.append("%s: найдено совпадение с %s" % (fn, r.pattern))
+                bad.append("%s: найдено совпадение с %s" % (os.path.relpath(path, DATA), r.pattern))
+    return bad
+
+
+@check("память: у записей есть вид, проект и непустое тело")
+def t_memory():
+    mem_dir = os.path.join(DATA, "memory")
+    if not os.path.isdir(mem_dir):
+        return []
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import memory as mem
+    projects = set(load("projects.json")["projects"]) | {"портфель"}
+    bad, ids = [], {}
+    for rec in mem.load_all():
+        if rec["kind"] not in mem.KINDS:
+            bad.append("%s: вид %r вне %s" % (rec["id"], rec["kind"], list(mem.KINDS)))
+        if not (rec.get("body") or "").strip():
+            bad.append("%s: пустое тело — запись ни о чём" % rec["id"])
+        if rec["project"] not in projects:
+            bad.append("%s: проект %r не из projects.json" % (rec["id"], rec["project"]))
+        if rec.get("parent") and rec["parent"] == rec["id"]:
+            bad.append("%s: запись объявлена родителем самой себе" % rec["id"])
+        ids[rec["id"]] = ids.get(rec["id"], 0) + 1
+    for rid, n in ids.items():
+        if n > 1:
+            bad.append("%s: идентификатор встречается %d раз" % (rid, n))
+    # Осиротевшие ссылки на родителя ломают дерево — ветвь повисает в воздухе.
+    known = set(ids)
+    for rec in mem.load_all():
+        if rec.get("parent") and rec["parent"] not in known:
+            bad.append("%s: родитель %s не найден" % (rec["id"], rec["parent"]))
+    return bad
+
+
+@check("индекс памяти и дерево собраны по текущим записям")
+def t_memory_index():
+    mem_dir = os.path.join(DATA, "memory")
+    if not os.path.isdir(mem_dir) or not os.listdir(mem_dir):
+        return []
+    bad = []
+    idx_path = os.path.join(mem_dir, "index.json")
+    if not os.path.exists(idx_path):
+        return ["нет data/memory/index.json — запустите py tools/pm.py refresh"]
+    with open(idx_path, encoding="utf-8") as f:
+        idx = json.load(f)
+    on_disk = {fn[:-3] for fn in os.listdir(mem_dir) if fn.endswith(".md")}
+    in_index = {r["id"] for r in idx.get("records", [])}
+    if on_disk - in_index:
+        bad.append("нет в индексе: %s" % ", ".join(sorted(on_disk - in_index)[:5]))
+    if in_index - on_disk:
+        bad.append("в индексе есть, а файла нет: %s" % ", ".join(sorted(in_index - on_disk)[:5]))
+    tree_path = os.path.join(DATA, "tree.json")
+    if not os.path.exists(tree_path):
+        bad.append("нет data/tree.json — дерево на дашборде будет пустым")
+    return bad
+
+
+@check("входящие: у принятых предложений есть задача в бэклоге")
+def t_inbox():
+    p = os.path.join(DATA, "inbox.json")
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8") as f:
+        items = json.load(f).get("items", [])
+    P = load("projects.json")["projects"]
+    bad = []
+    for it in items:
+        if it.get("status") != "applied":
+            continue
+        ref = it.get("applied_to") or ""
+        proj, _, tid = ref.partition("/")
+        if proj not in P:
+            bad.append("%s: принято в неизвестный проект %r" % (it.get("id"), proj))
+        elif not any(b.get("id") == tid for b in P[proj].get("backlog", [])):
+            bad.append("%s: задачи %s в бэклоге %s нет" % (it.get("id"), tid, proj))
     return bad
 
 
@@ -243,6 +371,12 @@ def t_pricing_fresh():
         return ["прайс сверялся %d дней назад (%s), порог %d. Спросите у skill claude-api "
                 "актуальные цены, поправьте таблицу и передвиньте CHECKED — на этом прайсе "
                 "держится весь денежный счёт портфеля." % (age, pricing.CHECKED, pricing.STALE_DAYS)]
+    try:
+        openai_age = (date.today() - datetime.strptime(pricing.OPENAI_CHECKED, "%Y-%m-%d").date()).days
+    except (AttributeError, ValueError):
+        return ["В tools/pricing.py нет даты проверки OpenAI OPENAI_CHECKED"]
+    if openai_age > pricing.STALE_DAYS:
+        return ["Прайс OpenAI устарел: %d дней. Сверить официальную документацию и обновить OPENAI_CHECKED." % openai_age]
     return []
 
 
@@ -263,6 +397,28 @@ def t_quality():
     return bad
 
 
+@check("юнит-тесты проходят")
+def t_unit_tests():
+    """КАЧ-02: гейт падает при провале тестов. Тесты работают на своих временных
+    каталогах данных (ИНТ-01), поэтому рабочий портфель они не трогают."""
+    tests = os.path.join(ROOT, "tests")
+    if not os.path.isdir(tests):
+        return ["нет каталога tests/ — тесты потеряны"]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    env.pop("TASKTREKER_DATA", None)
+    try:
+        r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", tests, "-p", "test_*.py"],
+                           cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=600, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return ["тесты не уложились в 10 минут"]
+    tail = (r.stderr or r.stdout).strip().splitlines()
+    if r.returncode != 0:
+        fails = [l for l in tail if l.startswith(("FAIL:", "ERROR:"))]
+        return (fails[:10] or tail[-5:]) + [tail[-1] if tail else "код возврата %d" % r.returncode]
+    return []
+
+
 @check("рабочее дерево чистое")
 def t_git_clean():
     r = subprocess.run(["git", "status", "--short"], cwd=ROOT, capture_output=True,
@@ -271,9 +427,10 @@ def t_git_clean():
     return ["не закоммичено %d файлов:\n      %s" % (len(dirty), "\n      ".join(dirty[:10]))] if dirty else []
 
 
-TESTS = [t_json_parses, t_required_fields, t_readiness, t_backlog, t_paths,
+TESTS = [t_json_parses, t_required_fields, t_readiness, t_project_routes, t_backlog, t_paths,
          t_usage_mapping, t_estimates, t_comments, t_competitors, t_no_secrets,
-         t_pricing_fresh, t_quality, t_dashboard_builds, t_git_clean]
+         t_pricing_fresh, t_quality, t_memory, t_memory_index, t_inbox,
+         t_dashboard_builds, t_unit_tests, t_git_clean]
 
 SOFT = {t_git_clean}  # предупреждение, а не провал
 

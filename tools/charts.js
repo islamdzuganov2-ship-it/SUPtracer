@@ -214,6 +214,8 @@ const VIZ = (() => {
         const x = LW + j * CW;
         const rect = el('rect', {
           x: x + 2, y: y + 3, width: CW - 4, height: RH - 6, rx: 4,
+            'data-row': r.key || '', 'data-col': c.key || '',
+            'aria-label': `${r.label} · ${c.label}: ${d.value == null ? 'не оценено' : d.value}`,
           fill: d.value == null ? 'var(--empty)' : ramp(d.value)
         });
         hoverable(rect, d.tip || `<b>${r.label}</b> · ${c.label}<br>${d.value ?? '—'}`);

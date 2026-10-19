@@ -39,6 +39,10 @@ out.fanMax = fanMax; out.fanNode = fanNode;
 out.tips = M.tips.filter(n => n.kind === 'сделано').length;
 out.fruits = M.fruits.length;
 out.blossoms = M.leaves.filter(n => n._work).length;
+out.search = T.searchNodes(M.nodes, 'альфа задача').map(n => n.id);
+out.exactSearch = T.searchNodes([{id:'a', label:'Учёт расходов', detail:'Codex'},
+  {id:'b', label:'Расходы', detail:'учёт Codex'}], 'учет расходов').map(n => n.id);
+out.page = T.childPage({children: Array.from({length: 40}, (_, i) => ({id:i, _vis:i < 35}))}, 28);
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -72,6 +76,7 @@ STATUSES = {
     "частично": "partial", "промпты готовы, генерация не начата": "partial",
     "idea": "later", "не начато": "later", "отложено": "later",
     "blocked": "blocked", "ждёт решения владельца стенда": "blocked",
+    "in_progress": "progress", "готово частично": "partial", "completed": "done",
 }
 
 
@@ -103,6 +108,15 @@ class TreeView(unittest.TestCase):
 
     def test_wide_node_forks_instead_of_a_broom(self):                  # ДРВ-07
         self.assertLessEqual(self.out["fanMax"], 3, self.out["fanNode"])
+
+    def test_search_uses_project_words_and_normalizes_yo(self):
+        self.assertEqual(len(self.out["search"]), 6)
+        self.assertEqual(self.out["exactSearch"][0], 'a')
+
+    def test_wide_children_can_be_paged_without_hidden_children_in_count(self):
+        self.assertEqual(len(self.out["page"]["items"]), 28)
+        self.assertEqual(self.out["page"]["remaining"], 7)
+        self.assertEqual(self.out["page"]["hidden"], 5)
 
 
 if __name__ == "__main__":

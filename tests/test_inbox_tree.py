@@ -111,6 +111,61 @@ class Tree(DataCase):
         out = self.build()
         self.assertTrue(self.find(out["root"], lambda n: n["id"] == "p:портфель"))
 
+    def test_task_keeps_its_exact_memory_parent(self):
+        self.projects()
+        m = self.t.memory
+        root = m.new_record("Запрос", "текст", project="alpha-api", kind="запрос")
+        child = m.new_record("Уточнение", "текст", project="alpha-api", kind="требование",
+                             parent=root["id"], root=root["id"])
+        m.save(root)
+        m.save(child)
+        m.build_index()
+        projects = self.jread("projects.json")
+        projects["projects"]["alpha-api"]["backlog"][0]["root"] = child["id"]
+        self.jwrite("projects.json", projects)
+        out = self.build()
+        branch = self.find(out["root"], lambda n: n.get("memory") == child["id"])
+        self.assertEqual([c["task"] for c in branch["children"]], ["AL-01"])
+        tasks = [n for n in self.t.tree._walk(out["root"]) if n.get("task") == "AL-01"]
+        self.assertEqual(len(tasks), 1)
+
+    def test_active_children_survive_retired_and_missing_parents(self):
+        self.projects()
+        m = self.t.memory
+        root = m.new_record("Устаревший запрос", "текст", project="beta-tool", kind="запрос")
+        m.save(root)
+        child = m.new_record("Актуальное решение", "текст", project="beta-tool", kind="решение",
+                             parent=root["id"], root=root["id"])
+        missing = m.new_record("Потерянная связь", "текст", project="портфель", parent="mem-missing")
+        m.save(child)
+        m.save(missing)
+        m.retire(root["id"], why="заменён")
+        m.build_index()
+        out = self.build()
+        for record in (child, missing):
+            shown = self.find(out["root"], lambda n: n.get("memory") == record["id"])
+            self.assertIsNotNone(shown)
+            self.assertIn("активной памяти", shown["link_note"])
+            self.assertEqual(shown["parent_memory"], record["parent"])
+        self.assertIsNone(self.find(out["root"], lambda n: n.get("memory") == root["id"]))
+
+    def test_cycles_and_cross_project_links_do_not_hide_or_duplicate_memory(self):
+        self.projects()
+        m = self.t.memory
+        a = m.new_record("Альфа A", "текст", project="alpha-api")
+        b = m.new_record("Альфа B", "текст", project="alpha-api", parent=a["id"])
+        a["parent"] = b["id"]
+        c = m.new_record("Бета", "текст", project="beta-tool", parent=a["id"])
+        for rec in (a, b, c):
+            m.save(rec)
+        m.build_index()
+        out = self.build()
+        shown = [n for n in self.t.tree._walk(out["root"]) if n.get("memory")]
+        self.assertEqual(sorted(n["memory"] for n in shown), sorted(r["id"] for r in (a, b, c)))
+        beta = self.find(out["root"], lambda n: n["id"] == "p:beta-tool")
+        self.assertIsNotNone(self.find(beta, lambda n: n.get("memory") == c["id"]))
+        self.assertTrue(any("цикл" in n.get("link_note", "") for n in shown))
+
     def test_foreign_project_is_its_own_branch(self):                   # ПРМ-08
         self.projects()
         m = self.t.memory

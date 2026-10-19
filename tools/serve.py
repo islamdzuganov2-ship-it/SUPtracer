@@ -46,6 +46,14 @@ def project_keys():
 
 _lock = threading.Lock()
 _last = {"at": 0, "mode": "", "ok": None, "log": "", "seconds": 0}
+SOURCES = ("all", "claude", "codex")
+MAX_BODY = 1024 * 1024
+
+
+def integration_status():
+    import connect
+    return {"claude": {"connected": connect.mcp_installed(), "label": "Claude Code"},
+            "codex": {"connected": connect.codex_mcp_installed(), "label": "GPT / Codex"}}
 
 
 def run_pm(args, timeout=900):
@@ -99,25 +107,53 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True, "served": True,
                                         "dashboard": os.path.exists(DASH),
                                         "last": _last})
+        if path == "/api/integrations":
+            try:
+                return self.send_json(200, {"ok": True, "providers": integration_status()})
+            except Exception:
+                return self.send_json(500, {"ok": False, "error": "Не удалось прочитать настройки подключения."})
+        if path == "/api/work":
+            import workflow
+            return self.send_json(200, {"ok": True, "data": workflow.snapshot()})
         self.send_json(404, {"ok": False, "error": "нет такого адреса"})
 
     def do_POST(self):
         if not self.local_only():
             return
-        if self.path.split("?")[0] != "/api/refresh":
+        path = self.path.split("?")[0]
+        if path not in ("/api/refresh", "/api/connect", "/api/work"):
             return self.send_json(404, {"ok": False, "error": "нет такого адреса"})
         if self.headers.get("X-TaskTreker") != "1":
             # Форма с чужого сайта такой заголовок поставить не может.
             return self.send_json(403, {"ok": False, "error": "запрос не от дашборда"})
         try:
             n = int(self.headers.get("Content-Length") or 0)
+            if n < 0 or n > MAX_BODY:
+                return self.send_json(413, {"ok": False, "error": "слишком большой запрос"})
             req = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
         except Exception:
             req = {}
         if not isinstance(req, dict):
             req = {}
+        if path == "/api/work":
+            import workflow
+            try:
+                return self.send_json(200, {"ok": True, "data": workflow.action(req)})
+            except (ValueError, TypeError, KeyError) as e:
+                return self.send_json(400, {"ok": False, "error": str(e)})
+        source = req.get("source", "all")
+        if source not in SOURCES:
+            return self.send_json(400, {"ok": False, "error": "неизвестный источник данных"})
+        if path == "/api/connect":
+            if not _lock.acquire(blocking=False):
+                return self.send_json(409, {"ok": False, "error": "операция уже идёт"})
+            try:
+                ok, log, secs = run_pm(["connect", "--provider", source])
+                return self.send_json(200, {"ok": ok, "log": log, "seconds": secs})
+            finally:
+                _lock.release()
         mode = req.get("mode", "fast")
-        if mode not in MODES:
+        if not isinstance(mode, str) or mode not in MODES:
             return self.send_json(400, {"ok": False, "error": "неизвестный режим %r" % mode})
         args, title = MODES[mode]
         if mode == "project":
@@ -125,6 +161,8 @@ class Handler(BaseHTTPRequestHandler):
             if key not in project_keys():
                 return self.send_json(400, {"ok": False, "error": "нет такого проекта %r" % key})
             args, title = args + [key], "%s: %s" % (title, key)
+        if mode != "vault" and "source" in req:
+            args = args + ["--source", source]
         if not _lock.acquire(blocking=False):
             return self.send_json(409, {"ok": False, "error": "обновление уже идёт"})
         try:

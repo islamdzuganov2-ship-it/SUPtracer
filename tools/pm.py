@@ -5,6 +5,7 @@
   py tools/pm.py init                 первый запуск: разложить примеры в рабочие файлы
   py tools/pm.py refresh              пересобрать всё: токены, репозитории, оценки, дерево, дашборд
   py tools/pm.py refresh --fast       без пересканирования репозиториев (быстро)
+  py tools/pm.py refresh --fast --source codex|claude|all  выбрать источник расхода
   py tools/pm.py status [проект]      сводка в терминал
   py tools/pm.py comment <проект> "текст" [--kind техдолг|идея|баг|вопрос]
   py tools/pm.py comments             показать комментарии
@@ -17,6 +18,7 @@
   py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]
   py tools/pm.py forget <id> --why "почему устарела"
   py tools/pm.py claude-memory [--dry-run]  авто-память Claude Code -> память портфеля
+  py tools/pm.py codex-memory [--dry-run]   запросы и ответы GPT / Codex -> ветви дерева
 
 Входящие
   py tools/pm.py ingest <файл|каталог>  разобрать Markdown и разложить по проектам
@@ -28,7 +30,7 @@ Obsidian и дашборд
   py tools/pm.py vault init <путь> | pull | push | sync | status
   py tools/pm.py tree                 пересобрать дерево работ
   py tools/pm.py serve                дашборд с работающей кнопкой обновления
-  py tools/pm.py connect [--status]   подключить Клода во всех проектах: хук и MCP-сервер
+  py tools/pm.py connect [--provider codex|claude|all] [--status]  MCP-подключение ассистентов
   py tools/pm.py disconnect           снять подключение
   py tools/pm.py open                 открыть собранный дашборд файлом
 """
@@ -70,6 +72,13 @@ def fmt(n):
 
 def cmd_refresh(args):
     fast = "--fast" in args
+    source = "all"
+    if "--source" in args:
+        i = args.index("--source")
+        source = args[i + 1] if i + 1 < len(args) else ""
+    if source not in ("all", "claude", "codex"):
+        print("Источник: all, claude или codex.")
+        return 1
     # ОБН-04: обновление одного проекта — пересканируется только его репозиторий,
     # остальные слои собираются как при --fast. Скан всех репозиториев идёт минутами.
     only = None
@@ -79,14 +88,12 @@ def cmd_refresh(args):
         if only not in jload("projects.json").get("projects", {}):
             print("Нет такого проекта: %s" % only)
             return 1
-    print("→ токены из журналов сессий")
-    run("collect_usage.py")
+    steps = [("токены из журналов сессий (%s)" % source,
+              ("collect_usage.py", "--source", source))]
     if only:
-        print("\n→ репозиторий проекта %s (чужие не сканируются)" % only)
-        run("collect_repos.py", only)
+        steps.append(("репозиторий проекта %s" % only, ("collect_repos.py", only)))
     elif not fast:
-        print("\n→ технический срез репозиториев")
-        run("collect_repos.py")
+        steps.append(("технический срез репозиториев", ("collect_repos.py",)))
     else:
         print("\n→ репозитории пропущены (--fast)")
 
@@ -94,26 +101,34 @@ def cmd_refresh(args):
     if only:
         auto = {}                     # обновление проекта не трогает хранилище
     if auto.get("pull_on_refresh") and "--no-vault" not in args:
-        print("\n→ заметки из Obsidian")
-        run("obsidian.py", "pull")
-
-    print("\n→ авто-память ассистента")
-    run("automem.py")
-    print("\n→ индекс памяти")
-    run("memory.py", "index")
-    print("\n→ оценка оставшихся задач")
-    run("estimate.py")
-    print("\n→ индексы качества и портфельные сигналы")
-    run("quality.py")
-    print("\n→ дерево работ")
-    run("tree.py")
-    print("\n→ сборка дашборда")
-    run("build_dashboard.py")
-    cmd_snapshot([])
+        steps.append(("заметки из Obsidian", ("obsidian.py", "pull")))
+    if source != "codex":
+        steps.append(("авто-память Claude", ("automem.py",)))
+    if source != "claude":
+        steps.append(("сессии и ветви GPT / Codex", ("codex_memory.py",)))
+    steps.extend([
+        ("индекс памяти", ("memory.py", "index")),
+        ("свежие сведения о работе и планах проектов", ("project_activity.py",)),
+        ("оценка оставшихся задач", ("estimate.py",)),
+        ("индексы качества и портфельные сигналы", ("quality.py",)),
+        ("дерево работ", ("tree.py",)),
+        ("сборка дашборда", ("build_dashboard.py",)),
+    ])
+    for title, command in steps:
+        print("\n→ " + title)
+        rc = run(*command)
+        if rc:
+            print("Обновление остановлено: %s. Уже завершённые шаги сохранены; снимок не создан." % title)
+            return rc
+    rc = cmd_snapshot([])
+    if rc:
+        return rc
 
     if auto.get("push_on_refresh") and "--no-vault" not in args:
         print("\n→ выгрузка портфеля в Obsidian")
-        run("obsidian.py", "push")
+        rc = run("obsidian.py", "push")
+        if rc:
+            return rc
     print("\nГотово. Открыть: py tools/pm.py open · с кнопкой обновления: py tools/pm.py serve")
 
 
@@ -169,6 +184,8 @@ def cmd_status(args):
     U = jload("usage.json").get("projects", {})
     R = jload("repos.json").get("repos", {})
     E = jload("estimates.json").get("projects", {})
+    if any(u.get("cost_complete") is False for u in U.values()):
+        print("Стоимость части расхода неизвестна; суммы в $ — только известная часть.\n")
 
     def usage_of(key):
         path = (P[key].get("path") or "").lower().rstrip("/")
@@ -191,11 +208,13 @@ def cmd_status(args):
             p, u, e = P[k], usage_of(k), E.get(k, {})
             g = (R.get(k) or {}).get("git") or {}
             rd = p.get("readiness", {})
+            if rd.get("assessed") is False:
+                rd = dict(functional="не оценено", security="не оценено")
             print("%-16s %-22s %4s%% %4s%% %10s %10s %8s" % (
                 p["name"][:16], p.get("status", "")[:22], rd.get("functional", "—"), rd.get("security", "—"),
                 "$" + fmt(u["usd"]) if u else "—",
                 "$" + fmt(e.get("remaining_usd", 0)) if e.get("remaining_usd") else "—",
-                g.get("commits", "нет git")))
+                g.get('project_commits', g.get("commits", "нет git"))))
         return 0
 
     for k in keys:
@@ -207,14 +226,18 @@ def cmd_status(args):
         print("=" * 70)
         print("%s — %s" % (p["name"], p.get("tagline", "")))
         print("цель: %s · статус: %s" % (p.get("goal", ""), p.get("status", "")))
-        print("готовность: функц %s%% · эксплуат %s%% · доки %s%% · тесты %s%% · ИБ %s%%" % (
-            rd.get("functional"), rd.get("production"), rd.get("docs"), rd.get("tests"), rd.get("security")))
+        if rd.get("assessed") is False:
+            print("готовность: численная оценка не проводилась")
+        else:
+            print("готовность: функц %s%% · эксплуат %s%% · доки %s%% · тесты %s%% · ИБ %s%%" % (
+                rd.get("functional"), rd.get("production"), rd.get("docs"), rd.get("tests"), rd.get("security")))
         if u:
             print("потрачено: %s токенов, $%s (%d сессий, %d запросов)" % (
                 fmt(u["billable"]), fmt(u["usd"]), u["sessions"], u["requests"]))
         if e:
             print("осталось:  %s токенов, $%s (%d задач)" % (
-                fmt(e["remaining_tokens"]), fmt(e["remaining_usd"]), len(e["items"])))
+                fmt(e["remaining_tokens"]), fmt(e["remaining_usd"]),
+                sum(1 for b in e["items"] if not b.get("closed") and b.get("status") not in ("done", "cancelled", "dropped"))))
         if r.get("code"):
             print("код: %s строк, %d файлов, %d тестовых, %d TODO" % (
                 fmt(r["code"]["loc_total"]), r["code"]["files_total"], r["code"]["test_files"], r["code"]["todo_markers"]))
@@ -385,9 +408,11 @@ def cmd_disconnect(args):
 
 
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
+            "work": lambda args: run("workflow.py", *args),
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
             "open": cmd_open, "context": cmd_context, "recall": cmd_recall,
             "remember": cmd_remember, "forget": cmd_forget, "claude-memory": cmd_claude_memory, "ingest": cmd_ingest,
+            "codex-memory": lambda args: run("codex_memory.py", *args),
             "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
             "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
             "connect": cmd_connect, "disconnect": cmd_disconnect}

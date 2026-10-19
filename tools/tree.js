@@ -44,6 +44,27 @@ const TREEVIEW = (function () {
     return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
   };
   const short = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+  const searchText = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+
+  function searchNodes(nodes, query, limit = 40) {
+    const q = searchText(query), words = q.split(' ').filter(Boolean);
+    if (!words.length) return [];
+    return nodes.filter(n => n.kind !== 'портфель').map(n => {
+      const title = searchText([n.label, n.task, n.memory, n.sha].join(' '));
+      const detail = searchText([n.detail, n.source, n.project, n._proj && n._proj.label, ...(n.tags || [])].join(' '));
+      if (!words.every(w => title.includes(w) || detail.includes(w))) return null;
+      const relevance = title === q ? 0 : title.startsWith(q) ? 1 : title.includes(q) ? 2
+        : words.every(w => title.includes(w)) ? 3 : 4;
+      return {n, score: relevance * 10000 + (n.kind === 'проект' ? 0 : n._work ? 1 : 2) * 1000 +
+        Math.min(999, (n.label || '').length)};
+    }).filter(Boolean).sort((a, b) => a.score - b.score || String(a.n.id).localeCompare(String(b.n.id)))
+      .slice(0, limit).map(result => result.n);
+  }
+
+  function childPage(n, limit) {
+    const all = n.children || [], visible = all.filter(k => k._vis);
+    return {items: visible.slice(0, limit), remaining: Math.max(0, visible.length - limit), hidden: all.length - visible.length};
+  }
 
   function hashStr(s) {
     let h = 2166136261 >>> 0;
@@ -74,10 +95,10 @@ const TREEVIEW = (function () {
   function workStatus(s) {
     s = String(s || '').toLowerCase().trim();
     if (!s) return 'backlog';
-    if (/^(done|готов|сделан|выполнен|закрыт)/.test(s)) return 'done';
     if (/(blocked|блок|жд[её]т|ожида)/.test(s)) return 'blocked';
     if (/(частич|partial)/.test(s) || (/готов/.test(s) && /не\s*начат/.test(s))) return 'partial';
-    if (/(in-progress|progress|в работе|в реализации|ид[её]т|wip)/.test(s)) return 'progress';
+    if (/^(done|complete(?:d)?|готов|сделан|выполнен|закрыт)/.test(s)) return 'done';
+    if (/(in[-_ ]progress|progress|в работе|в реализации|ид[её]т|wip)/.test(s)) return 'progress';
     if (/(idea|иде[яи]|не\s*начат|отлож|later|потом)/.test(s)) return 'later';
     return 'backlog';
   }
@@ -452,6 +473,7 @@ const TREEVIEW = (function () {
   let offCam = null, staticMs = 0, lastInput = 0, idleT = 0;
   let fly = null, raf = 0, dirtyWorld = true, dirtyDyn = true, camMoved = true, lastFg = 0;
   let hover = null, sel = null, hiSet = null, catFocus = null;
+  let childLimit = 14;
   const hidden = new Set(), collapsed = new Set();
   let colorMode = 'status', windOn = true, cutoff = '', months = [], tIdx = 0;
   let playing = null, isOpenFlag = false, introDone = false, reduced = false;
@@ -1247,8 +1269,10 @@ const TREEVIEW = (function () {
 .f-facts a{color:var(--fa);cursor:pointer}
 .f-detail{font-size:12.5px;line-height:1.5;color:var(--fi2);background:rgba(127,160,130,.1);border-radius:10px;padding:9px 11px;margin:8px 0;white-space:pre-wrap}
 .f-kids{display:flex;flex-direction:column;gap:2px;margin-top:6px}
-.f-kid{display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:8px;cursor:pointer;font-size:12.5px}
+.f-kid{display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:8px;cursor:pointer;font-size:12.5px;
+  border:0;background:transparent;color:inherit;font-family:inherit;text-align:left;width:100%}
 .f-kid:hover{background:rgba(127,200,140,.16)}
+.f-kid:focus-visible,.f-ri:focus-visible{outline:2px solid var(--fa);outline-offset:1px}
 .f-kid i{width:9px;height:9px;border-radius:50%;flex:none}
 .f-kid span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .f-mix{display:flex;height:8px;border-radius:5px;overflow:hidden;margin:8px 0 4px;background:var(--fl)}
@@ -1285,8 +1309,9 @@ const TREEVIEW = (function () {
     top.innerHTML = `
       <div class="f-title gl"><button class="f-btn f-back" title="Вернуться к дашборду (Esc)">← Дашборд</button>
         <div><b>Древо портфеля</b><br><small class="f-stats"></small></div></div>
-      <div class="f-search"><span class="mg">⌕</span><input type="search" placeholder="Найти задачу, запись, проект…  ( / )" aria-label="Поиск по дереву">
-        <div class="f-res gl" role="listbox"></div></div>
+      <div class="f-search"><span class="mg">⌕</span><input type="search" placeholder="Найти задачу, запись, проект…  ( / )" aria-label="Поиск по дереву"
+        role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="forest-search-results" autocomplete="off">
+        <div class="f-res gl" id="forest-search-results" role="listbox" aria-label="Результаты поиска"></div></div>
       <div class="f-tools gl">
         <button class="f-btn f-ic" data-a="out" title="Отдалить (−)" aria-label="Отдалить">−</button>
         <button class="f-btn f-ic" data-a="in" title="Приблизить (+)" aria-label="Приблизить">+</button>
@@ -1368,7 +1393,9 @@ const TREEVIEW = (function () {
     if (n.kind === 'проект') {
       add('Статус', esc(n.status || ''));
       add('Цель', esc(n.detail || ''));
-      if (n.spent_usd) add('Потрачено', '$' + nf(n.spent_usd) + (n.spent_tokens ? ' · ' + tokf(n.spent_tokens) + ' токенов' : ''));
+      if (n.spent_usd || n.spent_tokens) add('Потрачено', (n.cost_complete === false
+        ? (n.spent_usd ? 'от $' + nf(n.spent_usd) : 'стоимость неизвестна') : '$' + nf(n.spent_usd || 0))
+        + (n.spent_tokens ? ' · ' + tokf(n.spent_tokens) + ' токенов' : ''));
       if (n.commits) add('Коммитов', nf(n.commits));
     }
     if (n._proj && n.kind !== 'проект') add('Проект', `<a data-id="${esc(n._proj.id)}">${esc(n._proj.label)}</a>`);
@@ -1376,15 +1403,18 @@ const TREEVIEW = (function () {
     if (n.subtree_weight) add('Вес ветви', tokf(n.subtree_weight) + ' токенов');
     if ((n._cnt || 1) > 1) add('В ветви', nf(n._cnt - 1) + ' ' + plural(n._cnt - 1, 'узел', 'узла', 'узлов'));
     if (n.memory) add('Запись', `<code>${esc(n.memory)}</code>`);
+    if (n.link_note) add('Связь', esc(n.link_note) + (n.parent_memory ? ` <code>${esc(n.parent_memory)}</code>` : ''));
     if (n.sha) add('Коммит', `<code>${esc(n.sha)}</code>`);
     if (n.source) add('Источник', esc(String(n.source).replace(/^obsidian:/, 'Obsidian · ')));
+    if (n.source_provider === 'codex') add('Автор', n.role === 'user' ? 'Пользователь · GPT / Codex' : n.role === 'assistant' ? 'Ответ GPT / Codex (не подтверждение выполнения)' : 'Сессия GPT / Codex');
+    if (n.model) add('Модель', esc(n.model));
+    if (n.cwd) add('Каталог', esc(n.cwd));
     const mix = Object.entries(mixOf(n)).sort((a, b) => b[1] - a[1]), total = mix.reduce((s, e) => s + e[1], 0);
     const mixBar = total ? `<div class="f-mix">${mix.map(([k, v]) =>
       `<i style="width:${(100 * v / total).toFixed(2)}%;background:${keyColor(k)}" title="${esc(keyLabel(k))}: ${v}"></i>`).join('')}</div>
       <div style="display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11.5px;color:var(--fi3)">${mix.slice(0, 9).map(([k, v]) =>
       `<span><i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${keyColor(k)};margin-right:4px"></i>${esc(keyLabel(k))} ${v}</span>`).join('')}</div>` : '';
-    const kids = (n.children || []).filter(k => k._vis).slice(0, 14);
-    const more = (n.children || []).length - kids.length;
+    const page = childPage(n, childLimit), kids = page.items;
     p.innerHTML = `
       <div class="k"><i style="background:${nodeColor(n)}"></i>${esc(KIND_RU[n.kind] || n.kind)}</div>
       <h3>${esc(n.label || '')}</h3>
@@ -1392,7 +1422,9 @@ const TREEVIEW = (function () {
       <dl class="f-facts">${facts.join('')}</dl>
       ${n.detail && n.kind !== 'проект' ? `<div class="f-detail">${esc(String(n.detail).slice(0, 700))}</div>` : ''}
       ${mixBar}
-      ${kids.length ? `<div class="f-kids">${kids.map(k => `<div class="f-kid" data-id="${esc(k.id)}"><i style="background:${nodeColor(k)}"></i><span>${esc(k.label || '')}</span></div>`).join('')}${more > 0 ? `<div style="color:var(--fi3);font-size:12px;padding:4px 6px">…и ещё ${more}</div>` : ''}</div>` : ''}
+      ${kids.length ? `<div class="f-kids">${kids.map(k => `<button type="button" class="f-kid" data-id="${esc(k.id)}" title="${esc(k.label || '')}"><i style="background:${nodeColor(k)}"></i><span>${esc(k.label || '')}</span></button>`).join('')}
+        ${page.remaining ? `<button class="f-btn" data-p="more">Показать ещё ${Math.min(14, page.remaining)} · осталось ${page.remaining}</button>` : ''}</div>` : ''}
+      ${page.hidden ? `<div class="f-note">Скрыто сворачиванием или временем: ${page.hidden}</div>` : ''}
       <div class="f-acts">
         <button class="f-btn" data-p="focus">⌖ Показать ветвь</button>
         ${(n.children || []).length && n !== M.root ? `<button class="f-btn" data-p="fold">${collapsed.has(n.id) ? '▾ Развернуть' : '▸ Свернуть'}</button>` : ''}
@@ -1402,6 +1434,7 @@ const TREEVIEW = (function () {
     p.hidden = false;
   }
   function select(n, focus) {
+    if (sel !== n) childLimit = 14;
     sel = n || null;
     hiSet = null;
     if (sel && sel !== M.root) {
@@ -1418,30 +1451,35 @@ const TREEVIEW = (function () {
 
   /* ---------- поиск ---------- */
   let results = [], resIdx = 0;
+  function hideSearch() {
+    els.res.classList.remove('open');
+    els.search.setAttribute('aria-expanded', 'false');
+    els.search.removeAttribute('aria-activedescendant');
+  }
+  function markResult() {
+    els.res.querySelectorAll('.f-ri').forEach((r, i) => {
+      r.classList.toggle('act', i === resIdx);
+      r.setAttribute('aria-selected', String(i === resIdx));
+    });
+    if (results.length) els.search.setAttribute('aria-activedescendant', 'forest-result-' + resIdx);
+    else els.search.removeAttribute('aria-activedescendant');
+  }
   function runSearch(q) {
-    q = q.trim().toLowerCase();
     const box = els.res;
-    if (!q) { box.classList.remove('open'); results = []; return; }
-    const found = [];
-    for (const n of M.nodes) {
-      if (n === M.root) continue;
-      const hay = ((n.label || '') + ' ' + (n.task || '') + ' ' + (n.memory || '') + ' ' + (n.sha || '')).toLowerCase();
-      const i = hay.indexOf(q);
-      if (i < 0) continue;
-      found.push([(n.kind === 'проект' ? 0 : n._work ? 1 : 2) * 1000 + (i === 0 ? 0 : 100) + Math.min(99, (n.label || '').length / 4), n]);
-    }
-    found.sort((a, b) => a[0] - b[0]);
-    results = found.slice(0, 40).map(r => r[1]);
+    if (!searchText(q)) { hideSearch(); results = []; return; }
+    results = searchNodes(M.nodes, q);
     resIdx = 0;
     box.innerHTML = results.length ? results.map((n, i) =>
-      `<div class="f-ri${i === 0 ? ' act' : ''}" data-i="${i}" role="option"><i style="background:${nodeColor(n)}"></i>` +
+      `<div class="f-ri${i === 0 ? ' act' : ''}" id="forest-result-${i}" data-i="${i}" role="option"><i style="background:${nodeColor(n)}"></i>` +
       `<span>${esc(n.label || '')}</span><em>${esc(n.kind === 'проект' ? 'проект' : (n._proj ? n._proj.label : ''))}</em></div>`).join('')
       : '<div style="padding:8px 10px;color:var(--fi3)">Ничего не нашлось</div>';
     box.classList.add('open');
+    els.search.setAttribute('aria-expanded', 'true');
+    markResult();
   }
   function chooseResult(i) {
     const n = results[i]; if (!n) return;
-    els.res.classList.remove('open');
+    hideSearch();
     let opened = false;
     for (let x = n._p; x; x = x._p) if (collapsed.delete(x.id)) opened = true;
     if (cutoff && n._mk && n._mk > cutoff) { setMonth(months.length, false); opened = true; }
@@ -1494,6 +1532,7 @@ const TREEVIEW = (function () {
     els.tlab.textContent = cutoff ? 'по ' + monthRu(cutoff) : 'всё время';
     els.range.value = tIdx;
     recompute(performance.now(), animate);
+    renderPanel(); renderProjects();
   }
   function startPlay() {
     els.play.textContent = '❚❚ Стоп';
@@ -1591,7 +1630,7 @@ const TREEVIEW = (function () {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
         resIdx = clamp(resIdx + (e.key === 'ArrowDown' ? 1 : -1), 0, Math.max(0, results.length - 1));
-        els.res.querySelectorAll('.f-ri').forEach((r, i) => r.classList.toggle('act', i === resIdx));
+        markResult();
         const act = els.res.querySelector('.f-ri.act'); if (act) act.scrollIntoView({block: 'nearest'});
       } else if (e.key === 'Enter') { e.preventDefault(); chooseResult(resIdx); }
       else if (e.key === 'Escape') { els.search.value = ''; runSearch(''); els.search.blur(); }
@@ -1648,6 +1687,7 @@ const TREEVIEW = (function () {
       const b = e.target.closest('[data-p]'); if (!b || !sel) return;
       const act = b.dataset.p;
       if (act === 'focus') focusNode(sel);
+      else if (act === 'more') { childLimit += 14; renderPanel(); }
       else if (act === 'close') select(null);
       else if (act === 'card' && sel._proj && OPTS.onProject) OPTS.onProject(sel._proj.project || sel._proj.id.replace(/^p:/, ''));
       else if (act === 'fold') {
@@ -1682,7 +1722,7 @@ const TREEVIEW = (function () {
         drag = null;
       } else drag = {x: e.offsetX, y: e.offsetY, cx: cam.x, cy: cam.y, moved: false};
       fly = null;
-      els.res.classList.remove('open');
+      hideSearch();
     });
     fg.addEventListener('pointermove', e => {
       if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, {x: e.offsetX, y: e.offsetY});
@@ -1831,7 +1871,9 @@ const TREEVIEW = (function () {
       }
       function drawFrame(now) {
         if (done) return;
-        const t = now - t0;
+        // Первый RAF может нести начало кадра раньше t0, если дерево открыли
+        // внутри этого же кадра. Отрицательное время давало steps[-1] и зависшую заставку.
+        const t = Math.max(0, now - t0);
         if (box.clientWidth !== w || box.clientHeight !== h) fit();
         g.setTransform(DPR, 0, 0, DPR, 0, 0);
         const cx = w / 2, cy = h * .45, R = Math.min(w, h) * .19;
@@ -1980,7 +2022,8 @@ const TREEVIEW = (function () {
     },
     isOpen: () => isOpenFlag,
     debug: () => M && {nodes: M.nodes.length, edges: M.edges.length, clumps: M.clumps.length,
-      staticMs: +staticMs.toFixed(1), scale: +cam.s.toFixed(3), selected: sel ? sel.id : null},
-    _test: {workStatus, layoutTree},          // для юнит-тестов раскладки (tests/test_tree_view.py)
+      staticMs: +staticMs.toFixed(1), scale: +cam.s.toFixed(3), selected: sel ? sel.id : null,
+      growing: performance.now() < (M.growUntil || 0)},
+    _test: {workStatus, layoutTree, searchNodes, childPage},
   };
 })();

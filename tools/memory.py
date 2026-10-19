@@ -194,6 +194,9 @@ def build_index(records=None):
         })
         if r.get("foreign_project"):          # ПРМ-08: заметка проекта, которого нет в портфеле
             items[-1]["foreign_project"] = r["foreign_project"]
+        for key in ("source_provider", "session", "role", "model", "cwd", "message_time"):
+            if r.get(key):
+                items[-1][key] = r[key]
         by_project[r["project"]] = by_project.get(r["project"], 0) + 1
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
     items.sort(key=lambda x: (x["project"], -KIND_WEIGHT.get(x["kind"], 1), x["updated"]), reverse=False)

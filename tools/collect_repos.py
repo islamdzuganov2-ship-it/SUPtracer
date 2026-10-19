@@ -12,6 +12,7 @@ import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timezone
+from project_routes import inspection_path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
@@ -21,11 +22,12 @@ SKIP_DIRS = {
     ".pytest_cache", "dist", "build", ".gradle", ".idea", ".vscode", "Library",
     "Temp", "Logs", "obj", "bin", "target", "archive", "site-packages",
     ".next", ".nuxt", "coverage", "htmlcov", "Obj", "Build", "UserSettings",
-    "fixtures",       # тестовые данные — не код и не документация, метрики ТЗ они искажают
+    "fixtures", "backups",  # тестовые данные и резервные копии искажают метрики кода
 }
 CODE_EXT = {
     ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript",
     ".jsx": "JavaScript", ".kt": "Kotlin", ".kts": "Kotlin", ".java": "Java",
+    ".mjs": "JavaScript", ".cjs": "JavaScript",
     ".cs": "C#", ".go": "Go", ".rs": "Rust", ".rb": "Ruby", ".php": "PHP",
     ".swift": "Swift", ".c": "C", ".cpp": "C++", ".h": "C/C++ header",
     ".sql": "SQL", ".sh": "Shell", ".ps1": "PowerShell", ".vue": "Vue",
@@ -100,10 +102,12 @@ def sh(args, cwd=None):
         return ""
 
 
-def walk(path, max_files=300000):
+def walk(path, max_files=300000, include_dirs=()):
     n = 0
     for dirpath, dirnames, filenames in os.walk(path):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.endswith(".worktrees")]
+        dirnames[:] = [d for d in dirnames if (d not in SKIP_DIRS or
+            os.path.relpath(os.path.join(dirpath, d), path).replace("\\", "/") in include_dirs)
+            and not d.endswith(".worktrees")]
         for fn in filenames:
             yield os.path.join(dirpath, fn)
             n += 1
@@ -132,12 +136,15 @@ def task_tokens(meta):
     return out
 
 
-def task_commits(path, tokens, per_task=20):
+def task_commits(path, tokens, per_task=20, since=None):
     """Коммиты, в сообщении которых назван номер задачи, -> {задача: [коммиты по времени]}.
     Номер ищется целым словом: «Т1» не находится внутри «Т14»."""
     if not tokens:
         return {}
-    log = sh(["git", "log", "--no-merges", "--format=%h%x09%ad%x09%s", "--date=short"], path)
+    command = ["git", "log", "--no-merges", "--format=%h%x09%ad%x09%s", "--date=short"]
+    if since:
+        command.append('--since='+str(since)+'T00:00:00Z')
+    log = sh(command, path)
     rx = re.compile(r"(?<![\w-])(%s)(?!\w)" % "|".join(
         re.escape(t) for t in sorted(tokens, key=len, reverse=True)))
     out = {}
@@ -152,7 +159,7 @@ def task_commits(path, tokens, per_task=20):
 
 
 def scan_repo(key, meta):
-    path = meta.get("path") or ""
+    path = inspection_path(meta)
     # ОБН-05: время среза у каждого репозитория — обновление одного проекта
     # не должно выдавать остальные за свежие.
     res = {"key": key, "path": path, "exists": os.path.isdir(path),
@@ -160,7 +167,7 @@ def scan_repo(key, meta):
     if not res["exists"]:
         return res
 
-    if os.path.isdir(os.path.join(path, ".git")):
+    if os.path.exists(os.path.join(path, ".git")):
         log1 = sh(["git", "log", "-1", "--format=%ad|%s", "--date=short"], path)
         first = sh(["git", "log", "--reverse", "--format=%ad", "--date=short"], path)
         res["git"] = {
@@ -172,8 +179,18 @@ def scan_repo(key, meta):
             "last_subject": log1.split("|", 1)[1] if "|" in log1 else "",
             "dirty_files": len([l for l in sh(["git", "status", "--short"], path).splitlines() if l.strip()]),
             "remote": sh(["git", "remote", "get-url", "origin"], path),
-            "task_commits": task_commits(path, task_tokens(meta)),
+            "task_commits": task_commits(path, task_tokens(meta), since=meta.get('history_since')),
         }
+        if meta.get('history_since'):
+            since = str(meta['history_since'])
+            datetime.strptime(since, '%Y-%m-%d')
+            res['git']['history_since'] = since
+            res['git']['project_commits'] = int(sh(['git','rev-list','--count','--since='+since+'T00:00:00Z','HEAD'], path) or 0)
+            res['git']['inherited_commits'] = res['git']['commits'] - res['git']['project_commits']
+            own = sh(['git','log','--since='+since+'T00:00:00Z','--format=%ad','--date=short'],path).splitlines()
+            res['git']['first_project_commit'] = own[-1] if own else ''
+            # Historical generic IDs from the original product must not become
+            # evidence of Qatar tasks merely because the code was cloned.
     else:
         res["git"] = None
 
@@ -188,7 +205,10 @@ def scan_repo(key, meta):
     headings = tables = open_questions = 0
     doc_mtimes = []
     code_mtimes = []
-    for fp in walk(path):
+    code_ext = dict(CODE_EXT)
+    if meta.get("web_sources"):
+        code_ext.update({".html": "HTML", ".css": "CSS"})
+    for fp in walk(path, include_dirs=meta.get("scan_include_dirs", [])):
         total_files += 1
         ext = os.path.splitext(fp)[1].lower()
         base = os.path.basename(fp).lower()
@@ -197,13 +217,14 @@ def scan_repo(key, meta):
         except ValueError:
             weird.append(fp)  # зарезервированные имена Windows (nul, con, aux...)
             continue
-        is_code = ext in CODE_EXT
+        is_code = ext in code_ext
         if is_code:
-            lang = CODE_EXT[ext]
+            lang = code_ext[ext]
             langs[lang] += 1
             loc[lang] += count_lines(fp)
-            if (base.startswith("test_") or base.endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts"))
-                    or "/tests/" in rel or "/test/" in rel or "Tests" in rel):
+            if (base.startswith("test_") or base.endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts",
+                    ".test.js", ".test.mjs", ".test.cjs", ".spec.js", ".spec.mjs"))
+                    or "/tests/" in "/" + rel or "/test/" in "/" + rel or "Tests" in rel):
                 test_files += 1
         elif ext in DOC_EXT:
             docs += 1

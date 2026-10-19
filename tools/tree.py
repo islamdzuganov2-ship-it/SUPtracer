@@ -70,13 +70,9 @@ def build(write=True):
     memidx = load(os.path.join("memory", "index.json"), {"records": []})
     inbox = load("inbox.json", {"items": []}).get("items", [])
     records = [r for r in memidx.get("records", []) if r.get("status") == "активна"]
+    discovered = load("codex_sessions.json").get("projects", {})
 
-    by_id = {r["id"]: r for r in records}
-    kids = {}
-    for r in records:
-        par = r.get("parent") or ""
-        if par and par in by_id:
-            kids.setdefault(par, []).append(r)
+    memory_nodes, memory_roots = _memory_forest(records, projects)
 
     trunk = node("портфель", "Портфель", "портфель", detail="Все проекты в одном стволе")
     total_weight = 0
@@ -89,18 +85,21 @@ def build(write=True):
         spent = int(u.get("billable") or 0)
 
         pn = node("p:" + key, p.get("name", key), "проект", project=key,
-                  weight=spent, date=(g.get("first_commit") or "")[:10],
+                  weight=spent, date=(p.get('created_at') or g.get("first_commit") or "")[:10],
                   status=p.get("status", ""),
                   detail="%s · готовность %s%%" % (p.get("goal", ""),
-                                                   (p.get("readiness") or {}).get("functional", "—")),
+                                                   ("не оценено" if (p.get("readiness") or {}).get("assessed") is False else
+                                                    (p.get("readiness") or {}).get("functional", "—"))),
                   spent_tokens=spent, spent_usd=round(u.get("usd") or 0, 2),
-                  commits=g.get("commits"))
+                  cost_complete=u.get("cost_complete", True),
+                  commits=g.get('project_commits', g.get("commits")))
 
         # --- фундамент: сделанное
         done = list(p.get("done") or [])
         if done:
             share = spent // max(1, len(done))
-            first, last = (g.get("first_commit") or "")[:10], (g.get("last_commit") or "")[:10]
+            first = (p.get('created_at') or g.get("first_commit") or "")[:10]
+            last = (p.get('reviewed_at') if g.get('history_since') else g.get('last_commit') or '')[:10]
             fnode = node("f:" + key, "Фундамент — сделано %d" % len(done), "фундамент",
                          project=key, date=first,
                          detail="То, на что опирается всё остальное в проекте")
@@ -116,14 +115,12 @@ def build(write=True):
         est_items = {b.get("id"): b for b in e.get("items", [])}
         commits = g.get("task_commits") or {}
         attached = set()
-        roots = [r for r in records if r["project"] == key and not r.get("parent")]
-        for r in sorted(roots, key=lambda r: r.get("created", "")):
-            rn = _memory_node(r, kids, by_id, key)
-            for b in p.get("backlog", []):
-                if (b.get("root") or b.get("memory") or "") in _subtree_ids(r, kids):
-                    rn["children"].append(_task_node(key, b, est_items, commits.get(b.get("id"))))
-                    attached.add(b.get("id"))
-            pn["children"].append(rn)
+        pn["children"].extend(memory_roots.get(key, []))
+        for b in p.get("backlog", []):
+            target = memory_nodes.get(b.get("root") or b.get("memory") or "")
+            if target is not None and target["project"] == key:
+                target["children"].append(_task_node(key, b, est_items, commits.get(b.get("id"))))
+                attached.add(b.get("id"))
 
         # --- задачи, не привязанные ни к какому запросу
         loose = [b for b in p.get("backlog", []) if b.get("id") not in attached]
@@ -154,17 +151,28 @@ def build(write=True):
     # --- записи памяти вне известных проектов. Заметки проектов, которых портфель
     # не ведёт (ПРМ-08), — отдельными ветвями: видно, сколько знания лежит у каждого.
     orphan_projects = {}
+    for key in set(discovered) | set(usage):
+        if key not in projects:
+            orphan_projects[key] = []
     for r in records:
         if r["project"] not in projects:
-            orphan_projects.setdefault(r.get("foreign_project") or r["project"], []).append(r)
+            proj = r.get("foreign_project") or r["project"]
+            if proj not in projects:
+                orphan_projects.setdefault(proj, []).append(r)
     for proj, recs in sorted(orphan_projects.items(), key=lambda kv: (kv[0] == "портфель", kv[0])):
-        foreign = any(x.get("foreign_project") for x in recs)
+        foreign = proj in discovered or proj in usage or any(x.get("foreign_project") for x in recs)
+        u = usage.get(proj, {})
+        found = discovered.get(proj, {})
         pn = node("p:" + proj, proj + (" — вне портфеля" if foreign else ""), "проект", project=proj,
-                  detail=("Папка проекта в хранилище; в projects.json такого проекта нет" if foreign
-                          else "Записи без проекта в projects.json"))
-        for r in sorted([x for x in recs if not x.get("parent")], key=lambda r: r.get("created", "")):
-            pn["children"].append(_memory_node(r, kids, by_id, proj))
-        if pn["children"]:
+                  detail=("Обнаружен в локальных сессиях; ещё не добавлен в ручной портфель. " +
+                          "; ".join(found.get("paths", [])) if proj in discovered else
+                          "Проект из журналов расхода или памяти; ещё не добавлен в ручной портфель" if foreign
+                          else "Записи без проекта в projects.json"),
+                  weight=int(u.get("billable") or 0), spent_tokens=int(u.get("billable") or 0),
+                  spent_usd=u.get("usd", 0), cost_complete=u.get("cost_complete", True),
+                  source_provider=found.get("provider", ""), discovered=foreign)
+        pn["children"].extend(memory_roots.get(proj, []))
+        if pn["children"] or foreign:
             trunk["children"].append(pn)
 
     _rollup(trunk)
@@ -194,25 +202,59 @@ def build(write=True):
     return out, dest
 
 
-def _subtree_ids(rec, kids):
-    out, stack = {rec["id"]}, [rec]
-    while stack:
-        cur = stack.pop()
-        for c in kids.get(cur["id"], []):
-            if c["id"] not in out:
-                out.add(c["id"])
-                stack.append(c)
-    return out
+def _memory_forest(records, projects):
+    """Каждая активная запись видна ровно один раз, даже если её родитель устарел.
 
+    Восстановление касается только отображения: исходные связи не переписываются.
+    Межпроектные связи и циклы не должны скрывать записи или переносить их в чужой проект.
+    """
+    by_id = {r["id"]: r for r in records}
+    groups = {rid: r["project"] if r["project"] in projects else
+              r.get("foreign_project") or r["project"] for rid, r in by_id.items()}
+    parents, notes = {}, {}
+    for rid, r in by_id.items():
+        par = r.get("parent")
+        if not par:
+            continue
+        if par not in by_id:
+            notes[rid] = "Родитель недоступен в активной памяти; запись показана отдельной ветвью."
+        elif groups[par] != groups[rid]:
+            notes[rid] = "Родитель относится к другому проекту; запись показана в своём проекте."
+        else:
+            parents[rid] = par
 
-def _memory_node(r, kids, by_id, project):
-    n = node("m:" + r["id"], r["title"][:160], r.get("kind", "заметка"), project=project,
-             weight=r.get("tokens", 0), date=(r.get("created") or "")[:10],
-             detail=r.get("digest", ""), memory=r["id"], source=r.get("source", ""),
-             tags=r.get("tags", []))
-    for c in sorted(kids.get(r["id"], []), key=lambda x: x.get("created", "")):
-        n["children"].append(_memory_node(c, kids, by_id, project))
-    return n
+    # Обходим каждую цепочку один раз. Разрываем одну связь цикла детерминированно.
+    checked = set()
+    for rid in sorted(by_id):
+        path, current = set(), rid
+        while current not in checked:
+            if current in path:
+                parents.pop(current, None)
+                notes[current] = "В связях памяти обнаружен цикл; ветвь показана отдельно."
+                break
+            path.add(current)
+            if current not in parents:
+                break
+            current = parents[current]
+        checked.update(path)
+
+    nodes, roots = {}, {}
+    for rid, r in by_id.items():
+        nodes[rid] = node("m:" + rid, r["title"][:160], r.get("kind", "заметка"),
+                          project=groups[rid], weight=r.get("tokens", 0),
+                          date=(r.get("created") or "")[:10], detail=r.get("digest", ""),
+                          memory=rid, source=r.get("source", ""), tags=r.get("tags", []))
+        for key in ("source_provider", "session", "role", "model", "cwd"):
+            if r.get(key):
+                nodes[rid][key] = r[key]
+        if rid in notes:
+            nodes[rid].update(link_note=notes[rid], parent_memory=r.get("parent", ""))
+    for rid, r in sorted(by_id.items(), key=lambda item: (item[1].get("created", ""), item[0])):
+        if rid in parents:
+            nodes[parents[rid]]["children"].append(nodes[rid])
+        else:
+            roots.setdefault(groups[rid], []).append(nodes[rid])
+    return nodes, roots
 
 
 def _task_node(key, b, est_items, commits=None):

@@ -23,8 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ingest
 import mdparse as md
 import memory as mem
+from project_routes import resolve_slug
 
-PROJECTS_ROOT = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+PROJECTS_ROOT = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"), "projects")
 PREFIX = "claude-memory:"
 
 # Тип авто-памяти -> вид записи. Отзыв о работе — требование к тому, как работать;
@@ -40,13 +41,7 @@ def slug(path):
 def project_for_slug(name, projects):
     """Проект по имени каталога авто-памяти. Рабочее дерево проекта
     (…--claude-worktrees-…) — тот же проект; из нескольких подходящих — самый длинный путь."""
-    low = name.lower()
-    best = None
-    for key, p in projects.items():
-        s = slug(p.get("path")).lower()
-        if s and (low == s or low.startswith(s + "-")) and (best is None or len(s) > best[0]):
-            best = (len(s), key)
-    return best[1] if best else "портфель"
+    return resolve_slug(name, projects) or "портфель"
 
 
 def title_of(fm, body, fname):
@@ -88,6 +83,7 @@ def run(root=None, dry=False, projects=None, quiet=False):
     """Импорт. Возвращает отчёт: {проект: {"records": n, "secrets": [файлы]}, "retired": n}."""
     projects = projects if projects is not None else ingest.load_projects()
     items = collect(root, projects)
+    by_source = {r.get('source'): r for r in mem.load_all() if r.get('source', '').startswith(PREFIX)}
     groups, records, leaky = {}, [], []
     for name, proj, path, raw in items:
         raw, found = md.redact_secrets(raw)        # БЕЗ-05: логины и ключи в память не идут
@@ -106,7 +102,7 @@ def run(root=None, dry=False, projects=None, quiet=False):
                 "в одном месте и попадало в брифинг проекта; сами файлы авто-памяти не меняются."
                 % (name, name),
                 project=proj, kind="источник", tags=["авто-память"], source=gsrc,
-                id=mem.make_id(gtitle, proj, gsrc))
+                id=(by_source.get(gsrc) or {}).get('id') or mem.make_id(gtitle, proj, gsrc))
         grp = groups[name]
         mtype = str(fm.get("type") or "").strip().lower()
         created = str(fm.get("modified") or "")[:10]
@@ -117,7 +113,7 @@ def run(root=None, dry=False, projects=None, quiet=False):
         rec = mem.new_record(
             title, body, project=proj, kind=KIND_BY_TYPE.get(mtype, "заметка"),
             tags=["авто-память"] + ([mtype] if mtype else []), source=src, created=created,
-            parent=grp["id"], root=grp["id"], id=mem.make_id(title, proj, src))
+            parent=grp["id"], root=grp["id"], id=(by_source.get(src) or {}).get('id') or mem.make_id(title, proj, src))
         rec["automem_type"] = mtype
         records.append(rec)
         grp["created"] = min(grp["created"], created)
@@ -137,6 +133,18 @@ def run(root=None, dry=False, projects=None, quiet=False):
                 continue                  # выведенное человеком повторный импорт не оживляет
             if old:
                 rec["created"] = old.get("created") or rec["created"]
+            rec['import_digest'] = md.digest_of(rec['body'])
+            rec['import_title'] = rec['title']
+            if old:
+                if old.get('import_digest') and old['import_digest'] != md.digest_of(old['body']):
+                    rec['body'] = old['body']
+                    rec['import_digest'] = old['import_digest']
+                if old.get('import_title') and old['title'] != old['import_title']:
+                    rec['title'] = old['title']
+                    rec['import_title'] = old['import_title']
+                tags = sorted(set(old.get('tags',[])) | set(rec.get('tags',[])))
+                rec = dict(old, **rec)
+                rec['tags'] = tags
             mem.save(rec)
         retired = ingest.retire_sources(gone, "файла больше нет в авто-памяти ассистента") if gone else {}
         mem.build_index()

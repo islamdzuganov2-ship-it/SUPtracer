@@ -80,19 +80,8 @@ def project_for_path(path, projects):
     Совпадением считается сам каталог проекта, любой вложенный в него (включая
     .claude/worktrees) и соседний «<проект>.worktrees». Из нескольких подходящих
     берётся самый глубокий путь: вложенный проект важнее объемлющего."""
-    cwd = _norm(path)
-    if not cwd:
-        return None
-    best, best_len = None, -1
-    for key, p in projects.items():
-        pp = _norm(p.get("path"))
-        if not pp:
-            continue
-        for base in (pp, pp + ".worktrees"):
-            if cwd == base or cwd.startswith(base + "/"):
-                if len(pp) > best_len:
-                    best, best_len = key, len(pp)
-    return best
+    from project_routes import paths, resolve_path
+    return resolve_path(path, paths(projects))['project']
 
 
 # ------------------------------------------------------------------ сбор
@@ -177,6 +166,8 @@ def alerts(P, U, R, E, C, IN, keys, focus=None):
 def _project_block(k, P, U, R, E, full):
     p, u, e = P[k], usage_for(k, P, U) or {}, E.get(k, {})
     rd = p.get("readiness") or {}
+    if rd.get("assessed") is False:
+        rd = dict.fromkeys(("functional", "production", "docs", "tests", "security"), "не оценено")
     g = (R.get(k) or {}).get("git") or {}
     backlog_open = [b for b in p.get("backlog", []) if b.get("status") not in CLOSED]
     est_items = e.get("items", [])
@@ -186,12 +177,12 @@ def _project_block(k, P, U, R, E, full):
     open_items = backlog_open if stale else [b for b in est_items if not b.get("closed")]
     lines = [
         "· %s [%s] — %s" % (p.get("name", k), k, p.get("status", "")),
-        "  цель: %s | готовность ф%s%% э%s%% д%s%% т%s%% иб%s%%" % (
+        ("  цель: %s | готовность не оценена" % p.get('goal','')) if p.get('readiness',{}).get('assessed') is False else "  цель: %s | готовность ф%s%% э%s%% д%s%% т%s%% иб%s%%" % (
             p.get("goal", ""), rd.get("functional", "—"), rd.get("production", "—"),
             rd.get("docs", "—"), rd.get("tests", "—"), rd.get("security", "—")),
         "  потрачено %s · осталось %s на %d задач%s%s" % (
             money(u.get("usd", 0)), money(e.get("remaining_usd", 0)), len(open_items),
-            (" · коммитов %s" % g["commits"]) if g.get("commits") is not None else "",
+            (" · коммитов %s" % g.get('project_commits', g["commits"])) if g.get("commits") is not None else "",
             " (оценка старше бэклога — refresh)" if stale else ""),
     ]
     acts = p.get("next_actions") or []
@@ -275,6 +266,9 @@ def build(budget=4000, project=None, with_memory=True, focus=None, hook=False):
             put("  последний сбор фактов %s" % gen[:16].replace("T", " "))
     for c in _commands(hook):
         put(c)
+    put("Перед реализацией: tt_work queue → plan/next → packet; модель и бюджет из паспорта, finish только с проверками. CLI: pm.py work next.")
+    if any(u.get("cost_complete") is False for u in U.values()):
+        put("Стоимость части расхода неизвестна: суммы в $ показывают только оценённую часть, не полную цену.")
     put("")
 
     al = alerts(P, U, R, E, C, IN, keys, focus)

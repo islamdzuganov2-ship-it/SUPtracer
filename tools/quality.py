@@ -202,7 +202,7 @@ def portfolio_signals(P, R, U, E, usage_of):
     share = 100.0 * spend[top] / total
     add("concentration", "Концентрация внимания", "%d%%" % round(share),
         "act" if share > 55 else "watch" if share > 35 else "ok",
-        "%s забирает %d%% всех денег портфеля; остальным %d проектам достаётся %d%%"
+        "%s забирает %d%% известной стоимости портфеля; остальным %d проектам достаётся %d%%"
         % (P[top]["name"], round(share), len(own) - 1, round(100 - share)),
         "Портфель из одного проекта — это не портфель. Пока внимание сосредоточено, "
         "остальные проекты не стоят на месте — они устаревают.")
@@ -275,8 +275,12 @@ def portfolio_signals(P, R, U, E, usage_of):
 
     # --- 6. Осталось против потраченного -------------------------------------
     worst = []
+    unknown_costs = 0
     for k in own:
         u, e = usage_of(k), E.get(k) or {}
+        if u and (u.get("cost_complete") is False or e.get("cost_complete") is False):
+            unknown_costs += 1
+            continue
         if not u or not e.get("remaining_usd"):
             continue
         ratio = e["remaining_usd"] / max(1.0, u["usd"])
@@ -284,8 +288,9 @@ def portfolio_signals(P, R, U, E, usage_of):
             worst.append((P[k]["name"], ratio))
     worst.sort(key=lambda x: -x[1])
     add("remaining_ratio", "Осталось больше, чем вложено", str(len(worst)),
-        "watch" if worst else "ok",
-        "; ".join("%s — ×%.1f" % w for w in worst[:5]) or "нет таких проектов",
+        "watch" if worst or unknown_costs else "ok",
+        ("; ".join("%s — ×%.1f" % w for w in worst[:5]) or "среди оценённых проектов превышений нет") +
+        ("; для %d проектов сравнение недоступно: стоимость неполная" % unknown_costs if unknown_costs else ""),
         "Если оставшийся бэклог дороже уже потраченного, проект пройден меньше "
         "чем наполовину — независимо от того, что показывает процент готовности.")
 
@@ -294,7 +299,7 @@ def portfolio_signals(P, R, U, E, usage_of):
     for k in own:
         u = usage_of(k)
         f = (P[k].get("readiness") or {}).get("functional") or 0
-        if u and f:
+        if u and f and u.get("cost_complete", True):
             costs.append((P[k]["name"], u["usd"] / f))
     costs.sort(key=lambda x: -x[1])
     if costs:
@@ -378,11 +383,12 @@ def main():
             func = rd.get("functional") or 0
             econ = {
                 "usd_spent": u.get("usd"),
+                "cost_complete": u.get("cost_complete", True),
                 "active_hours": hours,
-                "usd_per_hour": round(u["usd"] / hours, 1) if hours else None,
+                "usd_per_hour": round(u["usd"] / hours, 1) if hours and u.get("cost_complete", True) else None,
                 # Сколько стоил один пункт готовности. Сравнимо между проектами
                 # и показывает, где прогресс даётся дорого.
-                "usd_per_readiness_point": round(u["usd"] / func, 1) if func else None,
+                "usd_per_readiness_point": round(u["usd"] / func, 1) if func and u.get("cost_complete", True) else None,
                 "hours_per_readiness_point": round(hours / func, 2) if func else None,
                 "tokens_per_hour": round(u["billable"] / hours) if hours else None,
             }

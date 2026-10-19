@@ -92,6 +92,53 @@ def t_readiness():
                 bad.append("%s.%s = %r (нужно целое 0..100)" % (k, f, v))
         if not (r.get("basis") or "").strip():
             bad.append("%s: пустой readiness.basis — значит цифра ничем не обоснована" % k)
+        review = r.get('review')
+        if review is not None:
+            if not isinstance(review, dict) or review.get('method') != 'checkpoints-v1':
+                bad.append('%s: неизвестная методика readiness.review' % k)
+                continue
+            try:
+                date.fromisoformat(review.get('date', ''))
+            except (ValueError, TypeError):
+                bad.append('%s: нет даты ревизии готовности' % k)
+            if r.get('assessed') is not True:
+                bad.append('%s: ревизия пунктов должна быть явно assessed=true' % k)
+            dimensions = review.get('dimensions')
+            if not isinstance(dimensions, dict):
+                bad.append('%s: нет пяти измерений ревизии' % k)
+                continue
+            for dim in ('functional', 'production', 'docs', 'tests', 'security'):
+                axis = dimensions.get(dim, {})
+                if not isinstance(axis, dict):
+                    bad.append('%s.%s: неверная структура оснований' % (k, dim))
+                    continue
+                yes, no = axis.get('confirmed'), axis.get('pending')
+                if not isinstance(yes, list) or not isinstance(no, list):
+                    bad.append('%s.%s: нет подтверждённых/открытых пунктов' % (k, dim))
+                    continue
+                if len(yes) + len(no) != 4 or any(not isinstance(s, str) or not s.strip() for s in yes + no):
+                    bad.append('%s.%s: нужны четыре содержательных пункта' % (k, dim))
+                if all(isinstance(s, str) for s in yes + no) and len(set(yes + no)) != len(yes + no):
+                    bad.append('%s.%s: повторяющиеся пункты ревизии' % (k, dim))
+                if r.get(dim) != 25 * len(yes):
+                    bad.append('%s.%s: число расходится с подтверждёнными пунктами' % (k, dim))
+                if not isinstance(axis.get('evidence'), str) or not axis['evidence'].strip():
+                    bad.append('%s.%s: отсутствуют основания пунктов' % (k, dim))
+    return bad
+
+
+@check('маршрутизация проектов не содержит конфликтующих владельцев')
+def t_project_routes():
+    from project_routes import conflicts, paths, resolve_path
+    projects = load('projects.json')['projects']
+    bad = ['Каталог %s закреплён за несколькими проектами: %s' % (path, ', '.join(owners))
+           for path, owners in conflicts(projects)]
+    for key, p in projects.items():
+        if p.get('inspection_path') and resolve_path(p['inspection_path'], paths(projects))['project'] != key:
+            bad.append('%s: каталог инспекции не принадлежит этому проекту' % key)
+    for provider, data in load('usage.json').get('providers', {}).items():
+        if data.get('routing_stale'):
+            bad.append('%s: источник собран по прежней маршрутизации; нужен refresh --source all' % provider)
     return bad
 
 
@@ -324,6 +371,12 @@ def t_pricing_fresh():
         return ["прайс сверялся %d дней назад (%s), порог %d. Спросите у skill claude-api "
                 "актуальные цены, поправьте таблицу и передвиньте CHECKED — на этом прайсе "
                 "держится весь денежный счёт портфеля." % (age, pricing.CHECKED, pricing.STALE_DAYS)]
+    try:
+        openai_age = (date.today() - datetime.strptime(pricing.OPENAI_CHECKED, "%Y-%m-%d").date()).days
+    except (AttributeError, ValueError):
+        return ["В tools/pricing.py нет даты проверки OpenAI OPENAI_CHECKED"]
+    if openai_age > pricing.STALE_DAYS:
+        return ["Прайс OpenAI устарел: %d дней. Сверить официальную документацию и обновить OPENAI_CHECKED." % openai_age]
     return []
 
 
@@ -374,7 +427,7 @@ def t_git_clean():
     return ["не закоммичено %d файлов:\n      %s" % (len(dirty), "\n      ".join(dirty[:10]))] if dirty else []
 
 
-TESTS = [t_json_parses, t_required_fields, t_readiness, t_backlog, t_paths,
+TESTS = [t_json_parses, t_required_fields, t_readiness, t_project_routes, t_backlog, t_paths,
          t_usage_mapping, t_estimates, t_comments, t_competitors, t_no_secrets,
          t_pricing_fresh, t_quality, t_memory, t_memory_index, t_inbox,
          t_dashboard_builds, t_unit_tests, t_git_clean]

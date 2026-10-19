@@ -52,17 +52,36 @@ def main():
         u = usage_for(key)
         r = repos.get(key) or {}
         g = r.get("git") or {}
-        commits = g.get("commits") or 0
+        commits = g.get("project_commits", g.get("commits")) or 0
         if u and commits >= 5:
             per_commit[key] = {
                 "tokens": u["billable"] / commits,
                 "usd": u["usd"] / commits,
                 "output": u["output"] / commits,
-                "basis": "собственная история: %d коммитов" % commits,
+                "cost_complete": u.get("cost_complete", True),
+                "basis": "собственная история: %d коммитов" % commits +
+                         ("; стоимость известна частично" if u.get("cost_complete") is False else ""),
             }
 
+    # A new GPT-only project should use comparable GPT history rather than
+    # the median of predominantly Claude work. Mixed-source histories stay
+    # together: commits cannot be reliably attributed to a provider.
+    provider_rates = {}
+    for key, rate in per_commit.items():
+        u = usage_for(key) or {}
+        providers = [name for name, value in u.get("by_provider", {}).items() if value.get("billable")]
+        if len(providers) == 1:
+            provider_rates.setdefault(providers[0], []).append(rate)
+    provider_medians = {name: {
+        "tokens": statistics.median([v["tokens"] for v in rates]),
+        "usd": statistics.median([v["usd"] for v in rates]),
+        "cost_complete": all(v["cost_complete"] for v in rates),
+        "basis": "медиана проектов %s (своей истории мало)" % ("GPT / Codex" if name == "codex" else "Claude"),
+    } for name, rates in provider_rates.items()}
+
     med_tokens = statistics.median([v["tokens"] for v in per_commit.values()]) if per_commit else 25e6
-    med_usd = statistics.median([v["usd"] for v in per_commit.values()]) if per_commit else 14.0
+    priced = [v["usd"] for v in per_commit.values() if v["cost_complete"] or v["usd"] > 0]
+    med_usd = statistics.median(priced) if priced else 14.0
 
     out = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -79,7 +98,13 @@ def main():
 
     grand_tok = grand_usd = 0.0
     for key, p in proj["projects"].items():
-        rate = per_commit.get(key) or {"tokens": med_tokens, "usd": med_usd, "basis": "медиана портфеля (своей истории мало)"}
+        u = usage_for(key) or {}
+        sources = [name for name, value in u.get("by_provider", {}).items() if value.get("billable")]
+        provider_rate = provider_medians.get(sources[0]) if len(sources) == 1 else None
+        rate = per_commit.get(key) or provider_rate or {"tokens": med_tokens, "usd": med_usd,
+            "cost_complete": all(v["cost_complete"] for v in per_commit.values()),
+            "basis": "медиана портфеля (своей истории мало)" +
+                     ("; стоимость известна частично" if any(not v["cost_complete"] for v in per_commit.values()) else "")}
         items = []
         tok_sum = usd_sum = 0.0
         for b in p.get("backlog", []):
@@ -105,6 +130,7 @@ def main():
             "rate_basis": rate["basis"],
             "tokens_per_commit": round(rate["tokens"]),
             "usd_per_commit": round(rate["usd"], 2),
+            "cost_complete": rate.get("cost_complete", True) if usd_sum or tok_sum else True,
             "items": items,
             "remaining_tokens": round(tok_sum),
             "remaining_usd": round(usd_sum, 2),
@@ -112,7 +138,8 @@ def main():
         grand_tok += tok_sum
         grand_usd += usd_sum
 
-    out["totals"] = {"remaining_tokens": round(grand_tok), "remaining_usd": round(grand_usd, 2)}
+    out["totals"] = {"remaining_tokens": round(grand_tok), "remaining_usd": round(grand_usd, 2),
+                     "cost_complete": all(p["cost_complete"] for p in out["projects"].values())}
 
     dest = os.path.join(DATA, "estimates.json")
     with open(dest, "w", encoding="utf-8") as f:

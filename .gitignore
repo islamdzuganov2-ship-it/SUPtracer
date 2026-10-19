@@ -13,6 +13,7 @@ data/memory/
 dashboard.html
 
 ops/logs/
+ops/backups/
 __pycache__/
 *.pyc
 .venv/

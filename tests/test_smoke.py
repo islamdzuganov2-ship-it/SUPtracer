@@ -5,6 +5,8 @@
 с пустым каталогом данных. Сбор токенов и репозиториев сюда не входит: он читает
 журналы и диски машины и проверяется на живых данных гейтом."""
 import os
+import json
+import re
 import subprocess
 import sys
 import unittest
@@ -41,6 +43,17 @@ class EmptyData(DataCase):
         dest = os.path.join(self.tmp, "d.html")
         self.assert_survives(dest, script=os.path.join(TOOLS, "build_dashboard.py"))
         self.assertGreater(os.path.getsize(dest), 10000)
+
+    def test_dashboard_embedded_json_cannot_close_script(self):
+        title = '</ScRiPt><script>alert("stored input")</script>'
+        self.projects(lambda d: d["projects"]["alpha-api"].update(name=title))
+        dest = os.path.join(self.tmp, "safe.html")
+        self.assert_survives(dest, script=os.path.join(TOOLS, "build_dashboard.py"))
+        with open(dest, encoding="utf-8") as f:
+            html = f.read()
+        data = re.search(r'<script id="DATA" type="application/json">(.*?)</script>', html, re.S).group(1)
+        self.assertNotIn("<", data)
+        self.assertEqual(json.loads(data)["projects"]["projects"]["alpha-api"]["name"], title)
 
     def test_hook_on_empty_data(self):
         out = self.assert_survives(script=os.path.join(TOOLS, "hook.py"))

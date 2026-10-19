@@ -105,7 +105,8 @@ class Legacy(McpCase):
         self.handshake()
         tools = self.request("tools/list")["result"]["tools"]
         names = [t["name"] for t in tools]
-        self.assertEqual(len(names), 12)
+        self.assertEqual(len(names), 13)
+        self.assertIn('tt_work', names)
         for t in tools:
             self.assertRegex(t["name"], r"^[A-Za-z0-9_.-]{1,128}$")
             self.assertEqual(t["inputSchema"]["type"], "object")

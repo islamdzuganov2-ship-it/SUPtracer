@@ -42,6 +42,33 @@ class RefreshOne(DataCase):
         _, calls = self.refresh("--fast")
         self.assertFalse([c for c in calls if c[0] == "collect_repos.py"])
 
+    def test_source_is_forwarded_and_codex_skips_claude_memory(self):
+        rc, calls = self.refresh("--fast", "--source", "codex")
+        self.assertIn(rc, (0, None))
+        self.assertIn(("collect_usage.py", "--source", "codex"), calls)
+        self.assertNotIn(("automem.py",), calls)
+        self.assertIn(("codex_memory.py",), calls)
+        self.assertLess(calls.index(("codex_memory.py",)), calls.index(("tree.py",)))
+
+    def test_claude_only_refresh_preserves_codex_memory(self):
+        _, calls = self.refresh("--fast", "--source", "claude")
+        self.assertIn(("automem.py",), calls)
+        self.assertNotIn(("codex_memory.py",), calls)
+
+    def test_invalid_source_does_not_start_any_step(self):
+        for args in (("--source", "other"), ("--source",)):
+            rc, calls = self.refresh(*args)
+            self.assertEqual(rc, 1)
+            self.assertEqual(calls, [])
+
+    def test_failed_collection_stops_before_dashboard_and_snapshot(self):
+        with mock.patch.object(self.pm, "run", return_value=7) as run, \
+                mock.patch.object(self.pm, "cmd_snapshot") as snapshot:
+            rc, _ = self.quiet(self.pm.cmd_refresh, ["--fast"])
+        self.assertEqual(rc, 7)
+        self.assertEqual(run.call_count, 1)
+        snapshot.assert_not_called()
+
 
 class UsagePaths(DataCase):
     """Расход сессии в каталоге с другим именем относится к проекту по usage_paths."""

@@ -62,6 +62,39 @@ class Server(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["served"])
 
+    def test_workflow_requires_header_and_routes_validated_actions(self):
+        import workflow
+        self.assertEqual(self.req('POST','/api/work','{}')[0],403)
+        with mock.patch.object(workflow,'action',return_value={'ok':True}) as action:
+            code,body=self.req('POST','/api/work',json.dumps({'op':'focus','projects':[]}),{'X-TaskTreker':'1'})
+            self.assertEqual(code,200)
+            action.assert_called_once_with({'op':'focus','projects':[]})
+        with mock.patch.object(workflow,'action',side_effect=ValueError('invalid')):
+            self.assertEqual(self.req('POST','/api/work','{}',{'X-TaskTreker':'1'})[0],400)
+
+    def test_integrations_status(self):
+        with mock.patch.object(serve, "integration_status", return_value={"codex": {"connected": True}}):
+            code, body = self.req("GET", "/api/integrations")
+        self.assertEqual(code, 200)
+        self.assertTrue(json.loads(body)["providers"]["codex"]["connected"])
+
+    def test_connect_requires_header_and_known_provider(self):
+        self.assertEqual(self.req("POST", "/api/connect", '{}')[0], 403)
+        for source in ("unknown", ["codex"], {"codex": True}):
+            code, _ = self.req("POST", "/api/connect", json.dumps({"source": source}), {"X-TaskTreker": "1"})
+            self.assertEqual(code, 400)
+        code, _ = self.req("POST", "/api/connect", json.dumps({"source": "codex"}), {"X-TaskTreker": "1"})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.calls[-1], ["connect", "--provider", "codex"])
+
+    def test_refresh_source_and_body_limit(self):
+        code, _ = self.req("POST", "/api/refresh", json.dumps({"mode": "fast", "source": "codex"}), {"X-TaskTreker": "1"})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.calls[-1], ["refresh", "--fast", "--source", "codex"])
+        with mock.patch.object(serve, "MAX_BODY", 2):
+            code, _ = self.req("POST", "/api/refresh", '{"a":1}', {"X-TaskTreker": "1"})
+        self.assertEqual(code, 413)
+
     def test_refresh_needs_own_header(self):                            # БЕЗ-02
         code, _ = self.req("POST", "/api/refresh", json.dumps({"mode": "fast"}),
                            {"Content-Type": "application/json"})

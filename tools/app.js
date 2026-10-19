@@ -2,6 +2,14 @@
    Все цифры приходят из data/*.json — здесь только отображение. */
 
 const D = JSON.parse(document.getElementById('DATA').textContent);
+// Первый запуск и старые снимки могут не содержать ещё не собранных слоёв.
+for (const key of ['projects', 'usage', 'repos', 'estimates', 'competitors', 'comments']) D[key] ||= {};
+D.projects.projects ||= {};
+D.usage.projects ||= {};
+D.usage.scan ||= {};
+D.repos.repos ||= {};
+D.estimates.projects ||= {};
+D.competitors.projects ||= {};
 const P = D.projects.projects, U = D.usage.projects, R = D.repos.repos;
 const E = D.estimates.projects, C = D.competitors.projects;
 const Q = (D.quality && D.quality.projects) || {};
@@ -11,11 +19,92 @@ const TREE = D.tree || {}, MEM = D.memory || {records: [], totals: {}};
 const INBOX = (D.inbox || {}).items || [];
 
 const nf = n => (n == null || isNaN(n)) ? '—' : Math.round(n).toLocaleString('ru-RU').replace(/ /g, ' ');
-const money = n => (n == null || isNaN(n)) ? '—' : '$' + Math.round(n).toLocaleString('ru-RU').replace(/ /g, ' ');
+const money = n => (n == null || isNaN(n)) ? '—' : '$' + Number(n).toLocaleString('ru-RU', {minimumFractionDigits: n > 0 && n < 10 ? 2 : 0, maximumFractionDigits: n < 10 ? 2 : 0}).replace(/ /g, ' ');
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const tok = n => n >= 1e9 ? (n / 1e9).toFixed(2).replace('.', ',') + ' млрд'
   : n >= 1e6 ? (n / 1e6).toFixed(0) + ' млн' : nf(n);
 const hrs = n => (n == null) ? '—' : (n >= 10 ? Math.round(n) : n.toFixed(1).replace('.', ',')) + ' ч';
+const usageMoney = u => !u ? '—' : u.cost_complete === false
+  ? (u.usd > 0 ? 'от ' + money(u.usd) : 'неизвестно') : money(u.usd);
+const sourceSelect = document.getElementById('data-source');
+try { sourceSelect.value = localStorage.getItem('tt-source') || 'all'; } catch (_) {}
+if (!sourceSelect.value) sourceSelect.value = 'all';
+const selectedSource = () => sourceSelect.value;
+const sourceOption = () => ' --source ' + selectedSource();
+const sourceProviders = D.usage.providers || {claude: {label: 'Claude Code', projects: U,
+  total: D.usage.total, generated_at: D.usage.generated_at, available: !!Object.keys(U).length}};
+function renderSources() {
+  const selected = selectedSource(), ids = selected === 'all' ? ['codex', 'claude'] : [selected];
+  document.getElementById('source-summary').textContent = sourceSelect.options[sourceSelect.selectedIndex].text;
+  document.getElementById('source-info').innerHTML = ids.map(id => {
+    const p = sourceProviders[id], t = p?.total || {}, name = id === 'codex' ? 'GPT / Codex' : 'Claude Code';
+    const date = p?.generated_at ? new Date(p.generated_at).toLocaleString('ru-RU') : 'ещё не собирались';
+    return `<div class="source-card"><b>${name}</b><p>${p ? `${tok(t.tokens || t.billable || 0)} токенов · ${nf(t.sessions || 0)} сессий · ${hrs(t.active_hours || 0)}` : 'Данных пока нет — нажмите «Обновить данные».'}</p>
+      <p>Стоимость: ${usageMoney(p?.total)}${t.cost_complete === false ? ' · для части моделей нет проверенного тарифа' : ''}</p>
+      ${id === 'codex' ? `<p>Ветви дерева: ${nf(D.codex_sessions?.sessions?.length || 0)} сессий · ${nf(D.codex_sessions?.requests || 0)} запросов · ${nf(D.codex_sessions?.answers || 0)} ответов</p>` : ''}
+      ${id === 'codex' && D.usage.pricing?.openai_rates ? `<details><summary>Тарифы OpenAI · проверены ${esc(D.usage.pricing.openai_checked)}</summary>
+        <p>Standard API, $ за 1 млн токенов. Это эквивалент работы, а не счёт подписки.</p><div style="overflow:auto"><table><thead><tr><th>Модель</th><th>Вход</th><th>Кеш: чтение</th><th>Кеш: запись</th><th>Выход</th></tr></thead><tbody>${Object.entries(D.usage.pricing.openai_rates).map(([m,v]) => `<tr><td>${esc(m)}</td><td>${v.in}</td><td>${v.read}</td><td>${v.write}</td><td>${v.out}</td></tr>`).join('')}</tbody></table></div>
+        <p>Для длинного контекста применяются отдельные ставки. Внутренние модели без публичного тарифа отмечаются как неизвестные.</p></details>` : ''}
+      <p>Сбор: ${esc(date)}${p?.available === false ? ' · локальные журналы не найдены' : ''}${p?.stale ? ' · сохранён предыдущий сбор' : ''}${p?.routing_stale ? ' · изменились границы проектов: обновите оба источника' : ''}</p></div>`;
+  }).join('');
+}
+sourceSelect.addEventListener('change', () => {
+  try { localStorage.setItem('tt-source', selectedSource()); } catch (_) {}
+  renderSources();
+  document.getElementById('source-panel').open = true;
+});
+renderSources();
+
+function activityOf(k) {
+  const activity = D.project_activity?.projects?.[k] || {}, providers = usageOf(k)?.by_provider || {};
+  const sources = Object.keys(providers).map(id => `<span class="chip">${id === 'codex' ? 'GPT / Codex' : 'Claude'} · ${usageMoney(providers[id])}</span>`).join(' ');
+  const docs = (activity.documents || []).filter(d => d.tasks?.length || d.missing);
+  return `<div class="block provider-activity"><h3>Источники и последняя работа</h3>${sources}
+    ${activity.codex_sessions ? `<p>GPT / Codex: ${nf(activity.codex_sessions)} сессий · ${nf(activity.requests)} запросов · ${nf(activity.answers)} ответов.</p>` : ''}
+    ${(activity.latest || []).length ? `<ul>${activity.latest.map(r => `<li>${esc(String(r.date || '').slice(0,16).replace('T',' '))} UTC · ${r.role === 'user' ? 'Запрос' : 'Ответ'}: ${esc(r.title)}</li>`).join('')}</ul>` : ''}
+    ${docs.length ? `<details><summary>Актуальный план по документам проекта</summary><p>Состояние в исходном документе; численная готовность оценивается отдельно.</p>${docs.map(d => `<p><b>${esc(d.source)}</b>${d.missing ? ' — файл недоступен' : ' · ' + esc(d.modified_at?.slice(0,10))}</p>${d.tasks.length ? `<ul>${d.tasks.map(t => `<li>${esc(t.id)} · ${esc(t.title)} — ${esc(t.status_text)}</li>`).join('')}</ul>` : ''}`).join('')}</details>` : ''}
+    </div>`;
+}
+
+const discoveredProjects = D.codex_sessions?.projects || {};
+const discoveredKeys = [...new Set([...Object.keys(discoveredProjects), ...Object.keys(U)])].filter(k => !P[k]);
+document.getElementById('discoveredWrap').innerHTML = discoveredKeys.length
+  ? '<div class="section-h">Обнаружены в сессиях — вне ручного портфеля</div>' + discoveredKeys.map(k => {
+    const found = discoveredProjects[k] || {}, sessions = (D.codex_sessions?.sessions || []).filter(s => s.projects?.includes(k));
+    return `<details class="card" id="p-${esc(k)}"><summary>${esc(found.name || k)} · ${nf(sessions.length)} сессий GPT / Codex</summary>
+      <p>Проект уже виден на дереве. Готовность и задачи появятся после добавления в ручной портфель.</p>
+      <p>${(found.paths || []).map(esc).join('<br>')}</p><p>${nf(sessions.reduce((n,s) => n + (s.requests || 0), 0))} запросов · ${nf(sessions.reduce((n,s) => n + (s.answers || 0), 0))} ответов · ${tok(U[k]?.billable || 0)} токенов</p></details>`;
+  }).join('') : '';
+
+(function integrations() {
+  const button = document.getElementById('connect-provider'), status = document.getElementById('connection-status');
+  const served = ['http:', 'https:'].includes(location.protocol);
+  async function loadStatus() {
+    if (!served) { status.textContent = 'Для подключения из окна запустите py tools/pm.py serve'; return; }
+    try {
+      const response = await fetch('/api/integrations');
+      const j = await response.json();
+      if (!j.ok) throw new Error(j.error);
+      status.textContent = Object.entries(j.providers).map(([id, p]) => `${p.label}: ${p.connected ? 'подключён' : 'не подключён'}`).join(' · ');
+    } catch (_) { status.textContent = 'Статус недоступен — перезапустите локальный сервер после обновления.'; }
+  }
+  button.onclick = async () => {
+    const cmd = 'py tools/pm.py connect --provider ' + selectedSource();
+    if (!served) { status.textContent = 'Выполните: ' + cmd; return; }
+    button.disabled = true;
+    status.textContent = 'Подключаю…';
+    try {
+      const response = await fetch('/api/connect', {method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
+        body: JSON.stringify({source: selectedSource()})});
+      const j = await response.json();
+      document.getElementById('rlogWrap').innerHTML = `<div class="rlog ${j.ok ? 'ok' : 'bad'}">${esc(j.log || j.error || '')}</div>`;
+      if (j.ok) await loadStatus(); else status.textContent = 'Подключение не завершено — подробности ниже.';
+    } catch (e) { status.textContent = 'Не удалось подключить: ' + e.message; }
+    finally { button.disabled = false; }
+  };
+  loadStatus();
+})();
 
 // usage.json строится по имени каталога — сопоставляем с ключом проекта.
 function usageOf(key) {
@@ -38,7 +127,7 @@ let spent = 0, spentTok = 0, rem = 0, remTok = 0, disk = 0, loc = 0, tasks = 0, 
 keys.forEach(k => {
   const u = usageOf(k);
   if (u) { spent += u.usd; spentTok += u.billable; sess += u.sessions; hours += (u.active_hours || 0); }
-  const e = E[k]; if (e) { rem += e.remaining_usd; remTok += e.remaining_tokens; tasks += e.items.length; }
+  const e = E[k]; if (e) { rem += e.remaining_usd; remTok += e.remaining_tokens; tasks += e.items.filter(x => !x.closed && !['done', 'cancelled', 'dropped'].includes(x.status)).length; }
   const r = R[k]; if (r && r.exists) { disk += r.disk_bytes || 0; loc += (r.code && r.code.loc_total) || 0; }
 });
 const months = [...new Set(keys.flatMap(k => Object.keys(usageOf(k)?.by_month || {})))]
@@ -71,12 +160,12 @@ document.getElementById('sub').textContent =
 })();
 
 document.getElementById('kpis').innerHTML = [
-  ['Потрачено', money(spent), tok(spentTok) + ' токенов · ' + sess + ' сессий'],
-  ['Осталось', money(rem), tok(remTok) + ' токенов · ' + tasks + ' задач'],
+  ['Потрачено', usageMoney({usd: spent, cost_complete: keys.every(k => usageOf(k)?.cost_complete !== false)}), tok(spentTok) + ' токенов · ' + sess + ' сессий'],
+  ['Осталось', usageMoney({usd: rem, cost_complete: keys.every(k => E[k]?.cost_complete !== false)}), tok(remTok) + ' токенов · ' + tasks + ' задач'],
   ['Время', Math.round(hours) + ' ч', calDays + ' рабочих дней · ' + (hours / Math.max(1, calDays)).toFixed(1).replace('.', ',') + ' ч в день'],
-  ['В месяц', money(months.length ? spent / months.length : 0), months.length + ' мес. · ориентир отрасли $150–250'],
+  ['В месяц', usageMoney({usd: months.length ? spent / months.length : 0, cost_complete: keys.every(k => usageOf(k)?.cost_complete !== false)}), months.length + ' мес. · средний известный расход'],
   ['Кода', nf(loc), 'строк в ' + own.length + ' проектах'],
-  ['На диске', (disk / 1e9).toFixed(1).replace('.', ',') + ' ГБ', 'свободно на C: — 27 ГБ'],
+  ['На диске', (disk / 1e9).toFixed(1).replace('.', ',') + ' ГБ', 'размер каталогов проектов'],
 ].map(([l, v, n]) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div><div class="n">${n}</div></div>`).join('');
 
 /* ======================= портфельные сигналы ======================= */
@@ -106,14 +195,16 @@ const readyOrder = own.slice().sort((a, b) =>
 
 VIZ.matrix(document.getElementById('c-ready'), {
   title: 'Готовность по пяти измерениям',
-  sub: 'Насыщенность тона — величина. Число напечатано в каждой ячейке, поэтому цвет здесь помогает, а не несёт смысл в одиночку.',
+  sub: 'Числа и основания — в карточках проектов. Новая ревизия: 25 баллов за подтверждённый контрольный пункт; прежние оценки — экспертные. Это не тестовое покрытие.',
   rows: readyOrder.map(k => ({label: named(k), key: k})),
   cols: DIMS,
   cell: (r, c) => {
-    const v = (P[r.key].readiness || {})[c.key];
+    const rd = P[r.key].readiness || {};
+    const v = rd.assessed === false ? null : rd[c.key];
+    const evidence = rd.review?.dimensions?.[c.key];
     return {value: v == null ? null : v, text: v == null ? '—' : v + '',
       tip: `<b>${esc(named(r.key))}</b> · ${c.label}: ${v == null ? '—' : v + '%'}<br>` +
-           `<span style="color:var(--ink3)">${esc(((P[r.key].readiness || {}).basis || '').slice(0, 180))}</span>`};
+           `<span style="color:var(--ink3)">${esc(evidence ? `${rd.review.date}: ${evidence.confirmed.length}/4 пунктов. ${evidence.evidence}` : rd.basis || '')}</span>`};
   },
   note: 'Разрыв между «Функция» и «Эксплуат.» в одной строке — главное, что здесь стоит искать: система умеет много, но её нельзя включить. Закрывается не функциями, а поставкой.',
 });
@@ -313,14 +404,14 @@ document.getElementById('tableWrap').innerHTML = `<table class="pf"><thead><tr>
   return `<tr data-k="${k}">
    <td><div class="pname">${esc(p.name)}</div><div class="ptag">${esc(p.status)}</div></td>
    <td>${esc(p.goal || '')}</td>
-   <td><span class="pct">${rd.functional ?? '—'}%</span>${bar(rd.functional || 0)}</td>
-   <td><span class="chip ${(rd.security || 0) >= 70 ? 'ok' : (rd.security || 0) >= 40 ? 'warn' : 'bad'}">${rd.security ?? '—'}%</span></td>
+   <td><span class="pct">${rd.assessed === false ? 'не оценено' : (rd.functional ?? '—') + '%'}</span>${rd.assessed === false ? '' : bar(rd.functional || 0)}</td>
+   <td><span class="chip ${rd.assessed === false ? 'idle' : (rd.security || 0) >= 70 ? 'ok' : (rd.security || 0) >= 40 ? 'warn' : 'bad'}">${rd.assessed === false ? 'не оценено' : (rd.security ?? '—') + '%'}</span></td>
    <td class="num">${u ? hrs(u.active_hours) : '—'}</td>
-   <td class="num">${u ? money(u.usd) : '—'}</td>
+   <td class="num">${usageMoney(u)}</td>
    <td class="num">${e.remaining_usd ? money(e.remaining_usd) : '—'}</td>
    <td class="num">${q.spec?.score ?? '—'}</td>
    <td class="num">${q.engineering?.score ?? '—'}</td>
-   <td class="num">${g.commits != null ? g.commits : '<span style="color:var(--bad)">нет git</span>'}</td>
+   <td class="num">${g.commits != null ? (g.project_commits ?? g.commits) : '<span style="color:var(--bad)">нет git</span>'}</td>
    <td class="mono" style="color:var(--ink3)">${esc(g.last_commit || (u ? u.last_seen.slice(0, 10) : '—'))}</td>
   </tr>`;
 }).join('') + `</tbody></table>`;
@@ -343,7 +434,17 @@ document.getElementById('cards').innerHTML = order.map(k => {
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
       <div style="width:112px;color:var(--ink3);font-size:12.5px">${d.label}</div>
       <div style="flex:1">${bar(rd[d.key] || 0)}</div>
-      <div class="pct" style="width:38px;text-align:right">${rd[d.key] ?? '—'}%</div></div>`).join('');
+      <div class="pct" style="min-width:38px;text-align:right">${rd.assessed === false ? 'не оценено' : (rd[d.key] ?? '—') + '%'}</div></div>`).join('');
+  const reviewDetails = rd.review?.method === 'checkpoints-v1' ? `
+    <details class="readiness-evidence"><summary>Основания оценки · ${esc(rd.review.date)}</summary>
+    ${DIMS.map(d => {
+      const axis = rd.review.dimensions[d.key];
+      return `<div class="readiness-axis" data-axis="${esc(d.key)}" style="margin-top:12px">
+        <b>${esc(d.label)}: ${rd[d.key]} / 100 · ${axis.confirmed.length} из 4 пунктов</b>
+        ${axis.confirmed.length ? `<p>Подтверждено:</p>${list(axis.confirmed)}` : '<p>Подтверждённых пунктов нет.</p>'}
+        ${axis.pending.length ? `<p>Открыто:</p>${list(axis.pending)}` : ''}
+        <p style="font-size:12px;color:var(--ink3)">${esc(axis.evidence)}</p></div>`;
+    }).join('')}</details>` : '';
 
   const backlog = (e.items || []).length ? `<table class="bl"><thead><tr>
     <th>#</th><th>Задача</th><th>Разм.</th><th>Статус</th><th style="text-align:right">Токенов</th><th style="text-align:right">$</th>
@@ -352,9 +453,9 @@ document.getElementById('cards').innerHTML = order.map(k => {
       <td>${esc(b.title)}${b.why ? `<div style="color:var(--ink3);font-size:12px;margin-top:3px">${esc(b.why)}</div>` : ''}</td>
       <td><span class="size ${b.size}">${b.size}</span></td>
       <td><span class="chip ${b.blocked ? 'bad' : b.status === 'done' ? 'ok' : 'idle'}">${esc(b.status || '—')}</span>${b.days ? `<div style="color:var(--ink3);font-size:11.5px;margin-top:3px">${esc(b.days)}</div>` : ''}</td>
-      <td class="num">${tok(b.est_tokens)}</td><td class="num">${money(b.est_usd)}</td></tr>`).join('') +
+      <td class="num">${tok(b.est_tokens)}</td><td class="num">${usageMoney({usd:b.est_usd, cost_complete:e.cost_complete})}</td></tr>`).join('') +
     `</tbody></table><div style="margin-top:9px;font-size:12.5px;color:var(--ink3)">
-      Итого по бэклогу: <b style="color:var(--ink)">${tok(e.remaining_tokens)} токенов · ${money(e.remaining_usd)}</b>.
+      Итого по бэклогу: <b style="color:var(--ink)">${tok(e.remaining_tokens)} токенов · ${usageMoney({usd:e.remaining_usd, cost_complete:e.cost_complete})}</b>.
       Оценка по ${esc(e.rate_basis)} — ${nf(e.tokens_per_commit)} токенов (${money(e.usd_per_commit)}) на коммит.</div>`
     : '<p style="color:var(--ink3)">Бэклог пуст.</p>';
 
@@ -378,8 +479,8 @@ document.getElementById('cards').innerHTML = order.map(k => {
     <span class="arrow">▶</span><h2>${esc(p.name)}</h2>
     <span class="tag">${esc(p.tagline)}</span>
     <span class="chip">${esc(p.goal || '')}</span>
-    <span class="chip ${rd.functional >= 70 ? 'ok' : rd.functional >= 40 ? 'warn' : 'bad'}">${rd.functional ?? '—'}% готово</span>
-    ${u ? `<span class="chip">${money(u.usd)} · ${hrs(u.active_hours)}</span>` : ''}
+    <span class="chip ${rd.assessed === false ? 'idle' : rd.functional >= 70 ? 'ok' : rd.functional >= 40 ? 'warn' : 'bad'}">${rd.assessed === false ? 'готовность не оценена' : (rd.functional ?? '—') + '% готово'}</span>
+    ${u ? `<span class="chip">${usageMoney(u)} · ${hrs(u.active_hours)}</span>` : ''}
   </summary><div class="body">
 
   <div class="prow"><button class="btn prefresh" data-k="${esc(k)}"
@@ -389,10 +490,13 @@ document.getElementById('cards').innerHTML = order.map(k => {
   <div class="grid2">
     <div class="block"><h3>Цель</h3><p>${esc(p.goal_long || '')}</p></div>
     <div class="block"><h3>Готовность</h3>${readRows}
-      <div style="color:var(--ink3);font-size:12px;margin-top:7px">${esc(rd.basis || '')}</div></div>
+      <div style="color:var(--ink3);font-size:12px;margin-top:7px">${esc(rd.basis || '')}</div>${reviewDetails}</div>
   </div>
 
   <div class="block"><h3>Что сделано</h3>${list(p.done)}</div>
+  ${p.scope_note || p.related_projects ? `<div class="block"><h3>Границы проекта</h3><p>${esc(p.scope_note || 'Самостоятельный проект; связь с другими продуктами не объединяет бэклог и расходы.')}</p>
+    ${(p.related_projects || []).filter(key => P[key]).map(key => `<button class="btn related-project" data-project="${esc(key)}">${esc(P[key].name)}</button>`).join(' ')}</div>` : ''}
+  ${activityOf(k)}
 
   <div class="grid2">
     <div class="block"><h3>Архитектура</h3><dl class="kv">
@@ -426,13 +530,15 @@ document.getElementById('cards').innerHTML = order.map(k => {
     <dt>Открытых вопросов в доках</dt><dd>${sp.open_questions ?? '—'}</dd>
     <dt>TODO/FIXME</dt><dd>${r.code ? r.code.todo_markers : '—'}</dd>
     <dt>Git</dt><dd>${g.commits != null ? `${g.commits} коммитов, ${g.branches} веток, ветка <span class="mono">${esc(g.branch)}</span>, ${g.first_commit} → ${g.last_commit}${g.dirty_files ? `, <b style="color:var(--warn)">${g.dirty_files} незакоммичено</b>` : ''}${g.remote ? `<br><span class="mono" style="color:var(--ink3)">${esc(g.remote)}</span>` : ''}` : '<b style="color:var(--bad)">репозитория нет</b>'}</dd>
+    ${g.history_since ? `<dt>История этого проекта</dt><dd>${nf(g.project_commits)} коммитов с ${esc(g.history_since)}; ${nf(g.inherited_commits)} унаследованы от исходного продукта и не используются для калибровки расходов.</dd>` : ''}
+    ${r.path && r.path !== p.path ? `<dt>Каталог среза</dt><dd class="mono">${esc(r.path)}</dd>` : ''}
     ${g.last_subject ? `<dt>Последний коммит</dt><dd>${esc(g.last_subject)}</dd>` : ''}
     <dt>На диске</dt><dd>${r.disk_bytes ? (r.disk_bytes / 1e9).toFixed(2).replace('.', ',') + ' ГБ' : '—'}</dd>
     <dt>Гигиена</dt><dd>${r.hygiene ? Object.entries({gitignore:'.gitignore',readme:'README',license:'LICENSE',ci:'CI',docker:'Docker',lockfile:'lock-файл',env_example:'.env.example',claude_md:'CLAUDE.md'}).map(([f, l]) => `<span class="chip ${r.hygiene[f] ? 'ok' : 'idle'}" style="margin:0 3px 3px 0">${l}${r.hygiene[f] ? '' : ' нет'}</span>`).join('') : '—'}</dd>
     ${u ? `<dt>Время</dt><dd>${hrs(u.active_hours)} активной работы, ${u.calendar_days} дней, ${u.sessions} сессий, ${hrs(u.hours_per_day)} в день</dd>
     <dt>Токены</dt><dd class="mono">вход ${nf(u.input)} · выход ${nf(u.output)} · запись кеша ${nf(u.cache_write)} · чтение кеша ${nf(u.cache_read)} · размышление ${nf(u.thinking)}</dd>
-    <dt>Модели</dt><dd class="mono">${Object.entries(u.by_model).filter(([m]) => !m.startsWith('<')).map(([m, v]) => `${m} — ${nf(v.requests)} запр., ${money(v.usd)}`).join(' · ')}</dd>
-    <dt>По месяцам</dt><dd class="mono">${Object.entries(u.by_month).map(([m, v]) => `${m}: ${money(v.usd)}`).join(' · ')}</dd>` : ''}
+    <dt>Модели</dt><dd class="mono">${Object.entries(u.by_model).filter(([m]) => !m.startsWith('<')).map(([m, v]) => `${esc(m)} — ${nf(v.requests)} запр., ${usageMoney(v)}`).join(' · ')}</dd>
+    <dt>По месяцам</dt><dd class="mono">${Object.entries(u.by_month).map(([m, v]) => `${esc(m)}: ${usageMoney(v)}`).join(' · ')}</dd>` : ''}
   </dl></div>
 
   ${(c.items || []).length ? `<div class="block"><h3>Конкуренты</h3>
@@ -455,6 +561,10 @@ document.querySelectorAll('table.pf tbody tr').forEach(tr => tr.onclick = () => 
   d.open = true;
   d.scrollIntoView({behavior: 'smooth', block: 'start'});
 });
+document.querySelectorAll('.related-project').forEach(button => button.onclick = () => {
+  const card = document.getElementById('p-' + button.dataset.project);
+  if (card) {card.open = true; card.scrollIntoView({behavior:'smooth',block:'start'});}
+});
 
 const CM = D.comments.comments || [];
 document.getElementById('commentsWrap').innerHTML = `<div class="section-h">Комментарии — ${CM.length}</div>` +
@@ -467,7 +577,7 @@ document.getElementById('foot').innerHTML =
   `Данные: <code>data/projects.json</code> (ручной источник истины) · <code>usage.json</code> (${nf(D.usage.scan.deduped_rows)} ответов из ${D.usage.scan.files} журналов) · ` +
   `<code>repos.json</code> · <code>estimates.json</code> · <code>quality.json</code> · <code>competitors.json</code> · <code>comments.json</code>.<br>` +
   `Обновление: <code>py tools/pm.py refresh</code>. Конкуренты исследованы ${esc(D.competitors.researched)}. ` +
-  `Деньги — эквивалент по прайсу Anthropic API, а не счёт подписки. Время — активная работа ассистента из журналов сессий, паузы длиннее 15 минут отброшены.`;
+  `Деньги — известная часть эквивалента по API, а не счёт подписки. Расход без проверенного тарифа отмечен как неизвестный; денежные диаграммы показывают только оценённую часть. Время — активная работа ассистента из журналов сессий, паузы длиннее 15 минут отброшены.`;
 
 /* ======================= память системы =======================
    Ради этого блока память и вынесена из контекста ассистента: видно, сколько
@@ -530,10 +640,11 @@ document.getElementById('foot').innerHTML =
   const served = location.protocol === 'http:' || location.protocol === 'https:';
   const CMD = {fast: 'py tools/pm.py refresh --fast', full: 'py tools/pm.py refresh',
                vault: 'py tools/pm.py vault sync'};
+  const command = m => CMD[m] + (m === 'vault' ? '' : sourceOption());
   if (!served) {
     btn.title = 'Дашборд открыт файлом: страница не может запускать команды';
     btn.onclick = () => {
-      const cmd = CMD[mode.value];
+      const cmd = command(mode.value);
       wrap.innerHTML = `<div class="rlog">Дашборд открыт как файл, поэтому кнопка не может запустить сбор сама.
 Выполните в каталоге системы:
 
@@ -553,17 +664,17 @@ document.getElementById('foot').innerHTML =
     const m = mode.value, label = btn.textContent;
     btn.disabled = true;
     btn.innerHTML = '<span class="spin"></span>Обновляю…';
-    wrap.innerHTML = `<div class="rlog">Запущено: ${esc(CMD[m])}
+    wrap.innerHTML = `<div class="rlog">Запущено: ${esc(command(m))}
 Это может занять от нескольких секунд до нескольких минут — сканирование репозиториев самое долгое.</div>`;
     try {
       const r = await fetch('/api/refresh', {
         method: 'POST',
         headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
-        body: JSON.stringify({mode: m}),
+        body: JSON.stringify({mode: m, source: selectedSource()}),
       });
       const j = await r.json();
       wrap.innerHTML = `<div class="rlog ${j.ok ? 'ok' : 'bad'}">${esc(j.log || j.error || '')}
-${j.ok ? 'Готово за ' + j.seconds + ' с. Перезагружаю страницу…' : 'Обновление не прошло — данные остались прежними.'}</div>`;
+${j.ok ? 'Готово за ' + j.seconds + ' с. Перезагружаю страницу…' : 'Обновление остановлено. Подробности выше; завершённые шаги могли обновить данные.'}</div>`;
       if (j.ok) setTimeout(() => location.reload(), 1200);
     } catch (e) {
       wrap.innerHTML = `<div class="rlog bad">Сервер не ответил: ${esc(String(e))}
@@ -582,7 +693,7 @@ document.getElementById('cards').addEventListener('click', async e => {
   if (!b) return;
   e.preventDefault();
   const k = b.dataset.k, log = document.getElementById('plog-' + k);
-  const cmd = 'py tools/pm.py refresh --project ' + k;
+  const cmd = 'py tools/pm.py refresh --project ' + k + sourceOption();
   if (!(location.protocol === 'http:' || location.protocol === 'https:')) {
     log.textContent = 'Дашборд открыт файлом — выполните в каталоге системы: ' + cmd;
     if (navigator.clipboard) navigator.clipboard.writeText(cmd).catch(() => {});
@@ -595,7 +706,7 @@ document.getElementById('cards').addEventListener('click', async e => {
     const r = await fetch('/api/refresh', {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
-      body: JSON.stringify({mode: 'project', project: k}),
+      body: JSON.stringify({mode: 'project', project: k, source: selectedSource()}),
     });
     const j = await r.json();
     log.textContent = j.ok ? 'Готово за ' + j.seconds + ' с — перезагружаю…' : (j.error || 'Обновление не прошло');
@@ -609,7 +720,7 @@ document.getElementById('cards').addEventListener('click', async e => {
 });
 
 /* ======================= вкладки и тема ======================= */
-const PAGES = ['dash', 'tree', 'proj'];
+const PAGES = ['dash', 'tree', 'proj', 'boards'];
 function showTab(which) {
   const cur = PAGES.includes(which) ? which : 'dash';
   PAGES.forEach(p => {
@@ -622,7 +733,7 @@ function showTab(which) {
     TREEVIEW.open(TREE, {
       onClose: () => showTab('dash'),
       onProject: k => {
-        if (!P[k]) return;
+        if (!P[k] && !discoveredKeys.includes(k)) return;
         showTab('proj');
         const d = document.getElementById('p-' + k);
         if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }

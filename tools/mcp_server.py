@@ -128,8 +128,8 @@ TOOLS = [
      "inputSchema": _schema({"project": STR, "all": {"type": "boolean", "description": "И разобранные"}}),
      "annotations": dict(READ, title="Входящие")},
     {"name": "tt_apply", "title": "Принять предложения",
-     "description": "Принять предложения из входящих в бэклог проекта. Единственный инструмент, "
-                    "меняющий бэклог. Номер задачи продолжает серию проекта, связь с исходным "
+     "description": "Принять предложения из входящих в бэклог проекта. "
+                    "Номер задачи продолжает серию проекта, связь с исходным "
                     "запросом сохраняется.",
      "inputSchema": _schema({"ids": {"type": "array", "items": STR, "description": "Номера IN-n"},
                              "all": {"type": "boolean"}, "project": STR}),
@@ -304,6 +304,19 @@ HANDLERS = {"tt_context": t_context, "tt_recall": t_recall, "tt_search": t_searc
             "tt_remember": t_remember, "tt_forget": t_forget, "tt_status": t_status,
             "tt_inbox": t_inbox, "tt_apply": t_apply, "tt_reject": t_reject,
             "tt_ingest": t_ingest, "tt_tree": t_tree, "tt_projects": t_projects}
+
+INSTRUCTIONS += "\n6. Начни с tt_work op=queue: там явные запросы запуска с доски. До реализации разложи новый запрос через op=plan: root, критерии, размер, риск и зависимости. Затем next/packet; выбери рекомендованную модель, соблюдай бюджет. Принимай claim только на фактической модели; finish требует доказательств проверок. Не запускай повторно уже принятую задачу. Каталог и измерения: op=models."
+TOOLS.append({"name": "tt_work", "title": "Планирование и исполнение задач",
+    "description": "Доски и экономное исполнение: list, queue, models, next, packet; plan (project, tasks), focus (projects), update (ref, changes), enqueue (ref), claim (ref, run, worker, model), finish/fail/cancel (ref, run, evidence, tokens). complete (ref, evidence) закрывает вручную проверенную задачу без активного запуска; нужны все acceptance_done. Начни с queue/next; packet содержит модель, бюджет и критерии. Запуск с доски ставит запрос в очередь, claim подтверждает реальное начало.",
+    "inputSchema": _schema({"op": STR, "project": STR, "ref": STR, "run": STR,
+        "worker": STR, "model": STR, "evidence": STR, "tokens": {"type":"integer"},
+        "tasks": {"type":"array", "items":{"type":"object"}},
+        "projects": {"type":"array", "items":STR}, "changes":{"type":"object"}}, ["op"]),
+    "annotations": dict(WRITE, idempotentHint=False, title="Планирование и исполнение")})
+def t_work(a):
+    import workflow
+    return json.dumps(workflow.action(a), ensure_ascii=False)
+HANDLERS['tt_work'] = t_work
 
 
 def _validate(tool, args):

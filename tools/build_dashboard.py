@@ -246,6 +246,16 @@ table.bl tr:last-child td{border-bottom:none}
 
 /* ---------- обновление данных ---------- */
 .refresh{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.source-label{font-size:12px;color:var(--ink2);flex-basis:100%}
+.source-panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:18px}
+.source-panel summary{cursor:pointer;font-size:14px;font-weight:600}
+#source-summary{font-size:12px;font-weight:400;color:var(--ink3);margin-left:8px}
+#source-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:14px}
+.source-card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:12px;font-size:13px}
+.source-card p{margin:5px 0;color:var(--ink2)}
+.source-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px}
+.source-note,#connection-status{font-size:12px;color:var(--ink2)}
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .btn.primary:hover{filter:brightness(1.07);color:#fff}
 .btn[disabled]{opacity:.55;cursor:progress}
@@ -305,13 +315,16 @@ def freshness():
         # Срез без отметки времени — неизвестной свежести: честнее «нет», чем чужая дата.
         "repos": "" if not rs or "" in scans else min(scans),
         "memory": mem.get("generated_at", ""),
+        "project_activity": load("project_activity.json", {}).get("generated_at", ""),
         "vault_pull": vault.get("pulled_at", ""),
         "vault_push": vault.get("pushed_at", ""),
     }
 
 
 def main():
+    import workflow
     payload = {
+        "workflow": workflow.snapshot(),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "projects": load("projects.json"),
         "usage": load("usage.json"),
@@ -322,12 +335,15 @@ def main():
         "quality": load("quality.json", {"projects": {}, "portfolio_signals": []}),
         "snapshots": load_snapshots(),
         "tree": load("tree.json", {}),
+        "codex_sessions": load("codex_sessions.json", {}),
+        "project_activity": load("project_activity.json", {}),
         "memory": load(os.path.join("memory", "index.json"), {"records": [], "totals": {}}),
         "inbox": load("inbox.json", {"items": []}),
         "context": context_stats(),
         "fresh": freshness(),
     }
-    blob = json.dumps(payload, ensure_ascii=False).replace("</script>", "<\\/script>")
+    # HTML закрывает script без учёта регистра, даже внутри JSON-строки.
+    blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
 
     html = (
         "<!DOCTYPE html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
@@ -338,6 +354,8 @@ def main():
         + "<script>\n" + read_tool("charts.js") + "\n</script>\n"
         + "<script>\n" + read_tool("tree.js") + "\n</script>\n"
         + "<script>\n" + read_tool("app.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("board_extras.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("boards.js") + "\n</script>\n"
         + "</body>\n</html>\n"
     )
 

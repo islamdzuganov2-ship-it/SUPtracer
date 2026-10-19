@@ -133,8 +133,11 @@ def locked():
 def state():
     return read('workflow.json', dict(schema=1, focus=[], tasks={}, runs=[]))
 
+REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна доработка', 'spec_change': 'Принято с изменением ТЗ'}
+
 def settings(s=None):
-    return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES),
+    return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
+                     reviewer='same', auto_merge=True, auto_launch_review=True),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -389,7 +392,7 @@ def others_active(t, runs, at, worker=None):
 def packet(ref, agent=None):
     t=task_for(ref); s=state(); at=now()
     route=recommendation(t, agent=agent, default=settings(s)['default_executor'])
-    phase='assess' if t['complexity']['needs_assessment'] else 'execute' 
+    phase='review' if t.get('status')=='review' else 'assess' if t['complexity']['needs_assessment'] else 'execute'
     if t['needs_plan']: raise ValueError('Сначала заполните root, критерии приёмки и разбейте XL')
     if review_required(t, route, s['runs']): raise ValueError('Лимит попыток/токенов достигнут: разбейте задачу или обоснуйте другую модель')
     if t['blocked_by']: raise ValueError('Не закрыты зависимости: '+', '.join(t['blocked_by']))
@@ -399,6 +402,9 @@ def packet(ref, agent=None):
                                  **{k:t[k] for k in TYPE_FIELDS if t.get(k) not in (None,'',[])})
     project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
     result['workspace']=dict(workspace(t['project'],project), note='Работать только в этом проекте и его папке; путь active_copy, если указан, — текущая рабочая копия.')
+    live=next((r for r in s['runs'] if r['ref']==t['ref'] and r['status'] in ('queued','running') and (r.get('launch') or {}).get('worktree')),None)
+    if live:
+        result['workspace'].update(worktree=live['launch']['worktree'], note='Работать в отдельной рабочей копии задачи: %s, ветка %s.' % (live['launch']['worktree']['path'], live['launch']['worktree']['branch']))
     result['route']=route
     result['instructions']=POLICY['rules']
     result['read_next']=['tt_context(project='+t['project']+', budget=1200)', 'tt_recall(query='+t['root']+')']
@@ -422,6 +428,26 @@ def packet(ref, agent=None):
             scale='1 — тривиально/ясно/одно место; 3 — обычная работа; 5 — трудно/много неизвестного/широко по системе.',
             call='tt_work op=assess ref=%s run=<RUN> worker=<ты> assessment={complexity, uncertainty, breadth, reasons}' % t['ref'],
             after='Сервер назначит модель и усилия и поставит запуск исполнения. Если назначенная модель не твоя — остановись и сообщи владельцу.')
+    if phase=='review':
+        wt=task_branch(s, t['ref']) or {}
+        ac=t.get('auto_check') or {}
+        result['review']=dict(
+            task='Не дорабатывай код. Проверь результат: каждый критерий приёмки, соответствие ТЗ (spec_ref) и решение в коде.',
+            branch=wt.get('branch'), base=wt.get('base'), worktree=wt.get('path'),
+            diff='git diff %s...%s' % (wt.get('base') or '<база>', wt.get('branch') or '<ветка>'),
+            auto_check=[dict(name=c['name'], ok=c['ok'], detail=c['detail'][:200]) for c in ac.get('checks', [])],
+            verdicts='approve — всё выполнено по ТЗ; spec_change — выполнено, но решение в коде отклоняется от ТЗ и ТЗ нужно изменить (spec: deviation, proposal); changes — нужна доработка.',
+            call='tt_work op=review ref=%s run=<RUN> worker=<ты> verdict=… criteria=[{ok, note} на каждый критерий по порядку] conclusion=… [spec={deviation, proposal}]' % t['ref'],
+            after='approve и spec_change при пройденной автопроверке сливают ветку и закрывают задачу; changes возвращает её на доработку.')
+    ac=t.get('auto_check') or {}
+    if phase=='execute' and ac.get('ok') is False:
+        failed=[dict(name=c['name'], detail=c['detail'][-300:]) for c in ac.get('checks',[]) if not c['ok']]
+        result['auto_check_feedback']=dict(failed=failed,
+            instructions=('Доработай ту же ветку %s. ' % ac.get('branch','')) +
+                         ('Сначала влей в неё базовую ветку (git merge %s) и разреши конфликты, сохранив обе стороны. ' % ac.get('base','') if any(c['key']=='merge' and not c['ok'] for c in ac.get('checks',[])) else '') +
+                         'Исправь остальные провалы, прогони проверки, закоммить и пришли finish — автопроверка повторится сама.')
+    if t.get('review') and t['review'].get('verdict')=='changes' and phase=='execute':
+        result['review_feedback']=dict(conclusion=t['review']['conclusion'], criteria=t['review']['criteria'])
     if t.get('task_type')=='decomposition':
         result['decomposition']='Создавай подзадачи через tt_work op=plan с task_type, root=%s и assessment {complexity, uncertainty, breadth, reasons} у каждой — модель и усилия подзадачи считаются по её сложности.' % t['root']
     result['launch']='Исполнитель проверяет доступность модели, принимает запуск через take/claim и выполняет критерии. Пакет не меняет модель текущего чата.'
@@ -594,27 +620,133 @@ def start_run(s, t, run, req, at):
     until=(at+timedelta(minutes=minutes)).isoformat()
     run.update(status='running',worker=worker,model=model,agent=agent,packet=p,phase=p['phase'],
                claimed_at=at.isoformat(),heartbeat_at=at.isoformat(),lease_until=until)
-    return dict(status='in_progress', claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until))
+    note={'review':'Идёт ревью', 'assess':'Идёт оценка сложности'}.get(p['phase'],
+          'Доработка' if (t.get('auto_check') or {}).get('ok') is False or (t.get('review') or {}).get('verdict')=='changes' else None)
+    return dict(status='review' if p['phase']=='review' else 'in_progress', status_note=note and '%s: %s (%s)' % (note, PROVIDERS[agent]['name'], worker),
+                claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until))
 
 def new_run(s, ref, p, at):
     run=dict(id='RUN-'+str(len(s['runs'])+1),ref=ref,status='queued',packet=p,created_at=at.isoformat())
     if p: run['phase']=p['phase']
     s['runs'].append(run); return run
 
-def launch_prompt(t, run, route, project):
-    """Задание для ИИ: вставляется в чат Claude Code или Codex, если запуск сделан с доски."""
+def worker_id(run, agent):
+    """Имя исполнителя сессии, открытой сервером: одинаковое в claim, heartbeat и finish."""
+    return '%s-cli:%s' % (agent, run['id'])
+
+def launch_prompt(t, run, route, project, worker=None, worktree=None):
+    """Задание для ИИ: первая реплика сессии, открытой с доски, или текст для вставки в чат."""
     ai=PROVIDERS[route['provider']]['name']; ref=t['ref']; ws=workspace(t['project'], project)
+    folder=(worktree or {}).get('path') or ws['active_copy'] or ws['path'] or 'не указана'
     lines=['Задача TaskTreker %s «%s» запущена для тебя (%s).' % (ref, t['title'], ai),
-           'Рабочая папка: %s.' % (ws['active_copy'] or ws['path'] or 'не указана')]
-    if run.get('phase')=='assess':
+           'Рабочая папка: %s.' % folder]
+    if worktree:
+        lines.append('Это отдельная рабочая копия, ветка %s. Коммить в неё; в основную ветку не сливай — это решает владелец.' % worktree['branch'])
+    if run.get('phase') not in ('review','assess') and ((t.get('auto_check') or {}).get('ok') is False or (t.get('review') or {}).get('verdict')=='changes'):
+        lines.append('Это ДОРАБОТКА: начни с замечаний в паспорте (auto_check_feedback / review_feedback).')
+    if run.get('phase')=='review':
+        lines.append('Это РЕВЬЮ, не доработка: проверь каждый критерий приёмки, соответствие ТЗ и автопроверку по паспорту. Модель: %s, усилия %s.' % (route['model'], route['effort']))
+    elif run.get('phase')=='assess':
         lines.append('Сначала оценка сложности, не реализация. Модель как есть: %s, усилия %s.' % (route['model'], route['effort']))
     else:
         lines.append('Модель: %s, усилия: %s. Если у тебя другая модель — переключись (/model) или сообщи.' % (route['model'], route['effort']))
-    lines.append('1) tt_work op=claim ref=%s run=%s model=%s worker=<id этой сессии>' % (ref, run['id'], route['model']))
+    lines.append('1) Сразу прими запуск: tt_work op=claim ref=%s run=%s model=%s worker=%s' % (ref, run['id'], route['model'], worker or '<id этой сессии>'))
     lines.append('2) tt_work op=packet ref=%s agent=%s — и действуй строго по паспорту.' % (ref, route['provider']))
     lines.append('3) %s' % ('tt_work op=assess … с оценкой 1…5 и основаниями.' if run.get('phase')=='assess'
-                            else 'По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
+                            else 'tt_work op=review с verdict (approve, spec_change или changes), criteria по каждому критерию и conclusion. Код не меняй.' if run.get('phase')=='review'
+                            else 'Если работа идёт дольше 40 минут — tt_work op=heartbeat. По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
+    if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
+    lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
+
+def mark_launch_error(ref, run_id, message):
+    """Автозапуск не удался (нет CLI, папки, лимит): причина на карточке, без повторов каждую минуту."""
+    with locked():
+        s=state()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
+        if run: run.update(launch_error=str(message)[:300], launch_error_at=now().isoformat()); save('workflow.json',s)
+
+def mark_launched(ref, run_id, info):
+    """Сессия открыта сервером: время, процесс, рабочая копия. Это ещё не принятие — его делает claim."""
+    with locked():
+        s=state()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status']=='queued'),None)
+        if not run: raise ValueError('Запуск не ждёт исполнителя')
+        launches=list(run.get('launches') or [])
+        launches.append(dict(info, at=now().isoformat()))
+        run.update(launched_at=launches[-1]['at'], launches=launches[-5:], launch=launches[-1])
+        save('workflow.json',s)
+        return run
+
+def task_branch(s, ref):
+    """Рабочая копия и ветка последнего запуска исполнения задачи."""
+    for r in reversed(s['runs']):
+        wt=(r.get('launch') or {}).get('worktree')
+        if r['ref']==ref and wt and r.get('phase')!='review': return wt
+    return None
+
+def reviewer_for(s, implementer):
+    choice=settings(s)['reviewer']
+    if choice=='same' or not implementer: return implementer or settings(s)['default_executor']
+    if choice=='other': return next((p for p in PROVIDERS if p!=implementer), implementer)
+    return choice
+
+def spawn_autocheck(ref, run_id):
+    """Автопроверка — отдельным процессом: тесты проекта идут минутами, блокировку не держим."""
+    if os.environ.get('TASKTREKER_AUTOCHECK_SYNC')=='1':
+        return autocheck_run(ref, run_id)
+    import subprocess, sys
+    logs=ROOT/'ops'/'logs'; logs.mkdir(parents=True, exist_ok=True)
+    flags=(subprocess.DETACHED_PROCESS|subprocess.CREATE_NO_WINDOW) if os.name=='nt' else 0
+    with open(logs/'autocheck.log','a',encoding='utf-8') as log:
+        subprocess.Popen([sys.executable, str(Path(__file__)), 'autocheck', ref, '--run', run_id],
+                         env=dict(os.environ, TASKTREKER_DATA=data_dir().as_posix()), stdout=log, stderr=log,
+                         stdin=subprocess.DEVNULL, creationflags=flags, cwd=str(ROOT))
+
+def autocheck_run(ref, run_id):
+    """Проверить ветку задачи и поставить ревью ИИ (или вернуть на доработку)."""
+    import autocheck
+    s=state(); t=task_for(ref)
+    run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
+    wt=task_branch(s, ref)
+    if not run or not wt: raise ValueError('Нет ветки задачи для автопроверки')
+    project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
+    ws=workspace(t['project'],project); repo=ws['active_copy'] or ws['path']
+    base=wt.get('base') or autocheck._git(['rev-parse','--abbrev-ref','HEAD'],repo).stdout.strip()
+    result=autocheck.run_checks(repo, wt['path'], wt['branch'], base, t.get('scope'), project.get('verify'))
+    result['run']=run_id
+    with locked():
+        s=state(); at=now()
+        patch=dict(auto_check=result)
+        if result['ok']:
+            agent=reviewer_for(s, run.get('agent'))
+            route=recommendation(dict(t, status='review'), agent=agent)
+            rv=new_run(s, ref, dict(route=route, phase='review'), at)
+            rv.update(agent=agent, auto_launch=settings(s)['auto_launch_review'])
+            patch.update(status='review', status_note='Автопроверка пройдена — ждёт ревью ИИ (%s)' % rv['id'])
+        else:
+            failed='; '.join('%s: %s' % (c['name'], c['detail'][:120]) for c in result['checks'] if not c['ok'])
+            patch.update(status='queued', status_note='Автопроверка не пройдена — доработка: '+failed)
+        write_patches(s, {ref: patch}); save('workflow.json', s)
+    return result
+
+def record_spec_change(t, spec, review_record, at):
+    """Отклонение от ТЗ: решение в памяти и задача на изменение ТЗ в бэклоге."""
+    import memory as mem
+    title='Отклонение от ТЗ в %s: %s' % (t['id'], spec['deviation'][:120])
+    rec=mem.new_record(title, 'Решение в коде: %s\n\nПредложение для ТЗ: %s\n\nРевью: %s' % (spec['deviation'], spec['proposal'], review_record['conclusion']),
+                       project=t['project'], kind='решение', root=t.get('root') or '', parent=t.get('root') or '', source='review:'+t['ref'])
+    mem.save(rec); mem.build_index()
+    d=read('projects.json',{}); project=d['projects'][t['project']]
+    task=dict(id=next_id(project), title=('Изменить ТЗ по решению в %s' % t['id'])[:200], why=spec['deviation'][:1000],
+              root=t.get('root') or rec['id'], size='S', priority='🟡', risk='low', task_type='analysis_spec', work_type='docs',
+              direction='аналитика', question=spec['deviation'][:2000], inputs=('Ревью %s: %s' % (t['id'], review_record['conclusion']))[:2000],
+              deliverable=(t.get('spec_ref') or 'ТЗ проекта')[:2000], depends_on=[],
+              acceptance=['ТЗ дополнено: %s' % spec['proposal'][:300], 'В ТЗ есть ссылка на решение %s и задачу %s' % (rec['id'], t['id'])],
+              status='queued', source='review:'+t['ref'])
+    task['model_plan']=model_plan(task)
+    project.setdefault('backlog',[]).append(task); save('projects.json', d)
+    return task['id'], rec['id']
 
 def expire(s, ref, at, by):
     """Просроченная метка: запуск закрывается как expired, история остаётся."""
@@ -657,7 +789,9 @@ def action(req):
         if not run: raise ValueError('У задачи нет запуска, ждущего исполнителя')
         route=(run.get('packet') or {}).get('route') or recommendation(t, agent=run.get('agent'))
         project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
-        return dict(run=run['id'], phase=run.get('phase'), route=route, prompt=launch_prompt(t, run, route, project))
+        worker=req.get('worker') or (worker_id(run, run['agent']) if run.get('agent') else None)
+        return dict(run=run['id'], phase=run.get('phase'), route=route, agent=run.get('agent') or route.get('provider'),
+                    worker=worker, prompt=launch_prompt(t, run, route, project, worker, req.get('worktree') or (run.get('launch') or {}).get('worktree')))
     if op=='route':
         # Черновик формы: какой план модели получит задача, ничего не записывая.
         draft=req.get('task')
@@ -692,7 +826,10 @@ def action(req):
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes'}: raise ValueError('Настройки: default_executor, lease_minutes')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review')
+            if 'reviewer' in changes and changes['reviewer'] not in ('same','other',*PROVIDERS): raise ValueError('Ревьюер: same, other или ИИ')
+            for key in ('auto_merge','auto_launch_review'):
+                if key in changes and type(changes[key])!=bool: raise ValueError(key+': true или false')
             if 'default_executor' in changes and changes['default_executor'] not in PROVIDERS: raise ValueError('Неизвестный ИИ по умолчанию')
             if 'lease_minutes' in changes and (type(changes['lease_minutes'])!=int or not 5<=changes['lease_minutes']<=480): raise ValueError('Аренда: от 5 до 480 минут')
             s.setdefault('settings',{}).update(changes)
@@ -748,7 +885,7 @@ def action(req):
                 if any(r['ref']==ref and r['status'] in ('queued','running') for r in s['runs']): raise ValueError('Завершите или отмените запуск через его контракт')
                 if len(t.get('acceptance_done',[]))!=len(t.get('acceptance',[])): raise ValueError('Сначала проверьте все критерии')
                 if not isinstance(req.get('evidence'),str) or not req['evidence'].strip(): raise ValueError('Опишите результат проверки')
-                patch.update(status='done',evidence=req['evidence'],completed_at=at.isoformat())
+                patch.update(status='done',evidence=req['evidence'],completed_at=at.isoformat(),status_note=None)
             elif op=='enqueue':
                 if agent and t.get('executor') and agent!=t['executor']: raise ValueError('Задача назначена ИИ %s' % t['executor'])
                 p=packet(ref, agent=agent or t.get('executor') or None)
@@ -769,6 +906,26 @@ def action(req):
                 elif t.get('status')=='in_progress' and not run: raise ValueError('Задача в работе вне очереди: сначала смените статус')
                 if run is None: run=new_run(s, ref, None, at)
                 patch.update(start_run(s, t, run, req, at))
+            elif op=='repin':
+                # Выбор владельца сильнее прежнего закрепления: ждущий запуск переходит к выбранному ИИ.
+                run=next((r for r in s['runs'] if r['id']==req.get('run') and r['ref']==ref),None)
+                if not run or run['status']!='queued': raise ValueError('Сменить ИИ можно только у ждущего запуска; выполняемый — сначала отмените')
+                if not agent: raise ValueError('Укажите ИИ (agent)')
+                if t.get('executor') and t['executor']!=agent:
+                    raise ValueError('Задача назначена ИИ %s — смените исполнителя в «Проработать задачу»' % PROVIDERS[t['executor']]['name'])
+                if run.get('agent')!=agent:
+                    p=packet(ref, agent=agent)
+                    run.setdefault('repins',[]).append(dict(at=at.isoformat(), from_agent=run.get('agent'), to=agent, by='владелец'))
+                    run.update(agent=agent, packet=p, phase=p['phase'])
+                    for key in ('launched_at','launch','launch_error','launch_error_at'): run.pop(key,None)
+                extra=dict(run=run['id'], agent=agent, route=run['packet']['route'])
+            elif op=='autocheck':
+                run=next((r for r in reversed(s['runs']) if r['ref']==ref and (r.get('launch') or {}).get('worktree') and r.get('phase')!='review'),None)
+                if not run: raise ValueError('У задачи нет ветки исполнения: автопроверка проверяет работу в отдельной рабочей копии')
+                if any(r['ref']==ref and r['status'] in ('queued','running') for r in s['runs']): raise ValueError('У задачи есть активный запуск: дождитесь его или отмените')
+                if t.get('status') not in ('review','queued'): raise ValueError('Автопроверка — для задачи в «Проверка» или после доработки')
+                patch.update(status='review', auto_check=dict(state='pending', run=run['id']), status_note='Идёт автопроверка ветки %s' % run['launch']['worktree']['branch'])
+                extra=dict(_autocheck=(ref, run['id']))
             elif op=='status':
                 target=req.get('status'); reason=(req.get('reason') or '').strip()
                 if target not in MANUAL_STATUSES: raise ValueError('Статус: %s; «Готово» — через завершение с проверкой' % ', '.join(STATUS_LABELS[k] for k in MANUAL_STATUSES))
@@ -788,7 +945,7 @@ def action(req):
                 patch.update(status=target, claimed_by=None, status_history=history,
                              status_note=reason if target in ('blocked','cancelled') else None)
                 if current=='done': patch.update(completed_at=None)
-            elif op in ('claim','heartbeat','finish','fail','cancel','assess'):
+            elif op in ('claim','heartbeat','finish','fail','cancel','assess','review'):
                 run=next((r for r in s['runs'] if r['id']==req.get('run') and r['ref']==ref),None)
                 if not run: raise ValueError('Запуск не найден')
                 if op=='claim':
@@ -802,6 +959,56 @@ def action(req):
                     until=(at+timedelta(minutes=minutes)).isoformat()
                     run.update(heartbeat_at=at.isoformat(), lease_until=until)
                     patch['claimed_by']=dict(t.get('claimed_by') or {}, agent=run.get('agent'), worker=run['worker'], run=run['id'], model=run.get('model'), lease_until=until)
+                elif op=='review':
+                    import autocheck
+                    if run['status']!='running' or run.get('phase')!='review': raise ValueError('Заключение принимает только выполняемый запуск ревью')
+                    if req.get('worker')!=run.get('worker'): raise ValueError('Заключение присылает принявший ревью исполнитель')
+                    verdict=req.get('verdict'); criteria=req.get('criteria'); conclusion=(req.get('conclusion') or '').strip()
+                    if verdict not in REVIEW_VERDICTS: raise ValueError('verdict: approve, changes или spec_change')
+                    acc=t.get('acceptance') or []
+                    if not isinstance(criteria,list) or len(criteria)!=len(acc) or any(not isinstance(c,dict) or type(c.get('ok'))!=bool or not isinstance(c.get('note',''),str) for c in criteria):
+                        raise ValueError('criteria: по объекту {ok, note} на каждый из %d критериев, по порядку' % len(acc))
+                    if not conclusion or len(conclusion)>3000: raise ValueError('Нужно заключение (conclusion)')
+                    spec=req.get('spec') if verdict=='spec_change' else None
+                    if verdict=='spec_change' and (not isinstance(spec,dict) or not str(spec.get('deviation','')).strip() or not str(spec.get('proposal','')).strip()):
+                        raise ValueError('spec_change: укажите spec.deviation (как решено в коде) и spec.proposal (что изменить в ТЗ)')
+                    if verdict!='changes' and not all(c['ok'] for c in criteria): raise ValueError('Есть невыполненные критерии — вердикт changes')
+                    if verdict!='changes' and not (t.get('auto_check') or {}).get('ok'): raise ValueError('Автопроверка не пройдена — вердикт changes')
+                    tokens=req.get('tokens')
+                    if tokens is not None and (type(tokens)!=int or tokens<0): raise ValueError('Токены должны быть целым неотрицательным числом')
+                    record=dict(verdict=verdict, criteria=[dict(text=a, ok=c['ok'], note=c.get('note','').strip()[:500]) for a,c in zip(acc,criteria)],
+                                conclusion=conclusion, spec=spec, at=at.isoformat(),
+                                by=dict(agent=run.get('agent'), model=run.get('model'), worker=run.get('worker')))
+                    run.update(status='done', evidence='Ревью: %s — %s' % (REVIEW_VERDICTS[verdict], conclusion), tokens=tokens,
+                               finished_at=at.isoformat(), review=record)
+                    patch.update(review=record, claimed_by=None)
+                    extra=dict(verdict=verdict)
+                    if verdict=='changes':
+                        patch.update(status='queued', acceptance_done=[i for i,c in enumerate(criteria) if c['ok']],
+                                     status_note='Доработка по ревью: '+conclusion[:300])
+                        extra['status']='queued'
+                    else:
+                        if spec:
+                            extra['spec_task'],extra['spec_record']=record_spec_change(t, spec, record, at)
+                        wt=task_branch(s, ref)
+                        merged=None
+                        if wt and settings(s)['auto_merge']:
+                            project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
+                            ws=workspace(t['project'],project); repo=ws['active_copy'] or ws['path']
+                            ok,info=autocheck.merge(repo, wt['branch'], wt.get('base') or (t.get('auto_check') or {}).get('base') or 'HEAD',
+                                                    'Слияние %s: %s (%s)\n\nРевью %s: %s' % (wt['branch'], t['title'], t['id'], run.get('model'), conclusion[:500]))
+                            merged=dict(ok=ok, info=info, branch=wt['branch'])
+                            extra['merge']=merged
+                        if wt and not (merged and merged['ok']):
+                            reason=merged['info'] if merged else 'автослияние выключено'
+                            patch.update(status='review', status_note='Ревью: %s. Слияние не выполнено (%s) — слейте %s и закройте задачу' % (REVIEW_VERDICTS[verdict], reason, wt['branch']))
+                            extra['status']='review'
+                        else:
+                            patch.update(status='done', completed_at=at.isoformat(), status_note=None,
+                                         acceptance_done=list(range(len(acc))),
+                                         evidence='Ревью %s (%s): %s%s' % (REVIEW_VERDICTS[verdict], run.get('model'), conclusion,
+                                                                           '; слито %s коммитом %s' % (merged['branch'], merged['info']) if merged else ''))
+                            extra['status']='done'
                 elif op=='assess':
                     if run['status']!='running' or run.get('phase')!='assess': raise ValueError('Оценку принимает только выполняемый запуск оценки')
                     if req.get('worker')!=run.get('worker'): raise ValueError('Оценку присылает принявший запуск исполнитель')
@@ -834,17 +1041,47 @@ def action(req):
                     run.update(status={'finish':'done','fail':'failed','cancel':'cancelled'}[op],evidence=req['evidence'],tokens=tokens,finished_at=at.isoformat())
                     patch.update(status='done' if op=='finish' else 'queued', claimed_by=None)
                     if op=='finish': patch['completed_at']=run['finished_at']
+                    branch=((run.get('launch') or {}).get('worktree') or {}).get('branch')
+                    if op=='finish' and branch:
+                        # Работа в отдельной ветке не в основной ветке проекта: готово — после слияния владельцем.
+                        patch.update(status='review', completed_at=None, evidence=req['evidence'], auto_check=dict(state='pending', run=run['id']),
+                                     status_note='Готово в ветке %s — идёт автопроверка' % branch)
+                        extra=dict(status='review', branch=branch, _autocheck=(ref, run['id']))
             else: raise ValueError('Неизвестная операция')
             write_patches(s, {ref:patch} if patch else {})
         save('workflow.json',s)
+    spawn=extra.pop('_autocheck',None)
+    if spawn: spawn_autocheck(*spawn)
     return dict(ok=True, **extra)
 
+def foreign_copy():
+    """Запуск из рабочей копии задачи: код ветки может быть старше системы, а данные общие.
+
+    Сервер досок передаёт сессии ИИ TASKTREKER_SYSTEM — каталог tools системы. Копия tools
+    в другом месте не пишет в общие данные, а называет команду системы."""
+    system = os.environ.get('TASKTREKER_SYSTEM')
+    here = os.path.dirname(os.path.abspath(__file__))
+    if system and os.path.normcase(os.path.abspath(system)) != os.path.normcase(here):
+        return 'Эта копия TaskTreker — рабочая копия задачи (%s). Работай через MCP tt_work или командой системы: py "%s"' % (here, os.path.join(system, 'pm.py'))
+    return None
+
 def main(args=None):
+    refusal=foreign_copy()
+    if refusal:
+        print(refusal); return 2
     parser=argparse.ArgumentParser(description='Доски: list/next/packet; изменения через request JSON')
-    parser.add_argument('op',choices=['list','next','packet','queue','models','request']); parser.add_argument('value',nargs='?')
+    parser.add_argument('op',choices=['list','next','packet','queue','models','request','worktree','autocheck']); parser.add_argument('value',nargs='?')
+    parser.add_argument('--run',help='запуск для autocheck')
     parser.add_argument('--agent',choices=sorted(PROVIDERS),help='ИИ, для которого строится маршрут (next, packet, queue)')
     a=parser.parse_args(args)
     try:
+        if a.op=='autocheck':
+            print(json.dumps(autocheck_run(a.value or '', a.run or ''),ensure_ascii=False,indent=2)); return 0
+        if a.op=='worktree':
+            import launcher
+            t=task_for(a.value or ''); p=read('projects.json',{})['projects'][t['project']]
+            agent=a.agent or t.get('executor') or settings()['default_executor']
+            print(json.dumps(launcher.ensure_worktree(p.get('path'), agent, t['id']) or {'note':'Не git: работа идёт в папке проекта'},ensure_ascii=False,indent=2)); return 0
         if a.op=='request': req=json.loads(Path(a.value).read_text(encoding='utf-8-sig'))
         else:
             req=dict(op=a.op,ref=a.value)

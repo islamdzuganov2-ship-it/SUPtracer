@@ -418,7 +418,23 @@ COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "c
             "connect": cmd_connect, "disconnect": cmd_disconnect}
 
 
+def foreign_copy():
+    """Запуск из рабочей копии задачи: код ветки может быть старше системы, а данные общие.
+
+    Сервер досок передаёт сессии ИИ TASKTREKER_SYSTEM — каталог tools системы. Копия tools
+    в другом месте не пишет в общие данные, а называет команду системы."""
+    system = os.environ.get('TASKTREKER_SYSTEM')
+    here = os.path.dirname(os.path.abspath(__file__))
+    if system and os.path.normcase(os.path.abspath(system)) != os.path.normcase(here):
+        return 'Эта копия TaskTreker — рабочая копия задачи (%s). Работай через MCP tt_work или командой системы: py "%s"' % (here, os.path.join(system, 'pm.py'))
+    return None
+
+
 def main():
+    refusal = foreign_copy()
+    if refusal:
+        print(refusal)
+        return 2
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
         print(__doc__)
         return 0

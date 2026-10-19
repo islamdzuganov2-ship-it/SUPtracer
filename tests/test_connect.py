@@ -28,6 +28,9 @@ class Connect(unittest.TestCase):
         os.environ["TASKTREKER_CODEX_CONFIG"] = self.codex_config
         import connect
         self.c = importlib.reload(connect)
+        # Защита от подключения из временного рабочего дерева смотрит на TOOLS:
+        # тесты не должны зависеть от того, из какой копии их запустили.
+        self.c.TOOLS = os.path.join(self.tmp, "tools")
         self.calls = []
 
     def tearDown(self):

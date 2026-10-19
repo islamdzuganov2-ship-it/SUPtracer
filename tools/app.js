@@ -20,7 +20,7 @@ const INBOX = (D.inbox || {}).items || [];
 
 const nf = n => (n == null || isNaN(n)) ? '—' : Math.round(n).toLocaleString('ru-RU').replace(/ /g, ' ');
 const money = n => (n == null || isNaN(n)) ? '—' : '$' + Number(n).toLocaleString('ru-RU', {minimumFractionDigits: n > 0 && n < 10 ? 2 : 0, maximumFractionDigits: n < 10 ? 2 : 0}).replace(/ /g, ' ');
-const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const tok = n => n >= 1e9 ? (n / 1e9).toFixed(2).replace('.', ',') + ' млрд'
   : n >= 1e6 ? (n / 1e6).toFixed(0) + ' млн' : nf(n);
 const hrs = n => (n == null) ? '—' : (n >= 10 ? Math.round(n) : n.toFixed(1).replace('.', ',')) + ' ч';

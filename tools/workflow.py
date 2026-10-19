@@ -656,6 +656,7 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
                             else 'tt_work op=review с verdict (approve, spec_change или changes), criteria по каждому критерию и conclusion. Код не меняй.' if run.get('phase')=='review'
                             else 'Если работа идёт дольше 40 минут — tt_work op=heartbeat. По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
     if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
+    lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
 
 def mark_launch_error(ref, run_id, message):
@@ -905,6 +906,19 @@ def action(req):
                 elif t.get('status')=='in_progress' and not run: raise ValueError('Задача в работе вне очереди: сначала смените статус')
                 if run is None: run=new_run(s, ref, None, at)
                 patch.update(start_run(s, t, run, req, at))
+            elif op=='repin':
+                # Выбор владельца сильнее прежнего закрепления: ждущий запуск переходит к выбранному ИИ.
+                run=next((r for r in s['runs'] if r['id']==req.get('run') and r['ref']==ref),None)
+                if not run or run['status']!='queued': raise ValueError('Сменить ИИ можно только у ждущего запуска; выполняемый — сначала отмените')
+                if not agent: raise ValueError('Укажите ИИ (agent)')
+                if t.get('executor') and t['executor']!=agent:
+                    raise ValueError('Задача назначена ИИ %s — смените исполнителя в «Проработать задачу»' % PROVIDERS[t['executor']]['name'])
+                if run.get('agent')!=agent:
+                    p=packet(ref, agent=agent)
+                    run.setdefault('repins',[]).append(dict(at=at.isoformat(), from_agent=run.get('agent'), to=agent, by='владелец'))
+                    run.update(agent=agent, packet=p, phase=p['phase'])
+                    for key in ('launched_at','launch','launch_error','launch_error_at'): run.pop(key,None)
+                extra=dict(run=run['id'], agent=agent, route=run['packet']['route'])
             elif op=='autocheck':
                 run=next((r for r in reversed(s['runs']) if r['ref']==ref and (r.get('launch') or {}).get('worktree') and r.get('phase')!='review'),None)
                 if not run: raise ValueError('У задачи нет ветки исполнения: автопроверка проверяет работу в отдельной рабочей копии')
@@ -1040,7 +1054,21 @@ def action(req):
     if spawn: spawn_autocheck(*spawn)
     return dict(ok=True, **extra)
 
+def foreign_copy():
+    """Запуск из рабочей копии задачи: код ветки может быть старше системы, а данные общие.
+
+    Сервер досок передаёт сессии ИИ TASKTREKER_SYSTEM — каталог tools системы. Копия tools
+    в другом месте не пишет в общие данные, а называет команду системы."""
+    system = os.environ.get('TASKTREKER_SYSTEM')
+    here = os.path.dirname(os.path.abspath(__file__))
+    if system and os.path.normcase(os.path.abspath(system)) != os.path.normcase(here):
+        return 'Эта копия TaskTreker — рабочая копия задачи (%s). Работай через MCP tt_work или командой системы: py "%s"' % (here, os.path.join(system, 'pm.py'))
+    return None
+
 def main(args=None):
+    refusal=foreign_copy()
+    if refusal:
+        print(refusal); return 2
     parser=argparse.ArgumentParser(description='Доски: list/next/packet; изменения через request JSON')
     parser.add_argument('op',choices=['list','next','packet','queue','models','request','worktree','autocheck']); parser.add_argument('value',nargs='?')
     parser.add_argument('--run',help='запуск для autocheck')

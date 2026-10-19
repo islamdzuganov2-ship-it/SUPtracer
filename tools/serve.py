@@ -128,11 +128,13 @@ def launch_session(req):
     import workflow, launcher
     ref = str(req.get("ref") or "")
     t = workflow.task_for(ref)
-    agent = req.get("agent") or t.get("executor") or workflow.settings()["default_executor"]
-    workflow.check_executor(agent)
     run = next((r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued"), None)
+    # ИИ: явный выбор владельца, затем закрепление запуска, исполнитель задачи, ИИ по умолчанию.
+    agent = req.get("agent") or (run or {}).get("agent") or t.get("executor") or workflow.settings()["default_executor"]
+    workflow.check_executor(agent)
     if run and run.get("agent") and run["agent"] != agent:
-        raise ValueError("Запуск уже поставлен для ИИ %s: отмените его или выберите этот ИИ" % run["agent"])
+        workflow.action(dict(op="repin", ref=ref, run=run["id"], agent=agent))
+        run = next(r for r in workflow.state()["runs"] if r["id"] == run["id"])
     if not run:
         workflow.action(dict(op="enqueue", ref=ref, agent=agent))
         run = next(r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued")
@@ -148,7 +150,8 @@ def launch_session(req):
     info = workflow.action(dict(op="prompt", ref=ref, worker=workflow.worker_id(run, agent), worktree=worktree))
     # Данные системы — общие: сессия в рабочей копии самой системы не должна видеть пустой data/.
     opened = launcher.launch(agent, info["route"]["model"], info["route"]["effort"], info["prompt"], cwd,
-                             env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix()})
+                             env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix(),
+                                        "TASKTREKER_SYSTEM": os.path.dirname(os.path.abspath(workflow.__file__))})
     workflow.mark_launched(ref, run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]),
                                                  cwd=cwd, worktree=worktree, agent=agent))
     return dict(run=run["id"], agent=agent, pid=opened["pid"], cwd=cwd, worktree=worktree,

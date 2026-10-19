@@ -93,11 +93,33 @@ class LauncherTests(DataCase):
         w.action(dict(op='claim',ref='alpha-api/AL-03',run='RUN-1',worker='claude-cli:RUN-1',model='claude-haiku-5-5'))
         self.assertEqual(w.task_for('alpha-api/AL-03')['claim']['worker'],'claude-cli:RUN-1')
 
-    def test_launch_refuses_other_ai_queue_and_missing_cli(self):
+    def test_owner_choice_repins_waiting_launch(self):
         import serve
         w.action(dict(op='enqueue',ref='alpha-api/AL-03',agent='codex'))
-        with self.assertRaisesRegex(ValueError,'поставлен для ИИ codex'):
-            serve.launch_session(dict(ref='alpha-api/AL-03',agent='claude'))
+        with mock.patch.object(launcher,'find_cli',return_value='C:/bin/x.exe'), mock.patch.object(launcher,'open_window',return_value=5) as win:
+            r=serve.launch_session(dict(ref='alpha-api/AL-03',agent='claude',isolate=False))
+        run=w.state()['runs'][0]
+        self.assertEqual((len(w.state()['runs']),run['agent'],r['route']['model']),(1,'claude','claude-haiku-5-5'))
+        self.assertEqual(run['repins'][0]['from_agent'],'codex')
+        self.assertEqual(win.call_args[0][0][1:3],['--model','claude-haiku-5-5'])   # окно — именно Claude
+        # Без явного выбора сервер держится закрепления запуска, а не ИИ по умолчанию.
+        w.action(dict(op='settings',changes={'default_executor':'codex'}))
+        with mock.patch.object(launcher,'find_cli',return_value='C:/bin/x.exe'), mock.patch.object(launcher,'open_window',return_value=6):
+            self.assertEqual(serve.launch_session(dict(ref='alpha-api/AL-03',isolate=False))['agent'],'claude')
+
+    def test_repin_rules(self):
+        import serve
+        w.action(dict(op='update',ref='alpha-api/AL-03',changes={'executor':'claude'}))
+        w.action(dict(op='enqueue',ref='alpha-api/AL-03',agent='claude'))
+        with self.assertRaisesRegex(ValueError,'назначена ИИ Claude'):
+            w.action(dict(op='repin',ref='alpha-api/AL-03',run='RUN-1',agent='codex'))
+        w.action(dict(op='claim',ref='alpha-api/AL-03',run='RUN-1',worker='c',model='claude-haiku-5-5'))
+        with self.assertRaisesRegex(ValueError,'ждущего запуска'):
+            w.action(dict(op='repin',ref='alpha-api/AL-03',run='RUN-1',agent='claude'))
+
+    def test_launch_refuses_missing_cli(self):
+        import serve
+        w.action(dict(op='enqueue',ref='alpha-api/AL-03',agent='codex'))
         with mock.patch.object(launcher,'find_cli',return_value=None), mock.patch.object(launcher,'open_window') as win:
             with self.assertRaises(ValueError):
                 serve.launch_session(dict(ref='alpha-api/AL-03',agent='codex',isolate=False))
@@ -141,3 +163,35 @@ class LauncherTests(DataCase):
         w.action(dict(op='complete',ref='alpha-api/AL-03',evidence='Ветка слита в разработку, гейт пройден'))
         self.assertEqual(w.task_for('alpha-api/AL-03')['status'],'done')
         self.assertNotIn('status_note',w.read('projects.json',{})['projects']['alpha-api']['backlog'][-1])
+
+    # --- TT-66: настоящий MCP и чужая копия кода
+
+    def test_tt_work_callable_over_json_rpc(self):
+        import json as _json, sys as _sys
+        server=Path(launcher.__file__).with_name('mcp_server.py')
+        msgs=[dict(jsonrpc='2.0',id=1,method='initialize',params=dict(protocolVersion='2025-06-18',capabilities={},clientInfo=dict(name='t',version='1'))),
+              dict(jsonrpc='2.0',method='notifications/initialized'),
+              dict(jsonrpc='2.0',id=2,method='tools/call',params=dict(name='tt_work',arguments=dict(op='packet',ref='alpha-api/AL-03',agent='claude')))]
+        out=subprocess.run([_sys.executable,str(server)],input='\n'.join(_json.dumps(m) for m in msgs)+'\n',capture_output=True,text=True,
+                           encoding='utf-8',timeout=60,env=dict(os.environ,TASKTREKER_DATA=str(self.data),PYTHONIOENCODING='utf-8')).stdout
+        reply=next(_json.loads(l) for l in out.splitlines() if l.strip() and _json.loads(l).get('id')==2)
+        self.assertNotIn('error',reply,reply)
+        self.assertEqual(_json.loads(reply['result']['content'][0]['text'])['route']['model'],'claude-haiku-5-5')
+
+    def test_task_copy_refuses_to_write_shared_data(self):
+        import pm
+        os.environ['TASKTREKER_SYSTEM']=str(Path(self.tmp)/'system'/'tools')
+        try:
+            self.assertIn('рабочая копия задачи',w.foreign_copy())
+            self.assertEqual(w.main(['list']),2)
+            with mock.patch.object(pm.sys,'argv',['pm.py','work','list']):
+                self.assertEqual(pm.main(),2)
+            os.environ['TASKTREKER_SYSTEM']=str(Path(w.__file__).parent)
+            self.assertIsNone(w.foreign_copy())
+        finally:
+            os.environ.pop('TASKTREKER_SYSTEM',None)
+
+    def test_prompt_requires_mcp_and_names_system_cli(self):
+        r=w.action(dict(op='enqueue',ref='alpha-api/AL-03',agent='claude'))
+        self.assertIn('только через MCP-инструмент tt_work',r['prompt'])
+        self.assertIn(str(w.ROOT/'tools'/'pm.py'),r['prompt'])

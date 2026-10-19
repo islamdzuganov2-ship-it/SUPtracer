@@ -411,7 +411,8 @@ class Server:
                 return _result(rid, {"tools": TOOLS}, modern, cacheable=True)
             if method == "tools/call":
                 name = params.get("name")
-                if name not in TOOL_NAMES:
+                # По обработчикам, а не по TOOL_NAMES: tt_work добавляется к TOOLS позже, чем считался TOOL_NAMES.
+                if name not in HANDLERS:
                     raise RpcError(-32602, "Unknown tool: %s" % name)
                 return _result(rid, call_tool(name, params.get("arguments") or {}), modern)
             raise RpcError(-32601, "Method not found: %s" % method)

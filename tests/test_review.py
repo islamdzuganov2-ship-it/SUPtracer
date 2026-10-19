@@ -199,3 +199,11 @@ class ReviewTests(DataCase):
         self.assertTrue(r['ok'])
         self.assertTrue(w.task_for(REF)['auto_check']['ok'])
         self.assertEqual(self.review_run()['phase'], 'review')
+
+    def test_owner_can_switch_reviewer_ai(self):
+        self.work()
+        rv = self.review_run()
+        r = w.action(dict(op='repin', ref=REF, run=rv['id'], agent='codex'))
+        run = next(x for x in w.state()['runs'] if x['id'] == rv['id'])
+        self.assertEqual((run['agent'], run['phase'], r['route']['provider']), ('codex', 'review', 'codex'))
+        self.assertEqual(w.task_for(REF)['status'], 'review')

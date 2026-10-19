@@ -322,11 +322,12 @@ def freshness():
 
 
 def main():
+    import taskstate
     import workflow
     payload = {
         "workflow": workflow.snapshot(),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "projects": load("projects.json"),
+        "projects": taskstate.apply(load("projects.json"), DATA),   # статус задач — с оперативным слоем
         "usage": load("usage.json"),
         "repos": load("repos.json"),
         "estimates": load("estimates.json"),

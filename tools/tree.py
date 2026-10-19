@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mdparse as md
+import taskstate
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
@@ -63,7 +64,7 @@ def usage_for(key, projects, usage):
 
 
 def build(write=True):
-    projects = load("projects.json").get("projects", {})
+    projects = taskstate.apply(load("projects.json"), DATA).get("projects", {})   # статус — с оперативным слоем
     usage = load("usage.json", {"projects": {}}).get("projects", {})
     repos = load("repos.json", {"repos": {}}).get("repos", {})
     est = load("estimates.json", {"projects": {}}).get("projects", {})

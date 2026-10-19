@@ -115,6 +115,25 @@ class ReviewTests(DataCase):
         self.assertIn('Доработка по ревью', t['status_note'])
         self.assertEqual(w.packet(REF, agent='claude')['review_feedback']['conclusion'], 'Заключение ревью')
 
+    def test_long_review_does_not_block_rework(self):
+        # Ревьюер вправе написать заключение до 3000 символов и заметки по 500 — запуск доработки
+        # с рабочей копией всё равно принимается, а паспорт держит лимит.
+        import json, serve
+        self.work(); run = self.take_review()
+        w.action(dict(op='review', ref=REF, run=run, worker='rev', verdict='changes', conclusion='З' * 3000,
+                      criteria=[dict(ok=True, note='в' * 500), dict(ok=False, note='н' * 500)]))
+        with mock.patch.object(launcher, 'find_cli', return_value='C:/bin/claude.exe'), mock.patch.object(launcher, 'open_window', return_value=1):
+            rework = serve.launch_session(dict(ref=REF, agent='claude'))['run']
+        w.action(dict(op='claim', ref=REF, run=rework, worker='claude-cli:'+rework, model='claude-haiku-5-5'))
+        p = w.packet(REF, agent='claude')
+        self.assertLessEqual(len(json.dumps(p, ensure_ascii=False)), w.PACKET_LIMIT)
+        self.assertEqual([c.get('note') for c in p['review_feedback']['criteria']], [None, 'н' * 500])   # заметка — у невыполненного
+        self.assertTrue(p['review_feedback']['conclusion'].startswith('З' * 500))
+        with mock.patch.object(w, 'PACKET_LIMIT', 4000):                  # не влезает — заключение ужимается, а не блокирует
+            fb = w.packet(REF, agent='claude')['review_feedback']
+        self.assertTrue(fb['conclusion'].endswith(w.FEEDBACK_CUT))
+        self.assertLess(len(fb['conclusion']), 3000)
+
     def test_spec_change_records_decision_and_spec_task(self):
         self.work(); run = self.take_review()
         r = self.verdict(run, 'spec_change', spec=dict(deviation='Значение хранится в конфиге, а не в коде', proposal='Описать конфиг в §2'))
@@ -133,7 +152,7 @@ class ReviewTests(DataCase):
         with self.assertRaisesRegex(ValueError, 'spec.deviation'): self.verdict(run, 'spec_change')
         with self.assertRaises(ValueError):
             w.action(dict(op='review', ref=REF, run=run, worker='чужой', verdict='approve', criteria=[dict(ok=True)]*2, conclusion='x'))
-        d = w.read('projects.json', {}); d['projects']['alpha-api']['backlog'][-1]['auto_check']['ok'] = False; w.save('projects.json', d)
+        s = w.state(); s['tasks'][REF]['auto_check']['ok'] = False; w.save('workflow.json', s)   # оперативный слой (TT-45)
         with self.assertRaisesRegex(ValueError, 'Автопроверка не пройдена'): self.verdict(run, 'approve')
 
     def test_merge_blocked_by_dirty_base_keeps_review(self):

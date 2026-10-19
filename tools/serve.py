@@ -45,6 +45,9 @@ def project_keys():
         return set()
 
 _lock = threading.Lock()
+STARTED = time.time()          # код Python новее — сервер нужно перезапустить
+TOOLS_DIR = os.path.join(ROOT, "tools")
+_auto_attempts = {}            # запуск -> время последней попытки автозапуска
 _last = {"at": 0, "mode": "", "ok": None, "log": "", "seconds": 0}
 SOURCES = ("all", "claude", "codex")
 MAX_BODY = 1024 * 1024
@@ -71,6 +74,52 @@ def run_pm(args, timeout=900):
         return False, "Не удалось запустить обновление: %r" % e, round(time.time() - t0, 1)
 
 
+def _newest(names):
+    times = [os.path.getmtime(os.path.join(TOOLS_DIR, n)) for n in os.listdir(TOOLS_DIR) if names(n)]
+    return max(times, default=0)
+
+
+def code_stale():
+    """Python-модули менялись после старта сервера: нужен перезапуск, иначе работает старое."""
+    return _newest(lambda n: n.endswith(".py")) > STARTED
+
+
+def dashboard_stale():
+    """Интерфейс собирается в dashboard.html: новые js/html в tools — пересобрать."""
+    if not os.path.exists(DASH):
+        return True
+    return _newest(lambda n: n.endswith((".js", ".html")) or n == "build_dashboard.py") > os.path.getmtime(DASH)
+
+
+def dispatch_once():
+    """Автозапуск: ревью после пройденной автопроверки открывается само, если включено."""
+    import workflow
+    if not workflow.settings()["auto_launch_review"]:
+        return []
+    started = []
+    for r in workflow.state()["runs"]:
+        if r.get("status") != "queued" or not r.get("auto_launch") or r.get("launched_at"):
+            continue
+        if time.time() - _auto_attempts.get(r["id"], 0) < 300:
+            continue
+        _auto_attempts[r["id"]] = time.time()
+        try:
+            launch_session(dict(ref=r["ref"], agent=r.get("agent")))
+            started.append(r["id"])
+        except Exception as e:   # noqa: BLE001 — причина видна на карточке
+            workflow.mark_launch_error(r["ref"], r["id"], e)
+    return started
+
+
+def dispatcher(interval=15):
+    while True:
+        time.sleep(interval)
+        try:
+            dispatch_once()
+        except Exception as e:   # noqa: BLE001 — сервер досок не должен падать из-за автозапуска
+            sys.stderr.write("автозапуск: %s\n" % e)
+
+
 def launch_session(req):
     """«Запустить» на доске: запуск в очереди, рабочая копия, окно сессии ИИ, отметка.
 
@@ -79,23 +128,30 @@ def launch_session(req):
     import workflow, launcher
     ref = str(req.get("ref") or "")
     t = workflow.task_for(ref)
-    agent = req.get("agent") or t.get("executor") or workflow.settings()["default_executor"]
-    workflow.check_executor(agent)
     run = next((r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued"), None)
+    # ИИ: явный выбор владельца, затем закрепление запуска, исполнитель задачи, ИИ по умолчанию.
+    agent = req.get("agent") or (run or {}).get("agent") or t.get("executor") or workflow.settings()["default_executor"]
+    workflow.check_executor(agent)
     if run and run.get("agent") and run["agent"] != agent:
-        raise ValueError("Запуск уже поставлен для ИИ %s: отмените его или выберите этот ИИ" % run["agent"])
+        workflow.action(dict(op="repin", ref=ref, run=run["id"], agent=agent))
+        run = next(r for r in workflow.state()["runs"] if r["id"] == run["id"])
     if not run:
         workflow.action(dict(op="enqueue", ref=ref, agent=agent))
         run = next(r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued")
     project = workflow.read("projects.json", {})["projects"][t["project"]]
     ws = workflow.workspace(t["project"], project)
     base = ws["active_copy"] or ws["path"]
-    worktree = launcher.ensure_worktree(base, agent, t["id"]) if req.get("isolate", True) and base else None
+    if run.get("phase") == "review":
+        # Ревьюер смотрит ту самую ветку, которую сделал исполнитель.
+        worktree = workflow.task_branch(workflow.state(), ref)
+    else:
+        worktree = launcher.ensure_worktree(base, agent, t["id"]) if req.get("isolate", True) and base else None
     cwd = (worktree or {}).get("path") or base
     info = workflow.action(dict(op="prompt", ref=ref, worker=workflow.worker_id(run, agent), worktree=worktree))
     # Данные системы — общие: сессия в рабочей копии самой системы не должна видеть пустой data/.
     opened = launcher.launch(agent, info["route"]["model"], info["route"]["effort"], info["prompt"], cwd,
-                             env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix()})
+                             env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix(),
+                                        "TASKTREKER_SYSTEM": os.path.dirname(os.path.abspath(workflow.__file__))})
     workflow.mark_launched(ref, run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]),
                                                  cwd=cwd, worktree=worktree, agent=agent))
     return dict(run=run["id"], agent=agent, pid=opened["pid"], cwd=cwd, worktree=worktree,
@@ -145,7 +201,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(500, {"ok": False, "error": "Не удалось прочитать настройки подключения."})
         if path == "/api/work":
             import workflow, launcher
-            return self.send_json(200, {"ok": True, "data": dict(workflow.snapshot(), launchers=launcher.status())})
+            data = workflow.snapshot()
+            for run in data["runs"]:
+                # Открытая, но не принявшая задачу сессия: причина из журнала ИИ, если она есть.
+                if run.get("status") == "queued" and run.get("launched_at"):
+                    run["diagnosis"] = launcher.diagnose(run)
+            return self.send_json(200, {"ok": True, "data": dict(data, launchers=launcher.status(),
+                                                                  server=dict(stale=code_stale(), started=STARTED))})
         self.send_json(404, {"ok": False, "error": "нет такого адреса"})
 
     def do_POST(self):
@@ -210,6 +272,10 @@ class Handler(BaseHTTPRequestHandler):
             _lock.release()
 
     def send_dashboard(self):
+        if os.path.exists(DASH) and dashboard_stale():
+            # Новый интерфейс без ручной пересборки: данные те же, пересобирается только страница.
+            subprocess.run([sys.executable, os.path.join(TOOLS_DIR, "build_dashboard.py")], cwd=ROOT,
+                           capture_output=True, timeout=300)
         if not os.path.exists(DASH):
             ok, log, _ = run_pm(["refresh", "--fast"])
             if not os.path.exists(DASH):
@@ -249,6 +315,7 @@ def main():
     if "--no-browser" not in args:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
+        threading.Thread(target=dispatcher, daemon=True, name="автозапуск ревью").start()
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\nостановлен")

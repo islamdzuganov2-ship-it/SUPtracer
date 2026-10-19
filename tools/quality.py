@@ -13,11 +13,15 @@ import os
 import sys
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import collect_repos  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
 
 def load(name, default=None):
-    p = os.path.join(ROOT, "data", name)
+    p = os.path.join(DATA, name)
     if not os.path.exists(p):
         if default is None:
             raise SystemExit("Нет data/%s. Сначала: py tools/pm.py refresh" % name)
@@ -117,7 +121,7 @@ def spec_quality(r):
     return {"score": combine(comps), "components": comps}
 
 
-def engineering_quality(r):
+def engineering_quality(r, project=None):
     """Качество проработки: то, что отличает продукт от наброска."""
     c = r.get("code") or {}
     h = r.get("hygiene") or {}
@@ -168,7 +172,7 @@ def engineering_quality(r):
         1.0, "нечего коммитить" if dirty == 0 else "%s незакоммиченных файлов" % dirty))
 
     # Подозрение на секреты в коде — прямой риск.
-    sec = [s for s in (r.get("secrets_suspect") or []) if ".claude/worktrees" not in s.get("file", "")]
+    sec = collect_repos.active_suspects(r, project)       # проверенное глазами не штрафуется
     comps.append(component(
         "Секреты в коде", len(sec),
         1.0 if not sec else clamp(1.0 - len(sec) / 3.0),
@@ -198,7 +202,7 @@ def portfolio_signals(P, R, U, E, usage_of):
     share = 100.0 * spend[top] / total
     add("concentration", "Концентрация внимания", "%d%%" % round(share),
         "act" if share > 55 else "watch" if share > 35 else "ok",
-        "%s забирает %d%% всех денег портфеля; остальным %d проектам достаётся %d%%"
+        "%s забирает %d%% известной стоимости портфеля; остальным %d проектам достаётся %d%%"
         % (P[top]["name"], round(share), len(own) - 1, round(100 - share)),
         "Портфель из одного проекта — это не портфель. Пока внимание сосредоточено, "
         "остальные проекты не стоят на месте — они устаревают.")
@@ -217,7 +221,12 @@ def portfolio_signals(P, R, U, E, usage_of):
     stale = []
     for k in own:
         g = (R.get(k) or {}).get("git") or {}
-        last = g.get("last_commit") or ""
+        last, how = g.get("last_commit") or "", ""
+        if not last:
+            # Без git — последняя правка файлов: проекты без истории коммитов иначе
+            # выпадали из проверки ровно там, где застой обычно сильнее всего.
+            s = (R.get(k) or {}).get("spec") or {}
+            last, how = max(s.get("newest_doc") or "", s.get("newest_code") or ""), " по файлам"
         if not last:
             continue
         try:
@@ -225,17 +234,19 @@ def portfolio_signals(P, R, U, E, usage_of):
         except ValueError:
             continue
         if d >= 21:
-            stale.append((P[k]["name"], d))
+            stale.append((P[k]["name"], d, how))
     stale.sort(key=lambda x: -x[1])
     add("stale", "Проекты без движения", str(len(stale)),
         "act" if len(stale) >= 4 else "watch" if stale else "ok",
-        "; ".join("%s — %d дн." % s for s in stale[:6]) or "все проекты двигались за последние три недели",
+        "; ".join("%s — %d дн.%s" % s for s in stale[:6]) or "все проекты двигались за последние три недели",
         "Проект без движения дольше месяца — это не пауза, а нерешённый вопрос: "
         "его надо либо возобновить, либо закрыть. Третьего состояния не бывает.")
 
     # --- 4. Работа в одном экземпляре ----------------------------------------
+    # Считается код: проект из одних заметок живёт историей хранилища Obsidian, не git.
     nogit = [P[k]["name"] for k in own
-             if (R.get(k) or {}).get("exists") and not (R.get(k) or {}).get("git")]
+             if (R.get(k) or {}).get("exists") and not (R.get(k) or {}).get("git")
+             and (((R.get(k) or {}).get("code") or {}).get("loc_total") or 0) > 0]
     noremote = [P[k]["name"] for k in own
                 if ((R.get(k) or {}).get("git") or {}).get("commits")
                 and not ((R.get(k) or {}).get("git") or {}).get("remote")]
@@ -264,8 +275,12 @@ def portfolio_signals(P, R, U, E, usage_of):
 
     # --- 6. Осталось против потраченного -------------------------------------
     worst = []
+    unknown_costs = 0
     for k in own:
         u, e = usage_of(k), E.get(k) or {}
+        if u and (u.get("cost_complete") is False or e.get("cost_complete") is False):
+            unknown_costs += 1
+            continue
         if not u or not e.get("remaining_usd"):
             continue
         ratio = e["remaining_usd"] / max(1.0, u["usd"])
@@ -273,8 +288,9 @@ def portfolio_signals(P, R, U, E, usage_of):
             worst.append((P[k]["name"], ratio))
     worst.sort(key=lambda x: -x[1])
     add("remaining_ratio", "Осталось больше, чем вложено", str(len(worst)),
-        "watch" if worst else "ok",
-        "; ".join("%s — ×%.1f" % w for w in worst[:5]) or "нет таких проектов",
+        "watch" if worst or unknown_costs else "ok",
+        ("; ".join("%s — ×%.1f" % w for w in worst[:5]) or "среди оценённых проектов превышений нет") +
+        ("; для %d проектов сравнение недоступно: стоимость неполная" % unknown_costs if unknown_costs else ""),
         "Если оставшийся бэклог дороже уже потраченного, проект пройден меньше "
         "чем наполовину — независимо от того, что показывает процент готовности.")
 
@@ -283,7 +299,7 @@ def portfolio_signals(P, R, U, E, usage_of):
     for k in own:
         u = usage_of(k)
         f = (P[k].get("readiness") or {}).get("functional") or 0
-        if u and f:
+        if u and f and u.get("cost_complete", True):
             costs.append((P[k]["name"], u["usd"] / f))
     costs.sort(key=lambda x: -x[1])
     if costs:
@@ -367,23 +383,24 @@ def main():
             func = rd.get("functional") or 0
             econ = {
                 "usd_spent": u.get("usd"),
+                "cost_complete": u.get("cost_complete", True),
                 "active_hours": hours,
-                "usd_per_hour": round(u["usd"] / hours, 1) if hours else None,
+                "usd_per_hour": round(u["usd"] / hours, 1) if hours and u.get("cost_complete", True) else None,
                 # Сколько стоил один пункт готовности. Сравнимо между проектами
                 # и показывает, где прогресс даётся дорого.
-                "usd_per_readiness_point": round(u["usd"] / func, 1) if func else None,
+                "usd_per_readiness_point": round(u["usd"] / func, 1) if func and u.get("cost_complete", True) else None,
                 "hours_per_readiness_point": round(hours / func, 2) if func else None,
                 "tokens_per_hour": round(u["billable"] / hours) if hours else None,
             }
         out["projects"][key] = {
             "spec": spec_quality(r),
-            "engineering": engineering_quality(r),
+            "engineering": engineering_quality(r, P[key]),
             "economics": econ,
         }
 
     out["portfolio_signals"] = portfolio_signals(P, R, U, E, usage_of)
 
-    dest = os.path.join(ROOT, "data", "quality.json")
+    dest = os.path.join(DATA, "quality.json")
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 

@@ -3,12 +3,39 @@
   <div>
     <h1>Портфель проектов</h1>
     <div class="sub" id="sub"></div>
+    <div class="fresh" id="fresh"></div>
   </div>
-  <button class="btn" id="theme">Тема</button>
+  <div class="refresh">
+    <label class="source-label" for="data-source">Получение данных из</label>
+    <select class="sel" id="data-source">
+      <option value="all">GPT / Codex и Claude</option>
+      <option value="codex">GPT / Codex</option>
+      <option value="claude">Claude Code</option>
+    </select>
+    <select class="sel" id="rmode" title="Что пересобрать" aria-label="Режим обновления">
+      <option value="fast">Быстро — без репозиториев</option>
+      <option value="full">Полностью — со сканированием кода</option>
+      <option value="vault">Обмен с Obsidian</option>
+    </select>
+    <button class="btn primary" id="refresh">Обновить данные</button>
+    <button class="btn" id="theme">Тема</button>
+  </div>
 </header>
+<details class="source-panel" id="source-panel">
+  <summary>Источники и подключение <span id="source-summary"></span></summary>
+  <div id="source-info" aria-live="polite"></div>
+  <div class="source-actions"><button class="btn" id="connect-provider">Подключить ассистента к TaskTreker</button>
+    <span id="connection-status" aria-live="polite"></span></div>
+  <p class="source-note">Codex, локальный ChatGPT Desktop и Claude получают общую память и задачи через MCP.
+    Переписки веб-ChatGPT автоматически не считываются. Выбор источника управляет следующим сбором;
+    показатели портфеля ниже объединяют все собранные источники.</p>
+</details>
+<div id="rlogWrap"></div>
 
 <div class="tabs" role="tablist">
+  <button class="tab" role="tab" id="tab-boards" aria-controls="page-boards" aria-selected="false">Доски задач</button>
   <button class="tab" role="tab" id="tab-dash" aria-controls="page-dash" aria-selected="true">Дашборд</button>
+  <button class="tab" role="tab" id="tab-tree" aria-controls="page-tree" aria-selected="false">Дерево</button>
   <button class="tab" role="tab" id="tab-proj" aria-controls="page-proj" aria-selected="false">Проекты</button>
 </div>
 
@@ -47,6 +74,13 @@
 
   <div class="section-h">Расход по месяцам</div>
   <div class="card-viz" id="c-months"></div>
+
+  <div id="memWrap"></div>
+</section>
+
+<section class="page" id="page-tree" role="tabpanel" aria-labelledby="tab-tree" hidden>
+  <div class="section-h">Древо портфеля — из чего выросло и куда растёт</div>
+  <div id="treeWrap" class="tnote">Древо открывается на весь экран. Вернуться — «← Дашборд» или Esc.</div>
 </section>
 
 <section class="page" id="page-proj" role="tabpanel" aria-labelledby="tab-proj" hidden>
@@ -55,8 +89,13 @@
   <div id="tableWrap"></div>
   <div class="section-h">Проекты подробно</div>
   <div id="cards"></div>
+  <div id="discoveredWrap"></div>
+  <div id="inboxWrap"></div>
   <div id="commentsWrap"></div>
 </section>
 
+<section class="page" id="page-boards" role="tabpanel" aria-labelledby="tab-boards" hidden>
+  <div id="boards-root"></div>
+</section>
 <div class="foot" id="foot"></div>
 </div>

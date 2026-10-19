@@ -13,7 +13,7 @@ import sys
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 TOOLS = os.path.join(ROOT, "tools")
 
 
@@ -100,6 +100,10 @@ a:hover{text-decoration:underline}
 header.top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}
 h1{font-size:25px;margin:0 0 4px;letter-spacing:-.4px;font-weight:650}
 .sub{color:var(--ink2);font-size:13.5px}
+.fresh{color:var(--ink3);font-size:12px;margin-top:3px}
+.fresh .old{color:var(--warn);font-weight:600}
+.prow{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.plog{color:var(--ink3);font-size:12.5px}
 .btn{background:var(--panel);border:1px solid var(--line);color:var(--ink2);border-radius:8px;
   padding:7px 12px;font-size:13px;cursor:pointer;font-family:inherit}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
@@ -239,6 +243,41 @@ table.bl tr:last-child td{border-bottom:none}
 
 .foot{margin-top:34px;padding-top:16px;border-top:1px solid var(--line);color:var(--ink3);font-size:12.5px}
 .foot code{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-family:var(--mono);font-size:12px}
+
+/* ---------- обновление данных ---------- */
+.refresh{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.source-label{font-size:12px;color:var(--ink2);flex-basis:100%}
+.source-panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:18px}
+.source-panel summary{cursor:pointer;font-size:14px;font-weight:600}
+#source-summary{font-size:12px;font-weight:400;color:var(--ink3);margin-left:8px}
+#source-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:14px}
+.source-card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:12px;font-size:13px}
+.source-card p{margin:5px 0;color:var(--ink2)}
+.source-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px}
+.source-note,#connection-status{font-size:12px;color:var(--ink2)}
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{filter:brightness(1.07);color:#fff}
+.btn[disabled]{opacity:.55;cursor:progress}
+select.sel{background:var(--panel);border:1px solid var(--line);color:var(--ink2);border-radius:8px;
+  padding:7px 9px;font-size:13px;font-family:inherit}
+.rlog{margin:10px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:11px 13px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;max-height:230px;
+  overflow:auto;color:var(--ink2);box-shadow:var(--shadow)}
+.rlog.bad{border-left:3px solid var(--bad)}
+.rlog.ok{border-left:3px solid var(--ok)}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);border-top-color:var(--accent);
+  border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* ---------- древо: сцену на весь экран рисует tree.js со своими стилями ---------- */
+.memgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.memcard{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 14px;
+  box-shadow:var(--shadow)}
+.memcard .t{font-size:13px;font-weight:600;margin-bottom:3px}
+.memcard .d{font-size:12.5px;color:var(--ink2);line-height:1.45}
+.memcard .m{font-size:11px;color:var(--ink3);margin-top:6px;font-family:var(--mono)}
+.tnote{padding:14px 16px;border:1px dashed var(--line);border-radius:12px;font-size:13px;color:var(--ink3)}
 @media(max-width:720px){
   .wrap{padding:16px 16px 60px}
   table.pf{display:block;overflow-x:auto}
@@ -248,8 +287,44 @@ table.bl tr:last-child td{border-bottom:none}
 """
 
 
+def context_stats():
+    """Во что обходится вход в работу: брифинг против чтения всех данных подряд.
+    Цифра попадает на дашборд, потому что ради неё вся память и вынесена из контекста."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import context as ctx
+        import mdparse as md
+        brief = ctx.build(budget=4000)
+        b, full = md.est_tokens(brief), ctx.full_size()
+        return {"brief_tokens": b, "full_tokens": full,
+                "saved_pct": int(100 - 100 * b / full) if full else None}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def freshness():
+    """ОБН-05: когда собран каждый слой. Репозитории — по самому старому срезу:
+    обновление одного проекта не делает свежими остальные."""
+    repos = load("repos.json", {"repos": {}})
+    rs = list((repos.get("repos") or {}).values())
+    scans = [r.get("scanned_at") or "" for r in rs]
+    mem = load(os.path.join("memory", "index.json"), {})
+    vault = load("vault_state.json", {})
+    return {
+        "usage": load("usage.json", {}).get("generated_at", ""),
+        # Срез без отметки времени — неизвестной свежести: честнее «нет», чем чужая дата.
+        "repos": "" if not rs or "" in scans else min(scans),
+        "memory": mem.get("generated_at", ""),
+        "project_activity": load("project_activity.json", {}).get("generated_at", ""),
+        "vault_pull": vault.get("pulled_at", ""),
+        "vault_push": vault.get("pushed_at", ""),
+    }
+
+
 def main():
+    import workflow
     payload = {
+        "workflow": workflow.snapshot(),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "projects": load("projects.json"),
         "usage": load("usage.json"),
@@ -259,8 +334,16 @@ def main():
         "comments": load("comments.json", {"comments": []}),
         "quality": load("quality.json", {"projects": {}, "portfolio_signals": []}),
         "snapshots": load_snapshots(),
+        "tree": load("tree.json", {}),
+        "codex_sessions": load("codex_sessions.json", {}),
+        "project_activity": load("project_activity.json", {}),
+        "memory": load(os.path.join("memory", "index.json"), {"records": [], "totals": {}}),
+        "inbox": load("inbox.json", {"items": []}),
+        "context": context_stats(),
+        "fresh": freshness(),
     }
-    blob = json.dumps(payload, ensure_ascii=False).replace("</script>", "<\\/script>")
+    # HTML закрывает script без учёта регистра, даже внутри JSON-строки.
+    blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
 
     html = (
         "<!DOCTYPE html>\n<html lang=\"ru\">\n<head>\n<meta charset=\"utf-8\">\n"
@@ -269,7 +352,10 @@ def main():
         + read_tool("shell.html")
         + "\n<script id=\"DATA\" type=\"application/json\">" + blob + "</script>\n"
         + "<script>\n" + read_tool("charts.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("tree.js") + "\n</script>\n"
         + "<script>\n" + read_tool("app.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("board_extras.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("boards.js") + "\n</script>\n"
         + "</body>\n</html>\n"
     )
 

@@ -4,6 +4,7 @@
 Читает список проектов из data/projects.json (поле path) и снимает факты прямо
 с диска. Ничего не выдумывает: чего нет — того нет. -> data/repos.json
 """
+import hashlib
 import json
 import os
 import re
@@ -11,18 +12,22 @@ import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timezone
+from project_routes import inspection_path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache",
     ".pytest_cache", "dist", "build", ".gradle", ".idea", ".vscode", "Library",
     "Temp", "Logs", "obj", "bin", "target", "archive", "site-packages",
     ".next", ".nuxt", "coverage", "htmlcov", "Obj", "Build", "UserSettings",
+    "fixtures", "backups",  # тестовые данные и резервные копии искажают метрики кода
 }
 CODE_EXT = {
     ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript",
     ".jsx": "JavaScript", ".kt": "Kotlin", ".kts": "Kotlin", ".java": "Java",
+    ".mjs": "JavaScript", ".cjs": "JavaScript",
     ".cs": "C#", ".go": "Go", ".rs": "Rust", ".rb": "Ruby", ".php": "PHP",
     ".swift": "Swift", ".c": "C", ".cpp": "C++", ".h": "C/C++ header",
     ".sql": "SQL", ".sh": "Shell", ".ps1": "PowerShell", ".vue": "Vue",
@@ -35,8 +40,30 @@ SECRET_PATTERNS = [
     ("ключ Anthropic", r"sk-ant-[A-Za-z0-9\-_]{20,}"),
     ("ключ OpenAI", r"sk-[A-Za-z0-9]{32,}"),
     ("токен Telegram", r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),
-    ("секрет в коде", r"(?i)(password|passwd|secret|api[_-]?key)\s*[:=]\s*[\x22\x27][^\x22\x27{$\s]{8,}[\x22\x27]"),
+    ("секрет в коде", r"(?i)(password|passwd|secret|api[_-]?key)\s*[:=]\s*[\x22\x27]([^\x22\x27{$\s]{8,})[\x22\x27]"),
 ]
+# Значение вида BYBIT_API_SECRET — имя переменной окружения, откуда секрет читают,
+# а не сам секрет. Такие совпадения поднимали тревогу в брифинге при каждом обновлении.
+ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{2,}")
+
+
+def secret_hit(label, rx, text):
+    """Есть ли в тексте совпадение, похожее на настоящий секрет."""
+    if label != "секрет в коде":
+        return bool(rx.search(text))
+    return any(not ENV_NAME.fullmatch(m.group(2)) for m in rx.finditer(text))
+
+
+def active_suspects(repo, project):
+    """Подозрения на секреты, которые ещё ждут человека: без временных рабочих деревьев
+    и без проверенных глазами (security.reviewed_suspects в projects.json — файл,
+    отпечаток и вердикт). Вердикт действует, пока отпечаток файла тот же: изменился
+    файл — подозрение возвращается."""
+    reviewed = {(str(x.get("file")), str(x.get("digest")))
+                for x in ((project or {}).get("security") or {}).get("reviewed_suspects") or []}
+    return [s for s in ((repo or {}).get("secrets_suspect") or [])
+            if ".claude/worktrees" not in str(s.get("file", ""))
+            and (str(s.get("file")), str(s.get("digest"))) not in reviewed]
 SECRET_RX = [(label, re.compile(rx)) for label, rx in SECRET_PATTERNS]
 SECRET_SCAN_EXT = {".py", ".ts", ".tsx", ".js", ".kt", ".java", ".cs", ".go",
                    ".yml", ".yaml", ".json", ".env", ".ini", ".cfg", ".toml",
@@ -75,10 +102,12 @@ def sh(args, cwd=None):
         return ""
 
 
-def walk(path, max_files=300000):
+def walk(path, max_files=300000, include_dirs=()):
     n = 0
     for dirpath, dirnames, filenames in os.walk(path):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.endswith(".worktrees")]
+        dirnames[:] = [d for d in dirnames if (d not in SKIP_DIRS or
+            os.path.relpath(os.path.join(dirpath, d), path).replace("\\", "/") in include_dirs)
+            and not d.endswith(".worktrees")]
         for fn in filenames:
             yield os.path.join(dirpath, fn)
             n += 1
@@ -94,13 +123,51 @@ def count_lines(fp):
         return 0
 
 
+def task_tokens(meta):
+    """ДРВ-05: чем задача бэклога может быть названа в сообщении коммита —
+    её номер и коды из поля refs (например, код задачи ТЗ). -> {токен: номер задачи}."""
+    out = {}
+    for b in meta.get("backlog") or []:
+        tid = str(b.get("id") or "").strip()
+        for t in [tid] + [str(r) for r in (b.get("refs") or [])]:
+            t = t.strip()
+            if len(t) >= 2:
+                out.setdefault(t, tid)
+    return out
+
+
+def task_commits(path, tokens, per_task=20, since=None):
+    """Коммиты, в сообщении которых назван номер задачи, -> {задача: [коммиты по времени]}.
+    Номер ищется целым словом: «Т1» не находится внутри «Т14»."""
+    if not tokens:
+        return {}
+    command = ["git", "log", "--no-merges", "--format=%h%x09%ad%x09%s", "--date=short"]
+    if since:
+        command.append('--since='+str(since)+'T00:00:00Z')
+    log = sh(command, path)
+    rx = re.compile(r"(?<![\w-])(%s)(?!\w)" % "|".join(
+        re.escape(t) for t in sorted(tokens, key=len, reverse=True)))
+    out = {}
+    for line in log.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        sha, date, subject = parts
+        for tid in dict.fromkeys(tokens[m.group(1)] for m in rx.finditer(subject)):
+            out.setdefault(tid, []).append({"sha": sha, "date": date, "subject": subject[:160]})
+    return {tid: sorted(cs, key=lambda c: c["date"])[-per_task:] for tid, cs in out.items()}
+
+
 def scan_repo(key, meta):
-    path = meta.get("path") or ""
-    res = {"key": key, "path": path, "exists": os.path.isdir(path)}
+    path = inspection_path(meta)
+    # ОБН-05: время среза у каждого репозитория — обновление одного проекта
+    # не должно выдавать остальные за свежие.
+    res = {"key": key, "path": path, "exists": os.path.isdir(path),
+           "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     if not res["exists"]:
         return res
 
-    if os.path.isdir(os.path.join(path, ".git")):
+    if os.path.exists(os.path.join(path, ".git")):
         log1 = sh(["git", "log", "-1", "--format=%ad|%s", "--date=short"], path)
         first = sh(["git", "log", "--reverse", "--format=%ad", "--date=short"], path)
         res["git"] = {
@@ -112,7 +179,18 @@ def scan_repo(key, meta):
             "last_subject": log1.split("|", 1)[1] if "|" in log1 else "",
             "dirty_files": len([l for l in sh(["git", "status", "--short"], path).splitlines() if l.strip()]),
             "remote": sh(["git", "remote", "get-url", "origin"], path),
+            "task_commits": task_commits(path, task_tokens(meta), since=meta.get('history_since')),
         }
+        if meta.get('history_since'):
+            since = str(meta['history_since'])
+            datetime.strptime(since, '%Y-%m-%d')
+            res['git']['history_since'] = since
+            res['git']['project_commits'] = int(sh(['git','rev-list','--count','--since='+since+'T00:00:00Z','HEAD'], path) or 0)
+            res['git']['inherited_commits'] = res['git']['commits'] - res['git']['project_commits']
+            own = sh(['git','log','--since='+since+'T00:00:00Z','--format=%ad','--date=short'],path).splitlines()
+            res['git']['first_project_commit'] = own[-1] if own else ''
+            # Historical generic IDs from the original product must not become
+            # evidence of Qatar tasks merely because the code was cloned.
     else:
         res["git"] = None
 
@@ -127,7 +205,10 @@ def scan_repo(key, meta):
     headings = tables = open_questions = 0
     doc_mtimes = []
     code_mtimes = []
-    for fp in walk(path):
+    code_ext = dict(CODE_EXT)
+    if meta.get("web_sources"):
+        code_ext.update({".html": "HTML", ".css": "CSS"})
+    for fp in walk(path, include_dirs=meta.get("scan_include_dirs", [])):
         total_files += 1
         ext = os.path.splitext(fp)[1].lower()
         base = os.path.basename(fp).lower()
@@ -136,13 +217,14 @@ def scan_repo(key, meta):
         except ValueError:
             weird.append(fp)  # зарезервированные имена Windows (nul, con, aux...)
             continue
-        is_code = ext in CODE_EXT
+        is_code = ext in code_ext
         if is_code:
-            lang = CODE_EXT[ext]
+            lang = code_ext[ext]
             langs[lang] += 1
             loc[lang] += count_lines(fp)
-            if (base.startswith("test_") or base.endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts"))
-                    or "/tests/" in rel or "/test/" in rel or "Tests" in rel):
+            if (base.startswith("test_") or base.endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts",
+                    ".test.js", ".test.mjs", ".test.cjs", ".spec.js", ".spec.mjs"))
+                    or "/tests/" in "/" + rel or "/test/" in "/" + rel or "Tests" in rel):
                 test_files += 1
         elif ext in DOC_EXT:
             docs += 1
@@ -168,8 +250,11 @@ def scan_repo(key, meta):
                 open_questions += len(OPEN_QUESTION.findall(txt))
             if ext in SECRET_SCAN_EXT:
                 for label, rx in SECRET_RX:
-                    if rx.search(txt):
-                        secrets.append({"file": rel, "kind": label})
+                    if secret_hit(label, rx, txt):
+                        # Отпечаток файла: по нему вердикт «проверено глазами» действует,
+                        # пока файл не изменился (active_suspects).
+                        secrets.append({"file": rel, "kind": label,
+                                        "digest": hashlib.sha256(txt.encode("utf-8", "ignore")).hexdigest()[:16]})
                         break
 
     res["code"] = {
@@ -275,14 +360,18 @@ def scan_repo(key, meta):
 
 
 def main():
-    with open(os.path.join(ROOT, "data", "projects.json"), encoding="utf-8") as f:
+    with open(os.path.join(DATA, "projects.json"), encoding="utf-8") as f:
         projects = json.load(f)["projects"]
     only = sys.argv[1:] or None
-    out_path = os.path.join(ROOT, "data", "repos.json")
+    out_path = os.path.join(DATA, "repos.json")
     out = {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "repos": {}}
     if only and os.path.exists(out_path):
         with open(out_path, encoding="utf-8") as f:
-            out["repos"] = json.load(f).get("repos", {})
+            prev = json.load(f)
+        out["repos"] = prev.get("repos", {})
+        # Срезы, которые сейчас не пересканируются, остаются со временем прежнего сбора (ОБН-05).
+        for r in out["repos"].values():
+            r.setdefault("scanned_at", prev.get("generated_at", ""))
     for key, meta in projects.items():
         if only and key not in only:
             continue

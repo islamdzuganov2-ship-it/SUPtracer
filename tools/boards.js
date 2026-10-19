@@ -74,7 +74,7 @@
     const keys=Object.keys(data.projects).filter(k=>(!project||project===k)&&(!onlyFocus||data.focus.includes(k))).sort((a,b)=>Number(data.focus.includes(b))-Number(data.focus.includes(a)));
     root.querySelector('#board-list').innerHTML=keys.map(k=>{const ts=visible.filter(t=>t.project===k);if(!ts.length&&(query||status||priority||ai))return '';return `<section class="board-project"><h2>${data.focus.includes(k)?'★ ':''}${esc(data.projects[k].name)} · ${ts.length}</h2><div class="board-columns">${COLUMNS.map(c=>`<div class="board-column" data-column="${c}"><h3>${labels[c]} · ${ts.filter(t=>column(t)===c).length}</h3>${ts.filter(t=>column(t)===c).map(t=>{
       const i=data.tasks.indexOf(t),run=data.runs.find(r=>r.ref===t.ref&&['queued','running'].includes(r.status));
-      return `<article class="board-task" draggable="true" data-drag="${i}"><small>${esc(t.id)} · ${esc(t.size||'?')} · ${esc(t.priority||'')}</small><h4>${esc(t.title)}</h4>${aiBadge(t)}${reviewBadge(t)}<small>${esc(t.route.model)} · ${esc(t.route.effort)}</small><small>${esc(t.route.reason)}${t.route.provisional?' — требуется уточнение':''}</small><small>Бюджет: ${t.route.total_token_budget.toLocaleString('ru')} токенов · ${t.route.max_attempts} попытки</small>${t.review_required?'<small>Лимит попыток достигнут: пересмотрите модель или декомпозицию</small>':""}${t.needs_plan&&t.status!=='done'?'<small>Нужна декомпозиция / критерии приёмки</small>':''}${t.blocked_by.length?`<small>Зависит от: ${esc(t.blocked_by.join(', '))}</small>`:''}${run&&run.status==='queued'?launchState(t,run,i):''}${t.status_note&&['blocked','cancelled'].includes(t.status)?`<div class="board-note">${t.status==='blocked'?'⛔':'✕'} ${esc(t.status_note)}</div>`:''}${t.complexity?.needs_assessment&&!['done','cancelled'].includes(t.status)?`<div class="board-assess" title="${esc((t.complexity.conflicts||[]).join('; ')||'аналитика и декомпозиция оцениваются ИИ по умолчанию')}">🔍 Сначала оценка сложности · уверенность ${t.complexity.confidence}</div>`:''}<button data-detail="${i}">Паспорт</button><button data-priority="${i}">Приоритет</button>${!run&&!['done','cancelled','blocked','review','in_progress'].includes(t.status)&&!t.needs_plan&&!t.review_required&&!t.blocked_by.length?`<span class="board-launch">${launchSelect(t,i)}<button data-launch="${i}">${launchLabel(t,null)}</button></span>`:''}</article>`;
+      return `<article class="board-task" draggable="true" data-drag="${i}"><small>${esc(t.id)} · ${esc(t.size||'?')} · ${esc(t.priority||'')}</small><h4>${esc(t.title)}</h4>${aiBadge(t)}${reviewBadge(t)}${manualBadge(t)}<small>${esc(t.route.model)} · ${esc(t.route.effort)}</small><small>${esc(t.route.reason)}${t.route.provisional?' — требуется уточнение':''}</small><small>Бюджет: ${t.route.total_token_budget.toLocaleString('ru')} токенов · ${t.route.max_attempts} попытки</small>${t.review_required?'<small>Лимит попыток достигнут: пересмотрите модель или декомпозицию</small>':""}${t.needs_plan&&t.status!=='done'?'<small>Нужна декомпозиция / критерии приёмки</small>':''}${t.blocked_by.length?`<small>Зависит от: ${esc(t.blocked_by.join(', '))}</small>`:''}${run&&run.status==='queued'?launchState(t,run,i):''}${t.status_note&&['blocked','cancelled'].includes(t.status)?`<div class="board-note">${t.status==='blocked'?'⛔':'✕'} ${esc(t.status_note)}</div>`:''}${t.complexity?.needs_assessment&&!['done','cancelled'].includes(t.status)?`<div class="board-assess" title="${esc((t.complexity.conflicts||[]).join('; ')||'аналитика и декомпозиция оцениваются ИИ по умолчанию')}">🔍 Сначала оценка сложности · уверенность ${t.complexity.confidence}</div>`:''}<button data-detail="${i}">Паспорт</button><button data-priority="${i}">Приоритет</button>${!run&&!['done','cancelled','blocked','review','in_progress'].includes(t.status)&&!t.needs_plan&&!t.review_required&&!t.blocked_by.length?`<span class="board-launch">${launchSelect(t,i)}<button data-launch="${i}">${launchLabel(t,null)}</button></span>`:''}</article>`;
     }).join('')}</div>`).join('')}</div></section>`;}).join('')||'<p>Нет досок по выбранным фильтрам.</p>';
     const search=root.querySelector('#board-search');search.oninput=()=>{const caret=search.selectionStart;query=search.value;render();const el=root.querySelector('#board-search');el.focus();el.setSelectionRange(caret,caret);};
     root.querySelector('#board-project').onchange=e=>{project=e.target.value;render();};
@@ -193,7 +193,10 @@
     '[data-prompt]':'Показать задание для ИИ — чтобы вставить его в уже открытый чат',
     '[data-unlaunch]':'Снять запуск из очереди; задача вернётся в «К выполнению»',
     '[data-relaunch]':'Открыть новое окно сессии ИИ для этого запуска',
-    '[data-move="in_progress"]':'Отметить, что задачу выполняете вы вручную; ждущий запуск ИИ снимется',
+    '[data-move="in_progress"]':'Взять в работу: запустить ИИ или отметить, что выполняете вручную',
+    '#start-ai':'Открыть окно сессии ИИ с моделью и усилиями из плана задачи',
+    '#start-manual':'Отметить ручную работу: ИИ не запускается',
+    '#start-edit':'Заполнить критерии приёмки и остальное, без чего ИИ не запустить',
     '[data-move="review"]':'Перевести задачу на проверку вручную',
     '[data-move="blocked"]':'Заблокировать с причиной — её увидят исполнители',
     '[data-move="queued"]':'Вернуть в «К выполнению»; для закрытой задачи нужна причина',
@@ -241,7 +244,23 @@
       col.ondrop=e=>{e.preventDefault();col.classList.remove('is-drop');const t=data.tasks[Number(e.dataTransfer.getData('text/plain'))];if(t&&column(t)!==col.dataset.column)moveTo(t,col.dataset.column);};
     });
   }
+  function manualBadge(t){
+    if(t.status!=='in_progress'||t.claim||t.queued_run)return '';
+    return `<div class="board-review board-stuck">✋ В работе вручную — ИИ не запущен${t.needs_plan?'. Для запуска ИИ сначала «Проработать задачу»: не хватает критериев приёмки':''}</div>`;
+  }
+  // «В работе» значит разное: запустить ИИ или отметить свою работу. Спросить, а не угадывать.
+  function startDialog(t){
+    const gaps=[!(t.acceptance||[]).length&&'критерии приёмки',!t.root&&'исходный запрос',t.size==='XL'&&'размер XL — сначала разбить'].filter(Boolean);
+    const agent=t.executor||data.settings?.default_executor;
+    const blocked=t.blocked_by.length?`Ждёт задач: ${t.blocked_by.join(', ')}.`:'';
+    const launchBtn=!t.needs_plan&&!blocked&&canLaunch(agent)?`<button id="start-ai">▶ Запустить ИИ (${esc(aiName(agent))})</button>`:'';
+    modal('Взять в работу: '+t.id,`<p>Перенос в «В работе» сам ИИ не запускает. Что сделать?</p>${t.needs_plan?`<p class="board-note">Запустить ИИ нельзя: у задачи нет — ${esc(gaps.join(', ')||'проработки')}. Нажмите «Проработать задачу».</p><button id="start-edit">Проработать задачу</button>`:''}${blocked?`<p class="board-note">${esc(blocked)}</p>`:''}${launchBtn}<button id="start-manual">✋ Выполняю вручную</button>`);
+    dialog.querySelector('#start-edit')?.addEventListener('click',()=>{dialog.close();BOARD_EXTRAS.form({data,project,task:t,modal,dialog,api,refresh});});
+    dialog.querySelector('#start-ai')?.addEventListener('click',async()=>{dialog.close();try{await openSession(t,agent);}catch(e){message.textContent=e.message;}});
+    dialog.querySelector('#start-manual').onclick=()=>{dialog.close();change({op:'status',ref:t.ref,status:'in_progress'});};
+  }
   function moveTo(t,target){
+    if(target==='in_progress'&&!t.claim&&!t.queued_run){startDialog(t);return;}
     if(target==='done'){message.textContent='«Готово» — только с проверкой критериев: отметьте их в паспорте и нажмите «Завершить с проверкой».';detail(t);return;}
     const needReason=['blocked','cancelled'].includes(target)||t.status==='done';
     if(!needReason){change({op:'status',ref:t.ref,status:target});return;}

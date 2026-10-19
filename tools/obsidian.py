@@ -298,12 +298,12 @@ def sync_task_status(c, dry=False):
             mark = "x" if t["done"] else ("/" if t["wip"] else " ")
             if written.get(tid) == mark:
                 continue                  # отметку поставила система, человек её не трогал
-            marks[tid] = "done" if mark == "x" else ("in-progress" if mark == "/" else None)
+            marks[tid] = "done" if mark == "x" else ("in_progress" if mark == "/" else None)
         for b in projects[key].get("backlog", []):
             want = marks.get(b.get("id"))
             if b.get("status") == "done" and want != "done":
                 continue                  # галочка двигает только вперёд
-            if want and b.get("status") != want:
+            if want and str(b.get("status")).replace("-", "_") != want:   # in-progress — прежнее написание
                 changes.append("%s/%s: %s -> %s" % (key, b["id"], b.get("status", "—"), want))
                 if not dry:
                     b["status"] = want
@@ -469,7 +469,7 @@ def cmd_push(args):
             body += ["", "## Бэклог", "",
                      "Отметка галочкой здесь переносится в систему при `pm.py vault pull`.", ""]
             for b in items:
-                mark = "x" if b.get("status") == "done" else ("/" if b.get("status") == "in-progress" else " ")
+                mark = "x" if b.get("status") == "done" else ("/" if b.get("status") in ("in_progress", "in-progress") else " ")
                 page_marks[str(b.get("id"))] = mark
                 extra = []
                 if b.get("est_usd"):

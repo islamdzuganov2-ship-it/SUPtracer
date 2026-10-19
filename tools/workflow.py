@@ -45,6 +45,8 @@ STATUS_LABELS = {'queued': 'К выполнению', 'in_progress': 'В раб�
                  'blocked': 'Заблокировано', 'done': 'Готово', 'cancelled': 'Отменено'}
 MANUAL_STATUSES = ('queued', 'in_progress', 'review', 'blocked', 'cancelled')   # «Готово» — только с проверкой
 ASSESS_BUDGET = 4000         # оценка сложности короче исполнения
+PACKET_LIMIT = 6000          # символов JSON в паспорте — с запасом, не счёт токенов
+FEEDBACK_CUT = ' …[сокращено до лимита паспорта]'
 LEASE_MINUTES = 45           # срок метки занятости без heartbeat
 LOCK_STALE_SECONDS = ts.LOCK_STALE_SECONDS
 PRIORITIES = ('🔴', '🟡', '🟢')
@@ -422,12 +424,21 @@ def packet(ref, agent=None):
                          ('Сначала влей в неё базовую ветку (git merge %s) и разреши конфликты, сохранив обе стороны. ' % ac.get('base','') if any(c['key']=='merge' and not c['ok'] for c in ac.get('checks',[])) else '') +
                          'Исправь остальные провалы, прогони проверки, закоммить и пришли finish — автопроверка повторится сама.')
     if t.get('review') and t['review'].get('verdict')=='changes' and phase=='execute':
-        result['review_feedback']=dict(conclusion=t['review']['conclusion'], criteria=t['review']['criteria'])
+        # Выполненные критерии уже в acceptance_done: доработке нужны замечания только по невыполненным.
+        result['review_feedback']=dict(conclusion=t['review']['conclusion'],
+            criteria=[dict(text=c['text'], ok=False, note=c.get('note','')) if not c['ok'] else dict(text=c['text'], ok=True)
+                      for c in t['review']['criteria']])
     if t.get('task_type')=='decomposition':
         result['decomposition']='Создавай подзадачи через tt_work op=plan с task_type, root=%s и assessment {complexity, uncertainty, breadth, reasons} у каждой — модель и усилия подзадачи считаются по её сложности.' % t['root']
     result['launch']='Исполнитель проверяет доступность модели, принимает запуск через take/claim и выполняет критерии. Пакет не меняет модель текущего чата.'
     # Approximation is deliberately conservative and explicitly not billing tokens.
-    if len(json.dumps(result,ensure_ascii=False)) > 6000:
+    size=len(json.dumps(result,ensure_ascii=False))
+    if size > PACKET_LIMIT and 'review_feedback' in result:
+        # Заключение пишет ревьюер, не автор паспорта: длинное ужимается, а не блокирует доработку.
+        fb=result['review_feedback']; cut=size-PACKET_LIMIT+len(FEEDBACK_CUT)
+        fb['conclusion']=fb['conclusion'][:max(len(fb['conclusion'])-cut, 500)]+FEEDBACK_CUT
+        size=len(json.dumps(result,ensure_ascii=False))
+    if size > PACKET_LIMIT:
         raise ValueError('Паспорт слишком велик: сократите критерии и вынесите детали в память')
     return result
 

@@ -11,7 +11,8 @@
 оперативный. Оперативный статус помнит, поверх какого ручного статуса записан
 (status_base). Если ручной статус с тех пор изменился — галочка в Obsidian, правка
 в редакторе, регламент, — правка человека новее, показывается она: ручной ввод
-не теряется и не перетирается. None в слое — «поле очищено»: оно скрывает
+не теряется и не перетирается. Сравниваются значения: ручной статус, возвращённый
+к базе (queued → blocked → queued), снова открывает статус слоя. None в слое — «поле очищено»: оно скрывает
 прежнее значение, оставшееся в ручном слое от старых версий.
 """
 import contextlib
@@ -65,13 +66,16 @@ def locked(folder, wait=0.0):
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY); break
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # Windows: файл, который владелец удаляет, пока на нём открыт чужой дескриптор
+            # (stat, антивирус), даёт PermissionError, а не FileExistsError — это та же занятость.
             # Упавший процесс оставляет файл навсегда; операция длится доли секунды.
             try: stale = time.time() - os.stat(path).st_mtime > LOCK_STALE_SECONDS
             except FileNotFoundError: stale = True
+            except PermissionError: stale = False      # файл как раз удаляют — не устарел
             if stale and not cleared:
                 cleared = True
-                with contextlib.suppress(FileNotFoundError): os.unlink(path)
+                with contextlib.suppress(FileNotFoundError, PermissionError): os.unlink(path)
             elif time.time() < deadline:
                 time.sleep(0.05)
             else:

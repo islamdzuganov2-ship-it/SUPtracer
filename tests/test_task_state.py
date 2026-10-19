@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from unittest import mock
 from base import DataCase
 import taskstate as ts
 import workflow as w
@@ -187,6 +188,29 @@ class StateLayerTests(DataCase):
         with ts.locked(self.data, wait=5): pass
         self.assertLess(time.time() - started, 4)
         self.assertFalse(lock.exists())
+
+    def test_lock_treats_permission_error_as_busy(self):
+        # Windows: файл блокировки, который удаляют при открытом чужом дескрипторе, даёт
+        # PermissionError и при создании, и при stat — ждать, как занятую, а не падать.
+        lock = os.path.join(self.data, '.workflow.lock')
+        real_open, real_stat, opens = os.open, os.stat, []
+        def flaky_open(path, *args):
+            opens.append(path)
+            if len(opens) < 3: raise PermissionError(13, 'Отказано в доступе', path)
+            return real_open(path, *args)
+        with mock.patch.object(ts.os, 'open', flaky_open):
+            with ts.locked(self.data, wait=5): pass
+        self.assertEqual(len(opens), 3)
+        self.assertFalse(os.path.exists(lock))
+
+        Path(lock).write_text(''); os.utime(lock, (0, 0))               # старый файл, но его как раз удаляют
+        def deleting_stat(path, *args, **kw):
+            if os.path.abspath(path) == os.path.abspath(lock): raise PermissionError(13, 'Отказано в доступе', path)
+            return real_stat(path, *args, **kw)
+        with mock.patch.object(ts.os, 'open', side_effect=PermissionError(13, 'Отказано в доступе')), \
+             mock.patch.object(ts.os, 'stat', deleting_stat), self.assertRaises(ts.Busy):
+            with ts.locked(self.data, wait=0.2): pass
+        self.assertTrue(os.path.exists(lock))                            # чужую блокировку не сняли как устаревшую
 
 
 class VaultLayerTests(DataCase):

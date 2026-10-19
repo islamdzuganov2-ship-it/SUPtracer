@@ -103,3 +103,39 @@ class LauncherTests(DataCase):
                 serve.launch_session(dict(ref='alpha-api/AL-03',agent='codex',isolate=False))
             win.assert_not_called()
         self.assertNotIn('launched_at',w.state()['runs'][0])
+
+    def test_diagnose_codex_session_error(self):
+        import json as _json
+        home=Path(self.tmp)/'codex'; day=home/'sessions'/'2026'/'10'/'19'; day.mkdir(parents=True)
+        cwd=str(Path(self.tmp)/'wt')
+        rows=[dict(type='session_meta',payload=dict(cwd=cwd)),
+              dict(type='event_msg',payload=dict(type='task_complete',error=dict(message='You’ve hit your usage limit. Try again at Oct 24th',codex_error_info='usage_limit_exceeded')))]
+        (day/'rollout-x.jsonl').write_text('\n'.join(_json.dumps(r) for r in rows),encoding='utf-8')
+        other=dict(rows[0],payload=dict(cwd=str(Path(self.tmp)/'другая')))
+        (day/'rollout-y.jsonl').write_text(_json.dumps(other),encoding='utf-8')
+        old=os.environ.get('CODEX_HOME'); os.environ['CODEX_HOME']=str(home)
+        try:
+            run=dict(launched_at=w.now().isoformat(),launch=dict(agent='codex',cwd=cwd))
+            d=launcher.diagnose(run)
+            self.assertEqual(d['code'],'usage_limit_exceeded'); self.assertIn('Oct 24th',d['message'])
+            self.assertIsNone(launcher.diagnose(dict(run,launch=dict(agent='codex',cwd=str(Path(self.tmp)/'другая')))))
+            self.assertIsNone(launcher.diagnose(dict(run,launch=dict(agent='claude',cwd=cwd))))
+        finally:
+            if old is None: os.environ.pop('CODEX_HOME',None)
+            else: os.environ['CODEX_HOME']=old
+
+    def test_finish_in_task_branch_goes_to_review(self):
+        import serve
+        self.make_git()
+        with mock.patch.object(launcher,'find_cli',return_value='C:/bin/claude.exe'), mock.patch.object(launcher,'open_window',return_value=1):
+            serve.launch_session(dict(ref='alpha-api/AL-03',agent='claude'))
+        w.action(dict(op='claim',ref='alpha-api/AL-03',run='RUN-1',worker='claude-cli:RUN-1',model='claude-haiku-5-5'))
+        r=w.action(dict(op='finish',ref='alpha-api/AL-03',run='RUN-1',worker='claude-cli:RUN-1',evidence='Тесты прошли, коммит abc'))
+        self.assertEqual((r['status'],r['branch']),('review','ai/claude/al-03'))
+        t=w.task_for('alpha-api/AL-03')
+        self.assertEqual(t['status'],'review'); self.assertIn('ai/claude/al-03',t['status_note'])
+        # Владелец слил ветку и закрывает задачу проверкой критериев.
+        w.action(dict(op='update',ref='alpha-api/AL-03',changes={'acceptance_done':[0]}))
+        w.action(dict(op='complete',ref='alpha-api/AL-03',evidence='Ветка слита в разработку, гейт пройден'))
+        self.assertEqual(w.task_for('alpha-api/AL-03')['status'],'done')
+        self.assertNotIn('status_note',w.read('projects.json',{})['projects']['alpha-api']['backlog'][-1])

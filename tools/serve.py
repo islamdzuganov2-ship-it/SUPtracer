@@ -145,7 +145,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(500, {"ok": False, "error": "Не удалось прочитать настройки подключения."})
         if path == "/api/work":
             import workflow, launcher
-            return self.send_json(200, {"ok": True, "data": dict(workflow.snapshot(), launchers=launcher.status())})
+            data = workflow.snapshot()
+            for run in data["runs"]:
+                # Открытая, но не принявшая задачу сессия: причина из журнала ИИ, если она есть.
+                if run.get("status") == "queued" and run.get("launched_at"):
+                    run["diagnosis"] = launcher.diagnose(run)
+            return self.send_json(200, {"ok": True, "data": dict(data, launchers=launcher.status())})
         self.send_json(404, {"ok": False, "error": "нет такого адреса"})
 
     def do_POST(self):

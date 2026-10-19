@@ -8,6 +8,7 @@
 из каталога и проверяются; рабочая папка — из ручного projects.json и должна существовать;
 вызывается только локальным сервером досок по нажатию владельца.
 """
+import json
 import os
 import re
 import shutil
@@ -110,3 +111,42 @@ def launch(provider, model, effort, prompt, cwd, env_extra=None):
         raise ValueError('Рабочая папка проекта не найдена: %s' % (cwd or 'не указана'))
     cmd = command(provider, exe, model, effort, prompt, cwd)
     return dict(pid=open_window(cmd, cwd, env_extra), exe=exe, cwd=cwd)
+
+
+def _codex_home():
+    return Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+
+
+def diagnose(run):
+    """Почему открытая сессия не приняла задачу — по журналу Codex той же папки.
+
+    Сессия с отказом (исчерпан лимит, недоступна модель) завершается сразу, а окно остаётся
+    открытым: без разбора владелец видит лишь «не принята». Читаются только метаданные
+    и текст ошибки, переписка не копируется."""
+    launch = run.get('launch') or {}
+    if launch.get('agent') != 'codex' or not launch.get('cwd') or not run.get('launched_at'):
+        return None
+    try:
+        from datetime import datetime
+        since = datetime.fromisoformat(run['launched_at']).timestamp() - 60
+    except ValueError:
+        return None
+    cwd = os.path.normcase(os.path.normpath(launch['cwd']))
+    files = [p for p in (_codex_home() / 'sessions').glob('*/*/*/rollout-*.jsonl') if p.stat().st_mtime >= since]
+    for path in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+        meta_cwd, error = None, None
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                if '"session_meta"' in line or '"task_complete"' in line:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    payload = row.get('payload') or {}
+                    if row.get('type') == 'session_meta':
+                        meta_cwd = payload.get('cwd')
+                    elif payload.get('type') == 'task_complete' and payload.get('error'):
+                        error = payload['error']
+        if meta_cwd and os.path.normcase(os.path.normpath(meta_cwd)) == cwd and error:
+            return dict(source='codex', code=error.get('codex_error_info') or '', message=str(error.get('message') or '')[:300])
+    return None

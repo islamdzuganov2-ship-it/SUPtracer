@@ -773,7 +773,7 @@ def action(req):
                 if any(r['ref']==ref and r['status'] in ('queued','running') for r in s['runs']): raise ValueError('Завершите или отмените запуск через его контракт')
                 if len(t.get('acceptance_done',[]))!=len(t.get('acceptance',[])): raise ValueError('Сначала проверьте все критерии')
                 if not isinstance(req.get('evidence'),str) or not req['evidence'].strip(): raise ValueError('Опишите результат проверки')
-                patch.update(status='done',evidence=req['evidence'],completed_at=at.isoformat())
+                patch.update(status='done',evidence=req['evidence'],completed_at=at.isoformat(),status_note=None)
             elif op=='enqueue':
                 if agent and t.get('executor') and agent!=t['executor']: raise ValueError('Задача назначена ИИ %s' % t['executor'])
                 p=packet(ref, agent=agent or t.get('executor') or None)
@@ -859,6 +859,12 @@ def action(req):
                     run.update(status={'finish':'done','fail':'failed','cancel':'cancelled'}[op],evidence=req['evidence'],tokens=tokens,finished_at=at.isoformat())
                     patch.update(status='done' if op=='finish' else 'queued', claimed_by=None)
                     if op=='finish': patch['completed_at']=run['finished_at']
+                    branch=((run.get('launch') or {}).get('worktree') or {}).get('branch')
+                    if op=='finish' and branch:
+                        # Работа в отдельной ветке не в основной ветке проекта: готово — после слияния владельцем.
+                        patch.update(status='review', completed_at=None, evidence=req['evidence'],
+                                     status_note='Готово в ветке %s — ждёт проверки и слияния владельцем' % branch)
+                        extra=dict(status='review', branch=branch)
             else: raise ValueError('Неизвестная операция')
             write_patches(s, {ref:patch} if patch else {})
         save('workflow.json',s)

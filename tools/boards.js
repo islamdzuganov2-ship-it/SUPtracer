@@ -108,7 +108,8 @@
     const who=run.agent?esc(aiName(run.agent)):'ИИ',route=run.packet?.route?` · ${esc(run.packet.route.model)} · ${esc(run.packet.route.effort)}`:'';
     const phase=run.phase==='assess'?' (оценка)':'';
     let head,cls='board-waiting',extra='';
-    if(!run.launched_at){head=`📥 Поставлена в очередь для ${who}${phase} — сессия не открыта`;if(canLaunch(run.agent))extra=`<button data-relaunch="${i}">Открыть сессию</button>`;}
+    if(run.diagnosis){cls+=' board-stuck';head=`⛔ Сессия ${who} открылась, но завершилась с ошибкой: ${esc(run.diagnosis.message)}`;extra=canLaunch(run.agent)?`<button data-relaunch="${i}">Перезапустить</button>`:'';}
+    else if(!run.launched_at){head=`📥 Поставлена в очередь для ${who}${phase} — сессия не открыта`;if(canLaunch(run.agent))extra=`<button data-relaunch="${i}">Открыть сессию</button>`;}
     else if(ago(run.launched_at)<5){head=`🖥 Сессия ${who}${phase} открыта ${esc(time(run.launched_at))} — ждём, пока ИИ примет`;}
     else{cls+=' board-stuck';head=`⚠ Сессия ${who} открыта ${ago(run.launched_at)} мин назад, ИИ не принял задачу. Проверьте окно сессии или перезапустите`;extra=canLaunch(run.agent)?`<button data-relaunch="${i}">Перезапустить</button>`:'';}
     const wt=run.launch?.worktree?`<small>Рабочая копия: ${esc(run.launch.worktree.branch)}</small>`:'';

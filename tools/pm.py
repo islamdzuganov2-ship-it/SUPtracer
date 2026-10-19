@@ -1,15 +1,38 @@
 # -*- coding: utf-8 -*-
 """TaskTreker — командная строка системы проектного управления.
 
+Работа с портфелем
   py tools/pm.py init                 первый запуск: разложить примеры в рабочие файлы
-  py tools/pm.py refresh              пересобрать всё: токены, репозитории, оценки, дашборд
+  py tools/pm.py refresh              пересобрать всё: токены, репозитории, оценки, дерево, дашборд
   py tools/pm.py refresh --fast       без пересканирования репозиториев (быстро)
+  py tools/pm.py refresh --fast --source codex|claude|all  выбрать источник расхода
+  py tools/pm.py status [проект]      сводка в терминал
   py tools/pm.py comment <проект> "текст" [--kind техдолг|идея|баг|вопрос]
   py tools/pm.py comments             показать комментарии
-  py tools/pm.py status [проект]      сводка в терминал
   py tools/pm.py snapshot             сохранить снимок для истории трендов
   py tools/pm.py check                проверки перед слиянием в тестирование и main
-  py tools/pm.py open                 открыть дашборд в браузере
+
+Память системы — знание лежит здесь, а не в контексте ассистента
+  py tools/pm.py context              брифинг сессии: что происходит, без содержимого
+  py tools/pm.py recall <id|слова>    достать запись памяти целиком
+  py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]
+  py tools/pm.py forget <id> --why "почему устарела"
+  py tools/pm.py claude-memory [--dry-run]  авто-память Claude Code -> память портфеля
+  py tools/pm.py codex-memory [--dry-run]   запросы и ответы GPT / Codex -> ветви дерева
+
+Входящие
+  py tools/pm.py ingest <файл|каталог>  разобрать Markdown и разложить по проектам
+  py tools/pm.py inbox                  предложения задач из заметок
+  py tools/pm.py apply <IN-1> [...]     принять предложение в бэклог
+  py tools/pm.py reject <IN-2> --why    отклонить
+
+Obsidian и дашборд
+  py tools/pm.py vault init <путь> | pull | push | sync | status
+  py tools/pm.py tree                 пересобрать дерево работ
+  py tools/pm.py serve                дашборд с работающей кнопкой обновления
+  py tools/pm.py connect [--provider codex|claude|all] [--status]  MCP-подключение ассистентов
+  py tools/pm.py disconnect           снять подключение
+  py tools/pm.py open                 открыть собранный дашборд файлом
 """
 import json
 import os
@@ -19,7 +42,7 @@ import webbrowser
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
 PY = sys.executable
 
 
@@ -49,19 +72,64 @@ def fmt(n):
 
 def cmd_refresh(args):
     fast = "--fast" in args
-    print("→ токены из журналов сессий")
-    run("collect_usage.py")
-    if not fast:
-        print("\n→ технический срез репозиториев")
-        run("collect_repos.py")
+    source = "all"
+    if "--source" in args:
+        i = args.index("--source")
+        source = args[i + 1] if i + 1 < len(args) else ""
+    if source not in ("all", "claude", "codex"):
+        print("Источник: all, claude или codex.")
+        return 1
+    # ОБН-04: обновление одного проекта — пересканируется только его репозиторий,
+    # остальные слои собираются как при --fast. Скан всех репозиториев идёт минутами.
+    only = None
+    if "--project" in args:
+        i = args.index("--project")
+        only = args[i + 1] if i + 1 < len(args) else ""
+        if only not in jload("projects.json").get("projects", {}):
+            print("Нет такого проекта: %s" % only)
+            return 1
+    steps = [("токены из журналов сессий (%s)" % source,
+              ("collect_usage.py", "--source", source))]
+    if only:
+        steps.append(("репозиторий проекта %s" % only, ("collect_repos.py", only)))
+    elif not fast:
+        steps.append(("технический срез репозиториев", ("collect_repos.py",)))
     else:
         print("\n→ репозитории пропущены (--fast)")
-    print("\n→ оценка оставшихся задач")
-    run("estimate.py")
-    print("\n→ сборка дашборда")
-    run("build_dashboard.py")
-    cmd_snapshot([])
-    print("\nГотово. Открыть: py tools/pm.py open")
+
+    auto = jload("obsidian.json", {}).get("auto") or {}
+    if only:
+        auto = {}                     # обновление проекта не трогает хранилище
+    if auto.get("pull_on_refresh") and "--no-vault" not in args:
+        steps.append(("заметки из Obsidian", ("obsidian.py", "pull")))
+    if source != "codex":
+        steps.append(("авто-память Claude", ("automem.py",)))
+    if source != "claude":
+        steps.append(("сессии и ветви GPT / Codex", ("codex_memory.py",)))
+    steps.extend([
+        ("индекс памяти", ("memory.py", "index")),
+        ("свежие сведения о работе и планах проектов", ("project_activity.py",)),
+        ("оценка оставшихся задач", ("estimate.py",)),
+        ("индексы качества и портфельные сигналы", ("quality.py",)),
+        ("дерево работ", ("tree.py",)),
+        ("сборка дашборда", ("build_dashboard.py",)),
+    ])
+    for title, command in steps:
+        print("\n→ " + title)
+        rc = run(*command)
+        if rc:
+            print("Обновление остановлено: %s. Уже завершённые шаги сохранены; снимок не создан." % title)
+            return rc
+    rc = cmd_snapshot([])
+    if rc:
+        return rc
+
+    if auto.get("push_on_refresh") and "--no-vault" not in args:
+        print("\n→ выгрузка портфеля в Obsidian")
+        rc = run("obsidian.py", "push")
+        if rc:
+            return rc
+    print("\nГотово. Открыть: py tools/pm.py open · с кнопкой обновления: py tools/pm.py serve")
 
 
 def cmd_comment(args):
@@ -116,6 +184,8 @@ def cmd_status(args):
     U = jload("usage.json").get("projects", {})
     R = jload("repos.json").get("repos", {})
     E = jload("estimates.json").get("projects", {})
+    if any(u.get("cost_complete") is False for u in U.values()):
+        print("Стоимость части расхода неизвестна; суммы в $ — только известная часть.\n")
 
     def usage_of(key):
         path = (P[key].get("path") or "").lower().rstrip("/")
@@ -138,11 +208,13 @@ def cmd_status(args):
             p, u, e = P[k], usage_of(k), E.get(k, {})
             g = (R.get(k) or {}).get("git") or {}
             rd = p.get("readiness", {})
+            if rd.get("assessed") is False:
+                rd = dict(functional="не оценено", security="не оценено")
             print("%-16s %-22s %4s%% %4s%% %10s %10s %8s" % (
                 p["name"][:16], p.get("status", "")[:22], rd.get("functional", "—"), rd.get("security", "—"),
                 "$" + fmt(u["usd"]) if u else "—",
                 "$" + fmt(e.get("remaining_usd", 0)) if e.get("remaining_usd") else "—",
-                g.get("commits", "нет git")))
+                g.get('project_commits', g.get("commits", "нет git"))))
         return 0
 
     for k in keys:
@@ -154,14 +226,18 @@ def cmd_status(args):
         print("=" * 70)
         print("%s — %s" % (p["name"], p.get("tagline", "")))
         print("цель: %s · статус: %s" % (p.get("goal", ""), p.get("status", "")))
-        print("готовность: функц %s%% · эксплуат %s%% · доки %s%% · тесты %s%% · ИБ %s%%" % (
-            rd.get("functional"), rd.get("production"), rd.get("docs"), rd.get("tests"), rd.get("security")))
+        if rd.get("assessed") is False:
+            print("готовность: численная оценка не проводилась")
+        else:
+            print("готовность: функц %s%% · эксплуат %s%% · доки %s%% · тесты %s%% · ИБ %s%%" % (
+                rd.get("functional"), rd.get("production"), rd.get("docs"), rd.get("tests"), rd.get("security")))
         if u:
             print("потрачено: %s токенов, $%s (%d сессий, %d запросов)" % (
                 fmt(u["billable"]), fmt(u["usd"]), u["sessions"], u["requests"]))
         if e:
             print("осталось:  %s токенов, $%s (%d задач)" % (
-                fmt(e["remaining_tokens"]), fmt(e["remaining_usd"]), len(e["items"])))
+                fmt(e["remaining_tokens"]), fmt(e["remaining_usd"]),
+                sum(1 for b in e["items"] if not b.get("closed") and b.get("status") not in ("done", "cancelled", "dropped"))))
         if r.get("code"):
             print("код: %s строк, %d файлов, %d тестовых, %d TODO" % (
                 fmt(r["code"]["loc_total"]), r["code"]["files_total"], r["code"]["test_files"], r["code"]["todo_markers"]))
@@ -216,7 +292,9 @@ def cmd_init(args):
     """Разложить примеры в рабочие файлы — первый запуск после клонирования."""
     pairs = [("projects.example.json", "projects.json"),
              ("comments.example.json", "comments.json"),
-             ("competitors.example.json", "competitors.json")]
+             ("competitors.example.json", "competitors.json"),
+             ("obsidian.example.json", "obsidian.json")]
+    os.makedirs(os.path.join(DATA, "memory"), exist_ok=True)
     made = []
     for src, dst in pairs:
         s, d = os.path.join(DATA, src), os.path.join(DATA, dst)
@@ -235,6 +313,9 @@ def cmd_init(args):
     if made:
         print("\nТеперь впишите свои проекты в data/projects.json — главное поле `path`,")
         print("по нему собираются и код, и расход токенов. Затем: py tools/pm.py refresh")
+        print("\nНеобязательно, но полезно:")
+        print("  py tools/pm.py vault init <путь к хранилищу Obsidian>   двусторонний обмен заметками")
+        print("  py tools/pm.py ingest <файл.md|каталог>                 разложить готовые заметки по проектам")
     else:
         print("\nВсё на месте. Обновить: py tools/pm.py refresh")
     return 0
@@ -244,9 +325,97 @@ def cmd_check(args):
     return run("check.py", *args)
 
 
+# ---------------------------------------------------------------- память
+
+def cmd_context(args):
+    """Брифинг сессии. С него начинается работа ассистента с системой."""
+    return run("context.py", *args)
+
+
+def cmd_recall(args):
+    return run("memory.py", "recall", *args)
+
+
+def cmd_remember(args):
+    """py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]"""
+    # Первые два аргумента без дефисов — проект и заголовок; остальное уходит как есть.
+    pos_idx = [i for i, a in enumerate(args) if not a.startswith("--")
+               and (i == 0 or not args[i - 1].startswith("--"))]
+    if len(pos_idx) < 2:
+        print('Использование: py tools/pm.py remember <проект> "заголовок" --text "..." [--kind решение]')
+        print("Виды: запрос, решение, факт, требование, риск, итог, источник, заметка")
+        return 1
+    project, title = args[pos_idx[0]], args[pos_idx[1]]
+    known = set(jload("projects.json").get("projects", {})) | {"портфель"}
+    if project not in known:
+        print("Нет такого проекта: %s. Доступны: %s" % (project, ", ".join(sorted(known))))
+        return 1
+    rest = [a for i, a in enumerate(args) if i not in pos_idx[:2]]
+    return run("memory.py", "add", "--project", project, "--title", title, *rest)
+
+
+def cmd_forget(args):
+    return run("memory.py", "forget", *args)
+
+
+def cmd_claude_memory(args):
+    """ИНТ-07: авто-память Claude Code (~/.claude/projects/*/memory) -> память портфеля."""
+    return run("automem.py", *args)
+
+
+# ---------------------------------------------------------------- входящие
+
+def cmd_ingest(args):
+    return run("ingest.py", *args)
+
+
+def cmd_inbox(args):
+    return run("inbox.py", "list", *args)
+
+
+def cmd_apply(args):
+    return run("inbox.py", "apply", *args)
+
+
+def cmd_reject(args):
+    return run("inbox.py", "reject", *args)
+
+
+# ---------------------------------------------------------------- прочее
+
+def cmd_vault(args):
+    if not args:
+        print("py tools/pm.py vault <init <путь>|pull|push|sync|status>")
+        return 1
+    return run("obsidian.py", *args)
+
+
+def cmd_tree(args):
+    return run("tree.py", *args)
+
+
+def cmd_serve(args):
+    return run("serve.py", *args)
+
+
+def cmd_connect(args):
+    """ИНТ-06: хук начала сессии и MCP-сервер на уровне пользователя."""
+    return run("connect.py", "connect", *args)
+
+
+def cmd_disconnect(args):
+    return run("connect.py", "disconnect", *args)
+
+
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
+            "work": lambda args: run("workflow.py", *args),
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
-            "open": cmd_open}
+            "open": cmd_open, "context": cmd_context, "recall": cmd_recall,
+            "remember": cmd_remember, "forget": cmd_forget, "claude-memory": cmd_claude_memory, "ingest": cmd_ingest,
+            "codex-memory": lambda args: run("codex_memory.py", *args),
+            "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
+            "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
+            "connect": cmd_connect, "disconnect": cmd_disconnect}
 
 
 def main():

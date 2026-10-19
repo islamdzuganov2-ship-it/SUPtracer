@@ -14,10 +14,13 @@ from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+CLOSED = {"done", "cancelled", "dropped"}   # статусы, которые не стоят денег
+DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
+
 
 def load(name, default=None):
     """Собираемые файлы могут отсутствовать на первом запуске — это не ошибка."""
-    p = os.path.join(ROOT, "data", name)
+    p = os.path.join(DATA, name)
     if not os.path.exists(p):
         if default is None:
             raise SystemExit("Нет data/%s. Сначала: py tools/pm.py refresh" % name)
@@ -49,17 +52,36 @@ def main():
         u = usage_for(key)
         r = repos.get(key) or {}
         g = r.get("git") or {}
-        commits = g.get("commits") or 0
+        commits = g.get("project_commits", g.get("commits")) or 0
         if u and commits >= 5:
             per_commit[key] = {
                 "tokens": u["billable"] / commits,
                 "usd": u["usd"] / commits,
                 "output": u["output"] / commits,
-                "basis": "собственная история: %d коммитов" % commits,
+                "cost_complete": u.get("cost_complete", True),
+                "basis": "собственная история: %d коммитов" % commits +
+                         ("; стоимость известна частично" if u.get("cost_complete") is False else ""),
             }
 
+    # A new GPT-only project should use comparable GPT history rather than
+    # the median of predominantly Claude work. Mixed-source histories stay
+    # together: commits cannot be reliably attributed to a provider.
+    provider_rates = {}
+    for key, rate in per_commit.items():
+        u = usage_for(key) or {}
+        providers = [name for name, value in u.get("by_provider", {}).items() if value.get("billable")]
+        if len(providers) == 1:
+            provider_rates.setdefault(providers[0], []).append(rate)
+    provider_medians = {name: {
+        "tokens": statistics.median([v["tokens"] for v in rates]),
+        "usd": statistics.median([v["usd"] for v in rates]),
+        "cost_complete": all(v["cost_complete"] for v in rates),
+        "basis": "медиана проектов %s (своей истории мало)" % ("GPT / Codex" if name == "codex" else "Claude"),
+    } for name, rates in provider_rates.items()}
+
     med_tokens = statistics.median([v["tokens"] for v in per_commit.values()]) if per_commit else 25e6
-    med_usd = statistics.median([v["usd"] for v in per_commit.values()]) if per_commit else 14.0
+    priced = [v["usd"] for v in per_commit.values() if v["cost_complete"] or v["usd"] > 0]
+    med_usd = statistics.median(priced) if priced else 14.0
 
     out = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -76,7 +98,13 @@ def main():
 
     grand_tok = grand_usd = 0.0
     for key, p in proj["projects"].items():
-        rate = per_commit.get(key) or {"tokens": med_tokens, "usd": med_usd, "basis": "медиана портфеля (своей истории мало)"}
+        u = usage_for(key) or {}
+        sources = [name for name, value in u.get("by_provider", {}).items() if value.get("billable")]
+        provider_rate = provider_medians.get(sources[0]) if len(sources) == 1 else None
+        rate = per_commit.get(key) or provider_rate or {"tokens": med_tokens, "usd": med_usd,
+            "cost_complete": all(v["cost_complete"] for v in per_commit.values()),
+            "basis": "медиана портфеля (своей истории мало)" +
+                     ("; стоимость известна частично" if any(not v["cost_complete"] for v in per_commit.values()) else "")}
         items = []
         tok_sum = usd_sum = 0.0
         for b in p.get("backlog", []):
@@ -85,18 +113,24 @@ def main():
             tok = rate["tokens"] * commits
             usd = rate["usd"] * commits
             blocked = b.get("status") in ("blocked",)
+            closed = b.get("status") in CLOSED
             items.append({
                 "id": b.get("id"), "title": b.get("title"), "size": size,
                 "priority": b.get("priority", ""), "status": b.get("status", ""),
                 "days": b.get("days", ""), "why": b.get("why", ""),
                 "est_tokens": round(tok), "est_usd": round(usd, 2), "blocked": blocked,
+                "closed": closed,
             })
-            tok_sum += tok
-            usd_sum += usd
+            # КАЧ-05: закрытая задача остаётся в списке (история и дерево), но в остаток
+            # не входит — иначе галочка в бэклоге не уменьшала бы прогноз.
+            if not closed:
+                tok_sum += tok
+                usd_sum += usd
         out["projects"][key] = {
             "rate_basis": rate["basis"],
             "tokens_per_commit": round(rate["tokens"]),
             "usd_per_commit": round(rate["usd"], 2),
+            "cost_complete": rate.get("cost_complete", True) if usd_sum or tok_sum else True,
             "items": items,
             "remaining_tokens": round(tok_sum),
             "remaining_usd": round(usd_sum, 2),
@@ -104,9 +138,10 @@ def main():
         grand_tok += tok_sum
         grand_usd += usd_sum
 
-    out["totals"] = {"remaining_tokens": round(grand_tok), "remaining_usd": round(grand_usd, 2)}
+    out["totals"] = {"remaining_tokens": round(grand_tok), "remaining_usd": round(grand_usd, 2),
+                     "cost_complete": all(p["cost_complete"] for p in out["projects"].values())}
 
-    dest = os.path.join(ROOT, "data", "estimates.json")
+    dest = os.path.join(DATA, "estimates.json")
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 

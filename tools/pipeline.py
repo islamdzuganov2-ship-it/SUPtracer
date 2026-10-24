@@ -259,6 +259,36 @@ DOR = {
 }
 
 
+# Кто и на чём работает в роли. prefer — порядок ИИ (первый свободный от лимита токенов);
+# tier — класс модели по сложности задачи (1/2/3: простая, средняя, сложная), не ниже min_tier роли;
+# effort — усилия по тому же классу сложности (у Codex выше high не бывает — урезается).
+# Ревьюер — всегда другой ИИ, чем разработчик: перекрёстная проверка. Явное закрепление роли
+# владельцем (настройки ролей) сильнее таблицы. Основание — сильные стороны моделей в каталоге
+# (workflow.MODELS); это начальные эвристики, их уточняют метрики качества ролей и ИИ.
+ROUTING = {
+    'product_owner': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'high', 'xhigh'),
+                          why='исследование рынка и длинный связный BRD с источниками — сильная сторона Claude Opus'),
+    'system_analyst': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('medium', 'high', 'xhigh'),
+                           why='формализация требований, API и модели данных без двояких трактовок'),
+    'solution_architect': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'high', 'xhigh'),
+                               why='архитектура и ADR — задача старшего класса при любой сложности'),
+    'designer': dict(prefer=('claude', 'codex'), tier=(2, 2, 2), effort=('medium', 'medium', 'high'),
+                     why='сценарии, состояния экранов и спецификация интерфейса — средний класс достаточен'),
+    'marketer': dict(prefer=('claude', 'codex'), tier=(2, 2, 2), effort=('medium', 'medium', 'high'),
+                     why='аудитория, позиционирование и тексты — средний класс достаточен'),
+    'developer': dict(prefer=('codex', 'claude'), tier=(1, 2, 3), effort=('medium', 'medium', 'high'),
+                      why='код и тесты в нескольких файлах — сильная сторона GPT Sol/Astra; Claude — запасной'),
+    'reviewer': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('high', 'high', 'xhigh'), cross='developer',
+                     why='перекрёстная проверка: другой ИИ, чем разработчик, видит его слепые зоны'),
+    'qa': dict(prefer=('codex', 'claude'), tier=(2, 2, 2), effort=('medium', 'high', 'high'),
+               why='тест-кейсы, прогоны и регресс — исполнительская работа среднего класса'),
+    'devops': dict(prefer=('codex', 'claude'), tier=(1, 2, 2), effort=('medium', 'medium', 'medium'),
+                   why='runbook и заметки к релизу; слияния и проверки делает сервер'),
+    'teamlead': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'high', 'xhigh'),
+                     why='ворота и эскалации: согласованность всех артефактов — старший класс'),
+}
+
+
 def stage_roles(stage, needs=None):
     """Роли, которые должны сдать этап: необязательные — по решению PO (needs)."""
     s = STAGE[stage]; needs = needs or {}
@@ -492,4 +522,6 @@ def spec_for_board():
                      gate=s.get('gate'), owner_approval=bool(s.get('owner_approval')),
                      dor=[pub(i) for i in DOR[s['id']]],
                      dod={r: [pub(i) for i in role_dod(r, s['id'])] for r in s['roles']}) for s in STAGES],
-        roles={k: dict(title=v['title'], skill='tt-' + k.replace('_', '-'), mission=v['mission']) for k, v in ROLES.items()})
+        roles={k: dict(title=v['title'], skill='tt-' + k.replace('_', '-'), mission=v['mission'],
+                       routing=dict(prefer=list(ROUTING[k]['prefer']), tier=list(ROUTING[k]['tier']), effort=list(ROUTING[k]['effort']),
+                                    cross=ROUTING[k].get('cross'), why=ROUTING[k]['why'])) for k, v in ROLES.items()})

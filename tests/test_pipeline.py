@@ -332,3 +332,32 @@ class PipelineTests(DataCase):
         r = w.action(dict(op='stop_project', project='alpha-api'))
         self.assertEqual(r['held'], len(pos))
         self.assertNotIn('alpha-api', w.snapshot()['active_projects'])
+
+    # --- ИИ, модель и усилия по роли (TT-79)
+
+    def test_role_routing_by_role_and_complexity(self):
+        import orchestra
+        self.ref = self.idea()
+        s = w.state(); t = self.task()
+        po = orchestra.role_route(t, 'product_owner', orchestra.role_agent(s, t, 'product_owner'))
+        self.assertEqual((po['provider'], w.model_entry(po['model'])['tier'], po['source']), ('claude', 3, 'role'))
+        self.assertIn('Product Owner', po['reason'])
+        dev = orchestra.role_route(t, 'developer', orchestra.role_agent(s, t, 'developer'))
+        self.assertEqual(dev['provider'], 'codex')
+        self.assertIn(dev['effort'], w.EFFORTS['codex'])                       # у Codex выше high не бывает
+        # Ревьюер — другой ИИ, чем разработчик этого конвейера.
+        t2 = dict(t, pipeline=dict(t['pipeline'], roles={'development/developer': dict(agent='claude')}))
+        self.assertEqual(orchestra.role_agent(s, t2, 'reviewer'), 'codex')
+        t3 = dict(t, pipeline=dict(t['pipeline'], roles={'development/developer': dict(agent='codex')}))
+        self.assertEqual(orchestra.role_agent(s, t3, 'reviewer'), 'claude')
+        # Закрепление владельцем сильнее таблицы; ИИ на лимите пропускается.
+        w.action(dict(op='settings', changes=dict(roles={'developer': 'claude'})))
+        self.assertEqual(orchestra.role_agent(w.state(), t, 'developer'), 'claude')
+        s = w.state(); w.note_limit(s, 'claude', w.now() + __import__('datetime').timedelta(hours=1), w.now()); w.save('workflow.json', s)
+        self.assertEqual(orchestra.role_agent(w.state(), t, 'developer'), 'codex')
+        # Сложная задача поднимает класс и усилия аналитика.
+        hard = dict(t, size='L', risk='high', work_type='architecture')
+        easy = dict(t, size='S', risk='low', work_type='docs')
+        r_hard, r_easy = orchestra.role_route(hard, 'system_analyst', 'claude'), orchestra.role_route(easy, 'system_analyst', 'claude')
+        self.assertGreaterEqual(w.model_entry(r_hard['model'])['tier'], w.model_entry(r_easy['model'])['tier'])
+        self.assertGreaterEqual(w.EFFORTS['claude'].index(r_hard['effort']), w.EFFORTS['claude'].index(r_easy['effort']))

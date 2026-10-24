@@ -29,6 +29,8 @@ class LimitTests(DataCase):
             id='AL-03', title='Правка', why='Нужна', root='request', size='S', priority='🟡', risk='low',
             work_type='implementation', acceptance=['Тест проходит'], depends_on=[])]))
         self.ref = 'alpha-api/AL-03'
+        # Пауза и возобновление проверяются без передачи другому ИИ; передача — в своих тестах ниже.
+        w.action(dict(op='settings', changes=dict(failover=False)))
 
     def tearDown(self):
         self.env.stop(); super().tearDown()
@@ -115,7 +117,7 @@ class LimitTests(DataCase):
         self.launched_run()
         w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
         self.claude_log('sess-1', [self.limit_row(datetime.now(timezone.utc), resets=int(datetime.now(timezone.utc).timestamp()) + 3600)])
-        self.assertEqual(serve.limits_once(), dict(paused=['RUN-1'], resumed=[]))
+        self.assertEqual(serve.limits_once(), dict(paused=['RUN-1'], resumed=[], handed=[]))
         run = w.state()['runs'][0]
         self.assertEqual(run['paused']['by'], 'server')
         self.assertEqual(w.resume_due(), [])
@@ -124,7 +126,7 @@ class LimitTests(DataCase):
         with mock.patch.object(w, 'now', return_value=later), \
              mock.patch.object(launcher, 'launch', return_value=dict(pid=9, exe='claude.exe', session='sess-1', resumed=True)) as launch, \
              mock.patch.object(limits, 'detect', return_value=None):
-            self.assertEqual(serve.limits_once(), dict(paused=[], resumed=['RUN-1']))
+            self.assertEqual(serve.limits_once(), dict(paused=[], resumed=['RUN-1'], handed=[]))
         self.assertEqual(launch.call_args.kwargs['resume'], 'sess-1')
         self.assertIn('claim не нужен', launch.call_args.args[3])
         run = w.state()['runs'][0]
@@ -157,3 +159,52 @@ class LimitTests(DataCase):
         t = w.task_for(self.ref)
         run = dict(id='RUN-9', phase='execute')
         self.assertIn('op=pause', w.launch_prompt(t, run, w.recommendation(t), {}))
+
+    # --- передача другому ИИ по лимиту (TT-79)
+
+    def test_failover_hands_task_to_free_ai_with_its_route(self):
+        w.action(dict(op='settings', changes=dict(failover=True)))
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
+        with mock.patch.object(w, 'cli_ok', return_value=True):
+            r = w.action(dict(op='pause', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                              checkpoint='Сделан парсер, осталось подключить кеш и тест кеша'))
+        moved = r['handed_to']
+        self.assertEqual(moved['agent'], 'codex')
+        runs = {x['id']: x for x in w.state()['runs']}
+        self.assertEqual(runs['RUN-1']['status'], 'cancelled')
+        new = runs[moved['run']]
+        self.assertEqual((new['agent'], new['status'], new['auto_launch']), ('codex', 'queued', True))
+        self.assertEqual(new['packet']['route']['provider'], 'codex')
+        self.assertIn('Сделан парсер', new['failover']['handover'])
+        self.assertTrue(w.limited(None, 'claude'))
+        t = w.task_for(self.ref)
+        self.assertIn('Передано', t['status_note'])
+        prompt = w.launch_prompt(t, new, new['packet']['route'], {})
+        self.assertIn('Передача от Claude', prompt)
+        # Задача была назначена Claude, но принявший передачу Codex её берёт.
+        d = w.read('projects.json', {}); d['projects']['alpha-api']['backlog'][-1]['executor'] = 'claude'; w.save('projects.json', d)
+        w.action(dict(op='claim', ref=self.ref, run=new['id'], worker='codex-cli:' + new['id'], model=new['packet']['route']['model']))
+        self.assertEqual(w.task_for(self.ref)['claimed_by']['agent'], 'codex')
+
+    def test_no_free_ai_means_waiting_for_reset(self):
+        w.action(dict(op='settings', changes=dict(failover=True)))
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
+        s = w.state(); w.note_limit(s, 'codex', datetime.now(timezone.utc) + timedelta(hours=2), datetime.now(timezone.utc)); w.save('workflow.json', s)
+        r = w.action(dict(op='pause', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                          checkpoint='Сделан парсер, осталось подключить кеш и тест кеша'))
+        self.assertIn('paused', r)
+        self.assertEqual(w.state()['runs'][0]['status'], 'running')
+
+    def test_server_detected_limit_hands_over(self):
+        w.action(dict(op='settings', changes=dict(failover=True)))
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
+        self.claude_log('sess-1', [self.limit_row(datetime.now(timezone.utc), resets=int(datetime.now(timezone.utc).timestamp()) + 3600)])
+        with mock.patch.object(w, 'cli_ok', return_value=True):
+            out = serve.limits_once()
+        self.assertEqual(out['paused'], ['RUN-1'])
+        self.assertEqual(out['handed'][0]['agent'], 'codex')
+        # Ждущий запуск ИИ на лимите автозапуск не открывает, а переводит.
+        self.assertTrue(w.limited(None, 'claude'))

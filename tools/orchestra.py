@@ -128,20 +128,45 @@ def journal(s, pipe, ref, kind, text, role=None, stage=None):
     return e
 
 
-def role_agent(s, t, role):
-    roles = w.settings(s).get('roles') or {}
-    return roles.get(role) or t.get('executor') or w.settings(s)['default_executor']
+def role_order(s, t, role):
+    """Порядок ИИ для роли: закрепление владельцем, затем таблица роли; ревьюер — не тот, кто разрабатывал."""
+    pin = (w.settings(s).get('roles') or {}).get(role)
+    prof = P.ROUTING[role]
+    order = list(prof['prefer'])
+    if prof.get('cross'):
+        other = next((e.get('agent') for k, e in ((t.get('pipeline') or {}).get('roles') or {}).items()
+                      if k.endswith('/' + prof['cross']) and e.get('agent')), None)
+        if other:
+            order = [a for a in order if a != other] + [other]
+    if pin:
+        order = [pin] + [a for a in order if a != pin]
+    return order
 
 
-def role_route(t, role, agent):
-    """Маршрут роли: модель по сложности задачи, но не ниже класса роли."""
-    base = w.recommendation(dict(t, executor=agent, model=None, model_plan=None), agent=agent)
-    tier, floor = w.model_entry(base['model'])['tier'], P.ROLES[role]['min_tier']
-    if tier >= floor:
-        return dict(base, role=role)
-    model = w.LINEUP[agent][floor]; effort = w.model_entry(model)['effort']
-    return dict(base, model=model, effort=effort, role=role, total_token_budget=w.budget_for(model, effort),
-                reason=base['reason'] + '; роль «%s» — не ниже класса %d' % (P.ROLES[role]['title'], floor))
+def role_agent(s, t, role, exclude=()):
+    """ИИ роли: первый в порядке роли, у которого не исчерпан лимит токенов. Все на лимите — первый
+    (сессия встанет на паузу до сброса)."""
+    order = [a for a in role_order(s, t, role) if a not in exclude] or role_order(s, t, role)
+    free = [a for a in order if not w.limited(s, a)]
+    return (free or order)[0]
+
+
+def role_route(t, role, agent, gate=None):
+    """Модель и усилия роли: класс и усилия из таблицы роли по сложности задачи, не ниже min_tier роли."""
+    prof = P.ROUTING[role]
+    cx_ = w.cx.assess(t); level = cx_['tier']
+    tier = max(P.ROLES[role]['min_tier'], prof['tier'][level - 1])
+    model = w.LINEUP[agent][tier]
+    effort = prof['effort'][level - 1]
+    allowed = w.EFFORTS[agent]
+    if effort not in allowed:
+        effort = allowed[-1]            # у Codex выше high усилий нет
+    reason = ('роль «%s»: %s; сложность задачи %.2f (класс %d) → %s, усилия %s' % (
+        P.ROLES[role]['title'], prof['why'], cx_['score'], level, model, effort))
+    return dict(model=model, provider=agent, effort=effort, reason=reason, source='role', role=role,
+                complexity=dict(score=cx_['score'], tier=level), context_budget=2000,
+                total_token_budget=w.budget_for(model, effort), max_attempts=2, provisional=False,
+                policy_version=w.POLICY['version'])
 
 
 def ensure_worktree(t, pipe):
@@ -179,6 +204,7 @@ def active_run(s, ref, role=None, gate=None):
 def create_role_run(s, t, pipe, stage, role, at, feedback=None, gate=None):
     if active_run(s, t['ref'], role=role, gate=gate):
         return None
+    t = dict(t, pipeline=pipe)          # ревьюер выбирается по разработчику этого конвейера
     agent = role_agent(s, t, role)
     run = w.new_run(s, t['ref'], None, at)
     route = role_route(t, role, agent)
@@ -645,5 +671,6 @@ def role_prompt(t, run, route, worker=None):
               % ('op=gate' if role == 'teamlead' else 'op=handoff'),
               w.LIMIT_RULE % (t['ref'], run['id'], worker or '<id этой сессии>'),
               *([w.AUTONOMY_RULE] if w.autonomous() else []),
+              *([run['failover']['handover']] if run.get('failover') else []),
               'Работай только через MCP tt_work. Твой worker во всех вызовах: %s.' % (worker or '<id этой сессии>')]
     return '\n'.join(lines)

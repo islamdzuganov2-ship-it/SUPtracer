@@ -129,7 +129,7 @@ def autonomous(s=None):
 def settings(s=None):
     return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
                      reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={},
-                     max_sessions=MAX_SESSIONS, autonomy='step'),
+                     max_sessions=MAX_SESSIONS, autonomy='step', failover=True),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -295,6 +295,7 @@ def snapshot():
            if r.get('kind')=='запрос' and r.get('status')=='активна']
     import pipeline as P
     return dict(pipeline=P.spec_for_board(), teamlead=s.get('teamlead',[])[-80:], active_projects=s.get('active_projects',[]),
+                provider_limits={a:v for a,v in (s.get('provider_limits') or {}).items() if limited(s, a)},
                 projects={k:dict(workspace(k,p), next_id=next_id(p)) for k,p in projects.items()},
                 task_types=TASK_TYPES, directions=DIRECTIONS,
                 tasks=tasks, roots=roots, focus=s['focus'], runs=s['runs'][-50:], models=MODELS, policy=POLICY,
@@ -678,7 +679,12 @@ def start_plan(project, agents, sessions, tasks, runs, at):
         pinned=t.get('executor') if c['kind']=='task' else None
         free=[a for a in ([pinned] if pinned else agents) if count[a]<cap]
         if not free: continue      # назначенный ИИ уже получил свою долю сессий — задача в следующий запуск
-        agent=min(free, key=lambda a:(count[a], load[a], agents.index(a)))
+        free=[a for a in free if not limited(None, a, at)] or free     # ИИ с исчерпанным лимитом — последним
+        if c['kind']=='role':      # у роли свой порядок ИИ (таблица ролей), в пределах выбранных
+            import orchestra
+            pref=orchestra.role_order(state(), t, c['run']['role'])
+            free=sorted(free, key=lambda a:(limited(None, a, at), pref.index(a) if a in pref else 9))
+        agent=free[0] if c['kind']=='role' else min(free, key=lambda a:(count[a], load[a], agents.index(a)))
         if c['kind']=='role':
             import orchestra
             route=orchestra.role_route(t, c['run']['role'], agent)
@@ -764,7 +770,7 @@ def start_run(s, t, run, req, at):
     if run['status']=='queued' and run.get('agent') and run['agent']!=agent:
         raise ValueError('Запуск поставлен для ИИ %s' % run['agent'])
     if req.get('agent') and req['agent']!=agent: raise ValueError('Модель %s не принадлежит ИИ %s' % (model, req['agent']))
-    if t.get('executor') and t['executor']!=agent:
+    if t.get('executor') and t['executor']!=agent and not run.get('role') and not run.get('failover'):
         raise ValueError('Задача назначена ИИ %s; ИИ %s её не берёт' % (t['executor'], agent))
     extra_patch={}
     if run.get('role'):
@@ -772,6 +778,8 @@ def start_run(s, t, run, req, at):
         pipe=orchestra.materialize(s, t)
         if pipe: t=dict(t, pipeline=pipe); extra_patch['pipeline']=pipe
         p=orchestra.role_packet(t, run, agent)
+    elif run.get('failover') and run.get('packet'):
+        p=dict(packet(t['ref'], agent=agent), route=run['packet']['route'])   # маршрут передачи, а не назначенного ИИ
     else:
         p=packet(t['ref'], agent=agent)
     if model!=p['route']['model']:
@@ -828,6 +836,7 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
     if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
     lines.append(LIMIT_RULE % (ref, run['id'], worker or '<id этой сессии>'))
     if autonomous(): lines.append(AUTONOMY_RULE)
+    if run.get('failover'): lines.append(run['failover']['handover'])
     lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
 
@@ -860,6 +869,7 @@ def pause_patch(s, t, run, event, at, by, checkpoint=None):
                        message=(event or {}).get('message') or '', checkpoint=(checkpoint or '')[:2000],
                        session=(run.get('launch') or {}).get('session') or (event or {}).get('session'))
     agent=run.get('agent') or (run.get('launch') or {}).get('agent')
+    if agent: note_limit(s, agent, when, at, (event or {}).get('kind') or '', t['ref'])
     patch=dict(status_note='⏸ Пауза: исчерпан лимит токенов %s — возобновление %s UTC с места остановки' % (
         PROVIDERS.get(agent,{}).get('name','ИИ'), when.strftime('%d.%m %H:%M')))
     if run['status']=='running':
@@ -874,6 +884,91 @@ def pause_patch(s, t, run, event, at, by, checkpoint=None):
             '; точка остановки: '+checkpoint[:200] if checkpoint else ''), run.get('role'), run.get('stage'))
         patch['pipeline']=pipe
     return patch
+
+def note_limit(s, agent, until, at, kind='', ref=None):
+    """У ИИ исчерпан лимит токенов до until: новые запуски и передачи его обходят."""
+    lim=s.setdefault('provider_limits',{})
+    old=parse_time((lim.get(agent) or {}).get('until'))
+    if not old or old < until:
+        lim[agent]=dict(until=until.isoformat(timespec='seconds'), at=at.isoformat(), kind=kind, ref=ref)
+
+def limited(s, agent, at=None):
+    lim=((s if s is not None else state()).get('provider_limits') or {}).get(agent)
+    until=parse_time(lim['until']) if lim else None
+    return bool(until and until > (at or now()))
+
+def cli_ok(agent):
+    try:
+        import launcher
+        return bool(launcher.find_cli(agent))
+    except Exception:   # noqa: BLE001
+        return True
+
+def handover_text(src, run):
+    pz=run.get('paused') or {}
+    return ('Передача от %s: у него исчерпан лимит токенов (до %s UTC). %s' % (
+        PROVIDERS.get(src,{}).get('name',src), (pz.get('resume_at') or '?')[:16].replace('T',' '),
+        'Точка остановки: '+pz['checkpoint'] if pz.get('checkpoint') else
+        'Продолжи с текущего состояния рабочей копии и ветки задачи: незакоммиченные правки предыдущего ИИ лежат там же — проверь git status и git log.'))
+
+def failover(s, t, run, at):
+    """Лимит токенов у ИИ запуска: задача переходит к другому ИИ с моделью и усилиями под роль
+    и сложность. Нет свободного ИИ или передача выключена — None (запуск ждёт сброса лимита)."""
+    if not settings(s).get('failover', True) or run['status'] not in ('queued','running'): return None
+    src=run.get('agent') or (run.get('launch') or {}).get('agent')
+    if run.get('role'):
+        import orchestra, copy
+        order=orchestra.role_order(s, t, run['role'])
+    else:
+        order=list(PROVIDERS)
+    to=next((a for a in order if a!=src and not limited(s, a, at) and cli_ok(a)), None)
+    if not to: return None
+    text=handover_text(src, run)
+    run['pauses']=(run.get('pauses') or [])[-9:]+([dict(run.pop('paused'), handed_to=to)] if run.get('paused') else [])
+    run.update(status='cancelled', finished_at=at.isoformat(), evidence='Передано %s: %s' % (PROVIDERS[to]['name'], text))
+    info=dict(from_agent=src, run=run['id'], handover=text, at=at.isoformat())
+    if run.get('role'):
+        route=orchestra.role_route(t, run['role'], to)
+        new=new_run(s, t['ref'], None, at)
+        new.update(role=run['role'], stage=run.get('stage'), gate=run.get('gate'), phase='role', agent=to, auto_launch=True,
+                   packet=dict(route=route, phase='role'), failover=info)
+        pipe=copy.deepcopy(t['pipeline'])
+        if run['role']!='teamlead':
+            k=orchestra.key(run['stage'], run['role']); e=pipe['roles'].setdefault(k, {})
+            e.update(run=new['id'], state='queued', agent=to, feedback=list(e.get('feedback') or [])+[dict(id='handover', text='Передача между ИИ', detail=text)])
+        orchestra.journal(s, pipe, t['ref'], 'failover', '%s: %s → %s (%s · %s) — лимит токенов у %s' % (
+            run['role'], PROVIDERS.get(src,{}).get('name',src), PROVIDERS[to]['name'], route['model'], route['effort'],
+            PROVIDERS.get(src,{}).get('name',src)), run['role'], run.get('stage'))
+        patch=dict(pipeline=pipe, status='queued', claimed_by=None, status_note='Передано %s: лимит токенов у %s' % (PROVIDERS[to]['name'], PROVIDERS.get(src,{}).get('name',src)))
+    else:
+        route=recommendation(dict(t, executor=to, model=None), agent=to)
+        new=new_run(s, t['ref'], dict(packet(t['ref'], agent=to), route=route), at)
+        new.update(agent=to, auto_launch=True, failover=info)
+        patch=dict(status='queued', claimed_by=None, status_note='Передано %s (%s · %s): лимит токенов у %s' % (
+            PROVIDERS[to]['name'], route['model'], route['effort'], PROVIDERS.get(src,{}).get('name',src)))
+    return dict(run=new['id'], agent=to, model=route['model'], effort=route['effort'], patch=patch)
+
+def failover_run(ref, run_id):
+    """Сервер: после паузы по лимиту — передать задачу другому ИИ, если он свободен."""
+    with locked():
+        s=state(); at=now(); t=task_for(ref)
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
+        if not run: return None
+        out=failover(s, t, run, at)
+        if not out: return None
+        write_patches(s, {ref: out.pop('patch')}); save('workflow.json',s)
+        return out
+
+def reroute_queued(ref, run_id):
+    """Ждущий, ещё не открытый запуск закреплён за ИИ на лимите — перевести на свободный."""
+    with locked():
+        s=state(); at=now(); t=task_for(ref)
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status']=='queued' and not r.get('launched_at')),None)
+        if not run or not limited(s, run.get('agent'), at): return run and run.get('agent')
+        out=failover(s, t, run, at)
+        if not out: return None
+        write_patches(s, {ref: out.pop('patch')}); save('workflow.json',s)
+        return out['agent']
 
 def mark_paused(ref, run_id, event):
     """Сервер нашёл в журнале сессии отказ по лимиту: пауза до сброса лимита."""
@@ -1173,7 +1268,7 @@ def action(req):
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, autonomy')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent','failover'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, autonomy')
             if 'autonomy' in changes:
                 if changes['autonomy'] not in AUTONOMY: raise ValueError('autonomy: full (полная автономия) или step (пошаговое согласие)')
                 if changes['autonomy']=='full' and changes.pop('consent',None) is not True:
@@ -1187,7 +1282,7 @@ def action(req):
                 if not isinstance(changes['roles'],dict) or any(r not in P.ROLES or a not in PROVIDERS for r,a in changes['roles'].items()):
                     raise ValueError('roles: {роль: claude|codex}')
                 changes['roles']=dict(settings(s).get('roles') or {}, **changes['roles'])
-            for key in ('auto_merge','auto_launch_review','auto_pipeline'):
+            for key in ('auto_merge','auto_launch_review','auto_pipeline','failover'):
                 if key in changes and type(changes[key])!=bool: raise ValueError(key+': true или false')
             if 'default_executor' in changes and changes['default_executor'] not in PROVIDERS: raise ValueError('Неизвестный ИИ по умолчанию')
             if 'lease_minutes' in changes and (type(changes['lease_minutes'])!=int or not 5<=changes['lease_minutes']<=480): raise ValueError('Аренда: от 5 до 480 минут')
@@ -1350,6 +1445,9 @@ def action(req):
                     if resets is not None and parse_time(str(resets).replace('Z','+00:00')) is None: raise ValueError('resets_at: время ISO 8601')
                     patch.update(pause_patch(s, t, run, dict(resets_at=resets, session=(run.get('launch') or {}).get('session')), at, 'agent', cp))
                     extra=dict(paused=run['paused'])
+                    moved=failover(s, dict(t, **{k:v for k,v in patch.items() if k=='pipeline'}), run, at)
+                    if moved:
+                        patch.update(moved.pop('patch')); extra=dict(handed_to=moved)
                 elif op=='review':
                     import autocheck
                     if run['status']!='running' or run.get('phase')!='review': raise ValueError('Заключение принимает только выполняемый запуск ревью')

@@ -52,6 +52,17 @@ def _stages(role):
     return [s for s in (st if isinstance(st, tuple) else (st,)) if s]
 
 
+def routing_line(role):
+    rt = P.ROUTING[role]
+    names = dict(claude='Claude', codex='GPT / Codex')
+    order = ' → '.join(names[a] for a in rt['prefer'])
+    return ('**ИИ, модель и усилия** (назначает сервер, не меняй сам): %s%s; класс модели по сложности задачи '
+            '(простая / средняя / сложная) — %s, усилия — %s. Почему: %s. Если у ИИ кончились токены, задача '
+            'переходит к следующему ИИ с той же ролью и точкой остановки.' % (
+                order, ' (ревьюер — всегда другой ИИ, чем разработчик)' if rt.get('cross') else '',
+                ' / '.join(str(max(x, P.ROLES[role]['min_tier'])) for x in rt['tier']), ' / '.join(rt['effort']), rt['why']))
+
+
 def render(role):
     r = P.ROLES[role]
     stages = _stages(role)
@@ -60,7 +71,7 @@ def render(role):
             % (r['title'], where, r['mission'], r['title']))
     out = ['---', 'name: ' + name(role), 'description: "%s"' % desc.replace('"', "'"), '---', '',
            '<!-- %s из tools/pipeline.py — не править руками: py tools/pm.py skills build -->' % MARK, '',
-           '# %s' % r['title'], '', r['mission'], '',
+           '# %s' % r['title'], '', r['mission'], '', routing_line(role), '',
            ('**Участок доски:** %s. Ты — оркестратор: все роли сообщают тебе о завершении работы через журнал тимлида; '
             'сервер сам проверяет DoR/DoD и двигает задачу, а ты решаешь ворота и эскалации.' % where) if role == 'teamlead' else
            ('**Участок доски:** %s. Ты сообщаешь о завершении работы тимлиду-оркестратору: '

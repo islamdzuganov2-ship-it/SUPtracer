@@ -104,9 +104,13 @@ def dispatch_once():
             continue
         if busy >= conf.get("max_sessions", 4):
             break                 # лимит одновременных сессий: остальные откроются, когда эти закончат
-        # Роли конвейера — по auto_pipeline, ревью старого потока — по auto_launch_review.
-        if not (conf["auto_pipeline"] if r.get("role") else conf["auto_launch_review"]):
+        # Роли конвейера — по auto_pipeline, ревью старого потока — по auto_launch_review; передачи по лимиту — всегда.
+        if not (conf["auto_pipeline"] if r.get("role") else (conf["auto_launch_review"] or r.get("failover"))):
             continue
+        if workflow.limited(None, r.get("agent")):
+            if not workflow.reroute_queued(r["ref"], r["id"]):
+                continue               # все ИИ на лимите: откроется после сброса
+            continue                   # переведён новым запуском — откроется в следующем проходе
         if time.time() - _auto_attempts.get(r["id"], 0) < 300:
             continue
         _auto_attempts[r["id"]] = time.time()
@@ -122,13 +126,17 @@ def limits_once():
     """Лимит токенов: найти отказ в журналах открытых сессий — пауза; срок паузы вышел —
     продолжить ту же сессию с места остановки."""
     import workflow, limits
-    paused, resumed = [], []
+    paused, resumed, handed = [], [], []
     for r in workflow.state()["runs"]:
         if r.get("status") not in ("queued", "running") or not r.get("launch") or r.get("paused"):
             continue
         event = limits.detect(r)
         if event and workflow.mark_paused(r["ref"], r["id"], event):
             paused.append(r["id"])
+            # Есть свободный ИИ — задача переходит к нему сразу, а не ждёт сброса лимита.
+            moved = workflow.failover_run(r["ref"], r["id"])
+            if moved:
+                handed.append(dict(moved, from_run=r["id"]))
     for r in workflow.resume_due():
         if time.time() - _auto_attempts.get("resume:" + r["id"], 0) < 300:
             continue
@@ -138,7 +146,7 @@ def limits_once():
             resumed.append(r["id"])
         except Exception as e:   # noqa: BLE001 — причина видна на карточке, повтор через 5 минут
             workflow.mark_launch_error(r["ref"], r["id"], "Возобновление после лимита: %s" % e)
-    return dict(paused=paused, resumed=resumed)
+    return dict(paused=paused, resumed=resumed, handed=handed)
 
 
 def resume_session(run, nudge=False):
@@ -286,9 +294,11 @@ def launch_session(req):
     project = workflow.read("projects.json", {})["projects"][t["project"]]
     ws = workflow.workspace(t["project"], project)
     base = ws["active_copy"] or ws["path"]
-    if run.get("phase") == "review":
-        # Ревьюер смотрит ту самую ветку, которую сделал исполнитель.
+    if run.get("phase") == "review" or run.get("failover"):
+        # Ревьюер — и ИИ, принявший задачу по лимиту токенов, — работают в ветке исполнителя.
         worktree = workflow.task_branch(workflow.state(), ref)
+        if worktree is None and run.get("failover") and base and req.get("isolate", True):
+            worktree = launcher.ensure_worktree(base, agent, t["id"])
     else:
         worktree = launcher.ensure_worktree(base, agent, t["id"]) if req.get("isolate", True) and base else None
     cwd = (worktree or {}).get("path") or base

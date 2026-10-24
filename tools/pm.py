@@ -407,6 +407,22 @@ def cmd_disconnect(args):
     return run("connect.py", "disconnect", *args)
 
 
+def cmd_idea(args):
+    """Идея в конвейер: pm.py idea <проект> "название" --text "что и зачем"."""
+    import argparse, json
+    ap = argparse.ArgumentParser(prog="pm.py idea")
+    ap.add_argument("project"); ap.add_argument("title"); ap.add_argument("--text", required=True)
+    a = ap.parse_args(args)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import workflow
+    try:
+        print(json.dumps(workflow.action(dict(op="idea", project=a.project, title=a.title, text=a.text, source="cli")),
+                         ensure_ascii=False))
+        return 0
+    except ValueError as e:
+        print(e); return 1
+
+
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
             "work": lambda args: run("workflow.py", *args),
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
@@ -415,7 +431,8 @@ COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "c
             "codex-memory": lambda args: run("codex_memory.py", *args),
             "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
             "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
-            "connect": cmd_connect, "disconnect": cmd_disconnect}
+            "connect": cmd_connect, "disconnect": cmd_disconnect, "idea": cmd_idea,
+            "skills": lambda args: run("skills.py", *args)}
 
 
 def foreign_copy():

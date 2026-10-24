@@ -396,6 +396,12 @@ def cmd_connect(args, provider="claude"):
         print("Подключайте из основного каталога системы или добавьте --force.")
         return 1
     codex_ok = True
+    try:
+        import skills   # скиллы ролей конвейера — тем клиентам, которых подключаем
+        rep = skills.install(("claude", "codex") if provider == "all" else (provider,))
+        print("Скиллы ролей конвейера: %s" % rep)
+    except Exception as e:   # noqa: BLE001 — подключение не должно падать из-за скиллов
+        print("Скиллы ролей не установлены: %s" % e)
     if provider in ("codex", "all"):
         codex_ok, out = install_codex_mcp()
         print(out)

@@ -114,11 +114,22 @@ def state():
 REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна доработка', 'spec_change': 'Принято с изменением ТЗ'}
 
 MAX_SESSIONS = 4   # окон ИИ, которые сервер досок держит открытыми одновременно
+# Режим согласия владельца: step — окна и вопросы на каждом шаге; full — одно согласие на всё:
+# сессии без окон, без вопросов, релиз в main без отдельного «да». В удалённый репозиторий — никогда.
+AUTONOMY = ('step', 'full')
+AUTONOMY_RULE = ('ПОЛНАЯ АВТОНОМИЯ: владелец заранее дал согласие на всю работу. Не задавай вопросов владельцу '
+                 'и не жди ответа — его не будет: неясное решай сам в рамках скоупа своей роли, допущения записывай '
+                 'в артефакт (раздел «Допущения»). Что без владельца решить нельзя — op=escalate к тимлиду с вариантами. '
+                 'Работа заканчивается только вызовом tt_work: handoff, return, escalate или pause (для задач вне '
+                 'конвейера — finish или fail). Закончить ответом без такого вызова нельзя — сервер вернёт тебя к работе.')
+
+def autonomous(s=None):
+    return settings(s)['autonomy']=='full'
 
 def settings(s=None):
     return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
                      reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={},
-                     max_sessions=MAX_SESSIONS),
+                     max_sessions=MAX_SESSIONS, autonomy='step'),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -283,7 +294,7 @@ def snapshot():
     roots=[{k:r.get(k) for k in ('id','title','project')} for r in read('memory/index.json',{}).get('records',[])
            if r.get('kind')=='запрос' and r.get('status')=='активна']
     import pipeline as P
-    return dict(pipeline=P.spec_for_board(), teamlead=s.get('teamlead',[])[-80:],
+    return dict(pipeline=P.spec_for_board(), teamlead=s.get('teamlead',[])[-80:], active_projects=s.get('active_projects',[]),
                 projects={k:dict(workspace(k,p), next_id=next_id(p)) for k,p in projects.items()},
                 task_types=TASK_TYPES, directions=DIRECTIONS,
                 tasks=tasks, roots=roots, focus=s['focus'], runs=s['runs'][-50:], models=MODELS, policy=POLICY,
@@ -570,8 +581,52 @@ def open_sessions(runs, at=None, hours=12):
     edge=(at or now())-timedelta(hours=hours); n=0
     for r in runs:
         if r.get('paused') or not r.get('launched_at'): continue
+        pid=(r.get('launch') or {}).get('pid')
+        if pid and r.get('status') in ('queued','running'):
+            import launcher
+            if not launcher.alive(pid): continue      # окно закрыто или сессия завершилась
         if r.get('status')=='running' or (r.get('status')=='queued' and (parse_time(r['launched_at']) or edge) > edge): n+=1
     return n
+
+def mark_nudged(ref, run_id, info, reason):
+    """Сессия закончилась без сдачи этапа — открыта снова (та же сессия) с напоминанием."""
+    with locked():
+        s=state(); at=now(); t=task_for(ref)
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
+        if not run: return None
+        run['nudges']=run.get('nudges',0)+1
+        launches=list(run.get('launches') or []); launches.append(dict(info, at=at.isoformat(), nudge=reason))
+        run.update(launches=launches[-5:], launch=dict(run.get('launch') or {}, **info), last_nudge_at=at.isoformat())
+        run.pop('launch_error',None)
+        if run['status']=='running':
+            until=(at+timedelta(minutes=settings(s)['lease_minutes'])).isoformat(); run['lease_until']=until
+        patch=dict(status_note='Сессия завершилась без сдачи — продолжена автоматически (%d)' % run['nudges'])
+        if t.get('pipeline'):
+            import orchestra, copy
+            pipe=copy.deepcopy(t['pipeline'])
+            orchestra.journal(s, pipe, ref, 'nudge', '%s: %s — сессия продолжена (%d-й раз)' % (run.get('role') or run['id'], reason, run['nudges']),
+                              run.get('role'), run.get('stage'))
+            patch['pipeline']=pipe
+        write_patches(s, {ref: patch}); save('workflow.json',s)
+        return run
+
+def session_lost(ref, run_id, reason):
+    """Сессия несколько раз закончилась без сдачи: роль — эскалация тимлиду, задача вне конвейера — провал запуска."""
+    with locked():
+        s=state(); at=now(); t=task_for(ref)
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status'] in ('queued','running')),None)
+        if not run: return None
+        run.update(status='failed', finished_at=at.isoformat(), evidence='Сессия завершалась без сдачи: '+reason)
+        if t.get('pipeline') and run.get('role') and run['role']!='teamlead':
+            import orchestra, copy
+            pipe=copy.deepcopy(t['pipeline'])
+            pipe['roles'].setdefault(orchestra.key(run['stage'], run['role']), {}).update(state='pending', feedback=None)
+            orchestra.escalate(s, t, pipe, at, '%s: %s' % (run['role'], reason), run['role'])
+            write_patches(s, {ref: dict(pipeline=pipe, status='blocked', status_note='Эскалация тимлиду: '+reason[:300], claimed_by=None)})
+        else:
+            write_patches(s, {ref: dict(status='queued', claimed_by=None, status_note='Сессия завершалась без сдачи: '+reason[:300])})
+        save('workflow.json',s)
+        return run
 
 def start_plan(project, agents, sessions, tasks, runs, at):
     """«Запустить проект»: какие задачи бэклога и каким ИИ отдать одним нажатием.
@@ -772,6 +827,7 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
                             else 'Если работа идёт дольше 40 минут — tt_work op=heartbeat. По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
     if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
     lines.append(LIMIT_RULE % (ref, run['id'], worker or '<id этой сессии>'))
+    if autonomous(): lines.append(AUTONOMY_RULE)
     lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
 
@@ -1117,7 +1173,13 @@ def action(req):
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, autonomy')
+            if 'autonomy' in changes:
+                if changes['autonomy'] not in AUTONOMY: raise ValueError('autonomy: full (полная автономия) или step (пошаговое согласие)')
+                if changes['autonomy']=='full' and changes.pop('consent',None) is not True:
+                    raise ValueError('Полная автономия включается только с явным согласием владельца (consent=true)')
+                changes['autonomy_changed']=dict(at=at.isoformat(), to=changes['autonomy'], by=req.get('by') or 'владелец')
+            changes.pop('consent',None)
             if 'max_sessions' in changes and (type(changes['max_sessions'])!=int or not 1<=changes['max_sessions']<=12): raise ValueError('max_sessions: от 1 до 12 одновременных сессий')
             if 'reviewer' in changes and changes['reviewer'] not in ('same','other',*PROVIDERS): raise ValueError('Ревьюер: same, other или ИИ')
             if 'roles' in changes:
@@ -1141,6 +1203,13 @@ def action(req):
             if req.get('dry_run', True): return dict(plan, dry_run=True)
             if not plan['picks']: raise ValueError(plan['reason'])
             batch='B-%s' % at.strftime('%Y%m%d%H%M%S')
+            # Проект в автономной работе: все ждущие роли конвейера открываются сервером по мере
+            # освобождения мест (max_sessions), а не только этот пакет.
+            act=s.setdefault('active_projects',[])
+            if project not in act: act.append(project)
+            for r in s['runs']:
+                if r['ref'].split('/')[0]==project and r.get('role') and r['status']=='queued' and not r.get('launched_at'):
+                    r['auto_launch']=True
             byref={t['ref']:t for t in snap['tasks']}
             for p in plan['picks']:
                 if p['kind']=='role':   # роль конвейера: ждущий запуск переходит к выбранному ИИ
@@ -1151,6 +1220,15 @@ def action(req):
                 p['run']=run['id']
             save('workflow.json',s)
             return dict(plan, dry_run=False, batch=batch)
+        elif op=='stop_project':
+            project=req.get('project')
+            if project not in snapshot()['projects']: raise ValueError('Неизвестный проект')
+            s['active_projects']=[p for p in s.get('active_projects',[]) if p!=project]
+            held=0
+            for r in s['runs']:
+                if r['ref'].split('/')[0]==project and r.get('role') and r['status']=='queued' and not r.get('launched_at') and r.get('auto_launch'):
+                    r['auto_launch']=False; held+=1
+            extra=dict(project=project, held=held)
         elif op=='split':
             project=req.get('project'); agents=req.get('agents') or list(PROVIDERS)
             snap=snapshot()

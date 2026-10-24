@@ -76,7 +76,7 @@
       <select id="board-status" aria-label="Этап"><option value="">Все этапы</option>${COLUMNS().map(k=>`<option value="${k}" ${status===k?'selected':''}>${esc(stageTitle(k))}</option>`).join('')}</select>
       <select id="board-priority" aria-label="Приоритет"><option value="">Все приоритеты</option>${['🔴','🟡','🟢'].map(k=>`<option ${priority===k?'selected':''}>${k}</option>`).join('')}</select>
       <select id="board-ai" aria-label="ИИ-исполнитель"><option value="">Все ИИ</option>${Object.entries(providers()).map(([k,p])=>`<option value="${esc(k)}" ${ai===k?'selected':''}>${esc(p.name)}</option>`).join('')}<option value="none" ${ai==='none'?'selected':''}>Не назначены</option><option value="busy" ${ai==='busy'?'selected':''}>Заняты сейчас</option></select>
-      <label><input type="checkbox" id="board-only-focus" ${onlyFocus?'checked':''}> Только фокус</label><button id="board-next">Что взять следующим</button><button id="board-plan">Добавить план</button><button id="board-idea">💡 Идея</button><button id="board-refresh">Обновить доски</button><button id="board-split">⇄ Распределить между ИИ</button><label>ИИ по умолчанию <select id="board-default-ai" aria-label="ИИ по умолчанию">${Object.entries(providers()).map(([k,p])=>`<option value="${esc(k)}" ${data.settings?.default_executor===k?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><details class="board-settings"><summary>⚙ Исполнение и ревью</summary><label>Ревью делает <select id="board-reviewer">${[['same','тот же ИИ, что выполнял'],['other','другой ИИ'],...Object.entries(providers()).map(([k,p])=>[k,'всегда '+p.name])].map(([v,l])=>`<option value="${esc(v)}" ${data.settings?.reviewer===v?'selected':''}>${esc(l)}</option>`).join('')}</select></label><label><input type="checkbox" id="board-auto-review" ${data.settings?.auto_launch_review!==false?'checked':''}> Открывать ревью автоматически после автопроверки</label><label><input type="checkbox" id="board-auto-merge" ${data.settings?.auto_merge!==false?'checked':''}> Сливать ветку в базовую после одобренного ревью</label><label><input type="checkbox" id="board-auto-pipeline" ${data.settings?.auto_pipeline!==false?'checked':''}> Конвейер: открывать сессии ролей автоматически</label><label>Одновременно сессий, не больше <select id="board-max-sessions">${[1,2,3,4,5,6,8,10,12].map(v=>`<option value="${v}"${(data.settings?.max_sessions||4)===v?' selected':''}>${v}</option>`).join('')}</select></label>${Object.keys(data.pipeline?.roles||{}).map(r=>`<label>${esc(roleTitle(r))} <select data-role-ai="${esc(r)}">${[['','по умолчанию'],...Object.entries(providers()).map(([k,p])=>[k,p.name])].map(([v,l])=>`<option value="${esc(v)}" ${(data.settings?.roles||{})[r]===v||(!v&&!(data.settings?.roles||{})[r])?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`).join('')}</details></div>${parallel()}${teamleadJournal()}`;
+      <label><input type="checkbox" id="board-only-focus" ${onlyFocus?'checked':''}> Только фокус</label><button id="board-next">Что взять следующим</button><button id="board-plan">Добавить план</button><button id="board-idea">💡 Идея</button><button id="board-refresh">Обновить доски</button><button id="board-split">⇄ Распределить между ИИ</button><label>ИИ по умолчанию <select id="board-default-ai" aria-label="ИИ по умолчанию">${Object.entries(providers()).map(([k,p])=>`<option value="${esc(k)}" ${data.settings?.default_executor===k?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><details class="board-settings"><summary>⚙ Исполнение и ревью</summary><label>Ревью делает <select id="board-reviewer">${[['same','тот же ИИ, что выполнял'],['other','другой ИИ'],...Object.entries(providers()).map(([k,p])=>[k,'всегда '+p.name])].map(([v,l])=>`<option value="${esc(v)}" ${data.settings?.reviewer===v?'selected':''}>${esc(l)}</option>`).join('')}</select></label><label><input type="checkbox" id="board-auto-review" ${data.settings?.auto_launch_review!==false?'checked':''}> Открывать ревью автоматически после автопроверки</label><label><input type="checkbox" id="board-auto-merge" ${data.settings?.auto_merge!==false?'checked':''}> Сливать ветку в базовую после одобренного ревью</label><label>Согласие владельца <select id="board-autonomy"><option value="step"${data.settings?.autonomy!=='full'?' selected':''}>пошаговое — окна, ИИ спрашивает</option><option value="full"${data.settings?.autonomy==='full'?' selected':''}>полная автономия — одно согласие</option></select></label><label><input type="checkbox" id="board-auto-pipeline" ${data.settings?.auto_pipeline!==false?'checked':''}> Конвейер: открывать сессии ролей автоматически</label><label>Одновременно сессий, не больше <select id="board-max-sessions">${[1,2,3,4,5,6,8,10,12].map(v=>`<option value="${v}"${(data.settings?.max_sessions||4)===v?' selected':''}>${v}</option>`).join('')}</select></label>${Object.keys(data.pipeline?.roles||{}).map(r=>`<label>${esc(roleTitle(r))} <select data-role-ai="${esc(r)}">${[['','по умолчанию'],...Object.entries(providers()).map(([k,p])=>[k,p.name])].map(([v,l])=>`<option value="${esc(v)}" ${(data.settings?.roles||{})[r]===v||(!v&&!(data.settings?.roles||{})[r])?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`).join('')}</details></div>${parallel()}${teamleadJournal()}`;
   const policyTemplate=()=>`<details><summary>Модели и правила экономии</summary><p>${esc(data.policy.availability)}. ${esc(data.policy.evidence)}.</p><ul>${data.policy.rules.map(v=>`<li>${esc(v)}</li>`).join('')}</ul><table><thead><tr><th>ИИ</th><th>Модель</th><th>Сильные стороны</th><th>Ограничения</th></tr></thead><tbody>${data.models.map(m=>`<tr><td>${esc(aiName(m.provider))}</td><td>${esc(m.id)}${Object.values(data.lineup?.[m.provider]||{}).includes(m.id)?'':' · только явно'}</td><td>${esc(m.strength)}</td><td>${esc(m.weakness)}</td></tr>`).join('')}</tbody></table></details><div id="board-list"></div>`;
   function cardTemplate(t){
     const i=data.tasks.indexOf(t),run=data.runs.find(r=>r.ref===t.ref&&['queued','running'].includes(r.status));
@@ -84,7 +84,7 @@
   }
   const columnTemplate=(c,ts)=>{const items=ts.filter(t=>column(t)===c);const st=STAGES().find(s=>s.id===c);
     return `<div class="board-column" data-column="${c}"><h3>${esc(stageTitle(c))} · ${items.length}</h3>${st?`<div class="board-stage-roles">${st.roles.map(r=>`<span class="board-role${st.optional?.[r]?' board-role-opt':''}" title="${esc(data.pipeline.roles[r].mission)}">${esc(roleTitle(r))}</span>`).join('')}${st.gate?'<span class="board-role board-role-gate" title="Ворота ИИ-тимлида">🚦 тимлид</span>':''}${st.owner_approval?'<span class="board-role board-role-gate" title="Нужно «да» владельца">👤 владелец</span>':''}</div><button class="board-dod" data-stage-info="${c}">DoR / DoD</button>`:''}${items.map(cardTemplate).join('')}</div>`;};
-  const projectTemplate=(k,ts)=>`<section class="board-project"><h2>${data.focus.includes(k)?'★ ':''}${esc(data.projects[k].name)} · ${ts.length} <button class="board-start" data-start="${esc(k)}">▶ Запустить проект</button> <button class="board-start" data-to-idea="${esc(k)}">💡 Всё в «Идея»</button></h2><div class="board-columns">${COLUMNS().map(c=>columnTemplate(c,ts)).join('')}</div></section>`;
+  const projectTemplate=(k,ts)=>`<section class="board-project"><h2>${data.focus.includes(k)?'★ ':''}${esc(data.projects[k].name)} · ${ts.length} ${(data.active_projects||[]).includes(k)?`<span class="chip ok">в автономной работе</span> <button class="board-start" data-stop-project="${esc(k)}">⏸ Остановить проект</button>`:`<button class="board-start" data-start="${esc(k)}">▶ Запустить проект</button>`} <button class="board-start" data-to-idea="${esc(k)}">💡 Всё в «Идея»</button></h2><div class="board-columns">${COLUMNS().map(c=>columnTemplate(c,ts)).join('')}</div></section>`;
   const filtered=()=>data.tasks.filter(t=>(!project||t.project===project)&&(!onlyFocus||data.focus.includes(t.project))&&(!status||column(t)===status)&&(!priority||t.priority===priority)&&aiMatch(t)&&(!query||(t.title+' '+t.id).toLowerCase().includes(query.toLowerCase())));
   const saveFilters=()=>{try {localStorage.setItem('tt-board-filters',JSON.stringify({query,project,status,priority,ai,onlyFocus}));}catch{}};
   // Полная отрисовка: панель инструментов, список, баннеры.
@@ -111,6 +111,9 @@
     root.querySelector('#board-idea').onclick=ideaDialog;
     root.querySelector('#board-auto-pipeline').onchange=e=>change({op:'settings',changes:{auto_pipeline:e.target.checked}});
     root.querySelector('#board-max-sessions').onchange=e=>change({op:'settings',changes:{max_sessions:Number(e.target.value)}});
+    root.querySelector('#board-autonomy').onchange=e=>{const v=e.target.value;e.target.value=data.settings?.autonomy||'step';autonomyDialog(v);};
+    root.querySelectorAll('[data-stop-project]').forEach(el=>el.onclick=async()=>{try{const r=await api({op:'stop_project',project:el.dataset.stopProject});await refresh();message.textContent=`Проект остановлен: ${r.held} ждущих ролей не будут открываться; открытые сессии доработают.`;}catch(e){message.textContent=e.message;}});
+    root.querySelectorAll('[data-run-log]').forEach(el=>el.onclick=()=>sessionLog(el.dataset.runLog));
     root.querySelectorAll('[data-role-ai]').forEach(el=>el.onchange=()=>change({op:'settings',changes:{roles:{[el.dataset.roleAi]:el.value||data.settings?.default_executor}}}));
     root.querySelector('#board-plan').textContent='＋ Новая задача';
     BOARD_EXTRAS.decorateToolbar(root,data,project);
@@ -252,6 +255,9 @@
     '[data-role-ai]':'Какой ИИ выполняет эту роль во всех задачах конвейера',
     '#board-refresh':'Перечитать задачи и запуски с сервера',
     '#board-split':'Предложить распределение задач проекта между ИИ — с предпросмотром',
+    '#board-autonomy':'Пошаговое — окна, ИИ спрашивает разрешения; полная автономия — одно согласие: фон, без вопросов, релиз в main без отдельного «да»',
+    '[data-stop-project]':'Не открывать новые сессии ролей проекта; уже открытые доработают свой шаг',
+    '[data-run-log]':'Что делает фоновая сессия: последние строки её журнала',
     '[data-to-idea]':'Перенести все незакрытые задачи проекта в «Идея»: агенты пройдут их заново по конвейеру; сначала предпросмотр',
     '#board-max-sessions':'Сколько окон ИИ сервер держит открытыми одновременно: автозапуск и «Запустить проект» не превышают это число',
     '[data-move="idea"]':'Начать задачу заново по конвейеру: PO → анализ → разработка → ревью → тест → main',
@@ -309,6 +315,28 @@
     dialog.querySelector('#start-edit')?.addEventListener('click',()=>{dialog.close();BOARD_EXTRAS.form({data,project,task:t,modal,dialog,api,refresh});});
     dialog.querySelector('#start-ai')?.addEventListener('click',async()=>{dialog.close();try{await openSession(t,agent);}catch(e){message.textContent=e.message;}});
     dialog.querySelector('#start-manual').onclick=()=>{dialog.close();change({op:'status',ref:t.ref,status:'in_progress'});};
+  }
+  // Режим согласия: одно согласие на всё или вопросы на каждом шаге.
+  function autonomyDialog(v){
+    if(v==='step'){change({op:'settings',changes:{autonomy:'step'}});return;}
+    modal('Полная автономия — одно согласие',`<p>С этим согласием сервер досок ведёт задачи сам:</p><ul>
+      <li>Сессии ИИ открываются <b>без окон</b>, в фоне; ход работы — кнопка «📄 Журнал» у роли.</li>
+      <li>Claude работает в режиме <b>auto</b>: безопасные действия разрешаются сами, опасные классификатор Claude Code отклоняет. Codex — в песочнице рабочей копии с автоматической проверкой запросов (<code>--approve-for-me</code>).</li>
+      <li>Агенты <b>не задают вопросов</b>: неясное решают в рамках роли и записывают допущения; блокер — эскалация тимлиду.</li>
+      <li>Сессия, закончившая ответ без сдачи этапа, продолжается автоматически; после ${2} попыток — эскалация тимлиду.</li>
+      <li>После ворот тимлида «тест → main» релиз в main выполняется <b>без отдельного «да»</b>.</li>
+      <li>Одновременно — не больше ${data.settings?.max_sessions||4} сессий. Исчерпан лимит токенов — пауза до сброса.</li>
+      <li>В удалённый репозиторий (GitHub) система <b>никогда</b> не отправляет — это остаётся за вами.</li></ul>
+      <p>Вернуть пошаговое согласие можно в любой момент; уже открытые фоновые сессии доработают свой шаг.</p>
+      <p><button id="autonomy-yes" class="primary">Даю согласие на полную автономию</button></p><p id="autonomy-error" class="board-start-error" role="alert"></p>`);
+    dialog.querySelector('#autonomy-yes').onclick=async()=>{try{await api({op:'settings',changes:{autonomy:'full',consent:true}});dialog.close();await refresh();message.textContent='Полная автономия включена.';}catch(e){dialog.querySelector('#autonomy-error').textContent=e.message;}};
+  }
+  async function sessionLog(run){
+    try{const r=await fetch('/api/sessionlog?run='+encodeURIComponent(run));const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Журнала нет');
+      modal('Журнал сессии '+run+(j.data.alive?' · работает':' · завершена'),`<pre class="board-log">${esc(j.data.log||'пусто')}</pre><p><button id="log-again">Обновить</button></p>`);
+      dialog.querySelector('#log-again').onclick=()=>sessionLog(run);
+      const pre=dialog.querySelector('.board-log');pre.scrollTop=pre.scrollHeight;
+    }catch(e){message.textContent=e.message;}
   }
   // Перенос в «Идея»: задача начинается заново по конвейеру — PO, анализ, разработка…
   async function toIdea(ref,projectKey){
@@ -429,9 +457,11 @@
     if(p.stage==='done')return `<div class="board-review">✅ В main: все этапы сданы по DoD</div>`;
     const roles=(st?.roles||[]).filter(r=>!st.optional?.[r]||(p.needs||{})[st.optional[r]]);
     const chips=roles.map(r=>{const e=(p.roles||{})[p.stage+'/'+r]||{};const [ic,tx]=ROLE_STATE[e.state]||ROLE_STATE.pending;
-      const run=data.runs.find(x=>x.id===e.run&&x.status==='queued'&&!x.launched_at);
+      const any=data.runs.find(x=>x.id===e.run&&['queued','running'].includes(x.status));
+      const run=any&&any.status==='queued'&&!any.launched_at?any:null;
+      const live=any&&any.launched_at?(any.paused?'⏸ пауза по лимиту до '+time(any.paused.resume_at):any.status==='running'?'работает':'сессия открыта, ждёт claim'):'';
       const fails=(e.result||[]).filter(x=>x.ok===false);
-      return `<div class="board-role-row" title="${esc(fails.map(f=>f.id+': '+f.detail).join('\n'))}">${ic} <b>${esc(roleTitle(r))}</b> — ${esc(tx)}${fails.length?` · ✗ DoD: ${fails.length}`:''}${run&&canLaunch(run.agent)?` <button data-role-run="${esc(run.id)}" data-role-task="${i}">Открыть</button>`:''}</div>`;}).join('');
+      return `<div class="board-role-row" title="${esc(fails.map(f=>f.id+': '+f.detail).join('\n'))}">${ic} <b>${esc(roleTitle(r))}</b> — ${esc(live||tx)}${fails.length?` · ✗ DoD: ${fails.length}`:''}${run&&canLaunch(run.agent)?` <button data-role-run="${esc(run.id)}" data-role-task="${i}">Открыть</button>`:''}${any?.launch?.headless?` <button data-run-log="${esc(any.id)}">📄 Журнал</button>`:''}</div>`;}).join('');
     const gate=st?.gate&&roles.every(r=>((p.roles||{})[p.stage+'/'+r]||{}).state==='done')?`<div class="board-role-row">🚦 Ворота тимлида: ${esc((p.gates||{})[st.gate]?.decision||'ждут решения')}</div>`:'';
     const approve=p.stage==='deploy_main'&&(p.gates||{}).release?.decision==='approve'&&!(p.approvals||{}).release?`<button class="board-approve" data-approve="${i}">👤 Одобрить релиз в main</button>`:'';
     const note=t.status_note?`<div class="board-note${t.status==='blocked'?'':' board-note-soft'}">${t.status==='blocked'?'⛔ ':''}${esc(t.status_note)}</div>`:'';

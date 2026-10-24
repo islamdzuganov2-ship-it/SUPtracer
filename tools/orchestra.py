@@ -183,7 +183,8 @@ def create_role_run(s, t, pipe, stage, role, at, feedback=None, gate=None):
     run = w.new_run(s, t['ref'], None, at)
     route = role_route(t, role, agent)
     run.update(role=role, stage=stage, phase='role', agent=agent, gate=gate,
-               auto_launch=w.settings(s).get('auto_pipeline', True) and not (stage == 'idea' and pipe.get('pause_auto')),
+               auto_launch=w.settings(s).get('auto_pipeline', True) and (not (stage == 'idea' and pipe.get('pause_auto'))
+                                                                        or t['project'] in s.get('active_projects', [])),
                packet=dict(route=route, phase='role'))
     if role != 'teamlead':
         k = key(stage, role); prev = pipe['roles'].get(k) or {}
@@ -218,6 +219,15 @@ def orchestrate(s, t, pipe, at):
             dor = P.check_dor(stage, ctx_for(t, pipe), pipe)
             st['dor'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in dor]
             fails = [d for it, ok, d in dor if not ok]
+            waiting_owner = bool(fails) and all(it['check'] == 'owner_release' for it, ok, _ in dor if not ok)
+            if waiting_owner and w.autonomous(s):
+                # Полная автономия: согласие владельца на релиз дано заранее, один раз.
+                ch = w.settings(s).get('autonomy_changed') or {}
+                pipe.setdefault('approvals', {})['release'] = dict(at=at.isoformat(), by='владелец заранее: полная автономия', consent_at=ch.get('at'))
+                journal(s, pipe, t['ref'], 'approved', 'Релиз в main одобрен по согласию владельца на полную автономию (%s)' % (ch.get('at') or '')[:16])
+                dor = P.check_dor(stage, ctx_for(t, pipe), pipe)
+                st['dor'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in dor]
+                fails = [d for it, ok, d in dor if not ok]
             if fails:
                 waiting_owner = all(it['check'] == 'owner_release' for it, ok, _ in dor if not ok)
                 note = ('Ждёт одобрения релиза владельцем' if waiting_owner else
@@ -634,5 +644,6 @@ def role_prompt(t, run, route, worker=None):
               '3) Сделай работу, закоммить артефакты, затем %s — это уведомление тимлиду. Не принятая передача вернёт список несделанных пунктов.'
               % ('op=gate' if role == 'teamlead' else 'op=handoff'),
               w.LIMIT_RULE % (t['ref'], run['id'], worker or '<id этой сессии>'),
+              *([w.AUTONOMY_RULE] if w.autonomous() else []),
               'Работай только через MCP tt_work. Твой worker во всех вызовах: %s.' % (worker or '<id этой сессии>')]
     return '\n'.join(lines)

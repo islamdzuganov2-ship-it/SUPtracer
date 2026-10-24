@@ -324,8 +324,16 @@ TOOLS.append({"name": "tt_work", "title": "Планирование и испо�
         "tasks": {"type":"array", "items":{"type":"object"}},
         "projects": {"type":"array", "items":STR}, "changes":{"type":"object"}}, ["op"]),
     "annotations": dict(WRITE, idempotentHint=False, title="Планирование и исполнение")})
+OWNER_SETTINGS = {'autonomy', 'consent', 'max_sessions', 'auto_merge'}
+
+
 def t_work(a):
+    """Решения владельца ИИ через MCP не принимает: согласие на автономию, лимит сессий,
+    автослияние, одобрение релиза, массовый перенос в «Идея» — только на доске."""
     import workflow
+    op = a.get('op')
+    if op == 'approve_release' or (op == 'to_idea' and a.get('dry_run') is False) or             (op == 'settings' and OWNER_SETTINGS & set((a.get('changes') or {}))):
+        raise ToolError('Это решение владельца: оно принимается только на доске TaskTreker')
     return json.dumps(workflow.action(a), ensure_ascii=False)
 HANDLERS['tt_work'] = t_work
 

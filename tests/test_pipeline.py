@@ -310,3 +310,25 @@ class PipelineTests(DataCase):
         plan = w.action(dict(op='start', project='alpha-api', agents=['claude', 'codex']))
         self.assertEqual({p['kind'] for p in plan['picks']}, {'role'})
         self.assertLessEqual(plan['sessions'], 4)
+
+    def test_full_autonomy_releases_and_project_runs_itself(self):
+        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)))
+        self.to_testing()
+        self.do_role('qa', 'testing', signoff=True)
+        self.do_role('devops', 'deploy_test')
+        gate = self.claim('teamlead', gate='release')
+        w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve',
+                      notes='QA Sign-off есть, деплой в тест чистый, риски релиза приняты'))
+        t = self.task()
+        self.assertEqual(t['pipeline']['stage'], 'deploy_main')
+        self.assertIn('полная автономия', t['pipeline']['approvals']['release']['by'])   # без отдельного да владельца
+        self.assertTrue(self.run_of('devops'))
+        # Запуск проекта: все ждущие роли проекта открываются сервером по мере мест; остановка снимает это.
+        w.action(dict(op='to_idea', project='alpha-api', dry_run=False))
+        w.action(dict(op='start', project='alpha-api', agents=['claude'], sessions=1, dry_run=False))
+        pos = [r for r in w.state()['runs'] if r.get('role') == 'product_owner' and r['status'] == 'queued']
+        self.assertTrue(pos and all(r['auto_launch'] for r in pos))
+        self.assertIn('alpha-api', w.snapshot()['active_projects'])
+        r = w.action(dict(op='stop_project', project='alpha-api'))
+        self.assertEqual(r['held'], len(pos))
+        self.assertNotIn('alpha-api', w.snapshot()['active_projects'])

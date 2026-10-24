@@ -627,6 +627,10 @@ def start_run(s, t, run, req, at):
     until=(at+timedelta(minutes=minutes)).isoformat()
     run.update(status='running',worker=worker,model=model,agent=agent,packet=p,phase=p['phase'],
                claimed_at=at.isoformat(),heartbeat_at=at.isoformat(),lease_until=until)
+    # Доработка — факт для метрик: изменение кода по итогам проверки, а не первая реализация.
+    if not run.get('role') and p['phase'] not in ('review','assess'):
+        rework='autocheck' if (t.get('auto_check') or {}).get('ok') is False else 'review' if (t.get('review') or {}).get('verdict')=='changes' else None
+        if rework: run['rework']=rework
     if run.get('role'):
         import pipeline as P
         return dict(status='in_progress', status_note='%s: %s (%s)' % (P.ROLES[run['role']]['title'], PROVIDERS[agent]['name'], worker),
@@ -667,6 +671,7 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
                             else 'tt_work op=review с verdict (approve, spec_change или changes), criteria по каждому критерию и conclusion. Код не меняй.' if run.get('phase')=='review'
                             else 'Если работа идёт дольше 40 минут — tt_work op=heartbeat. По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
     if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
+    lines.append(LIMIT_RULE % (ref, run['id'], worker or '<id этой сессии>'))
     lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
 
@@ -688,6 +693,90 @@ def mark_launched(ref, run_id, info):
         run.update(launched_at=launches[-1]['at'], launches=launches[-5:], launch=launches[-1])
         save('workflow.json',s)
         return run
+
+def pause_patch(s, t, run, event, at, by, checkpoint=None):
+    """Пауза запуска по исчерпанию лимита токенов: метка и запуск остаются за исполнителем
+    до возобновления, аренда продлена до него — задачу никто не перехватит."""
+    import limits
+    when=limits.resume_at(event, at)
+    run['paused']=dict(reason='limit', by=by, at=at.isoformat(), resume_at=when.isoformat(timespec='seconds'),
+                       resets_at=(event or {}).get('resets_at'), kind=(event or {}).get('kind') or '',
+                       message=(event or {}).get('message') or '', checkpoint=(checkpoint or '')[:2000],
+                       session=(run.get('launch') or {}).get('session') or (event or {}).get('session'))
+    agent=run.get('agent') or (run.get('launch') or {}).get('agent')
+    patch=dict(status_note='⏸ Пауза: исчерпан лимит токенов %s — возобновление %s UTC с места остановки' % (
+        PROVIDERS.get(agent,{}).get('name','ИИ'), when.strftime('%d.%m %H:%M')))
+    if run['status']=='running':
+        until=(when+timedelta(minutes=settings(s)['lease_minutes'])).isoformat()
+        run['lease_until']=until
+        patch['claimed_by']=dict(t.get('claimed_by') or {}, lease_until=until, paused_until=run['paused']['resume_at'])
+    if t.get('pipeline'):
+        import orchestra, copy
+        pipe=copy.deepcopy(t['pipeline'])
+        orchestra.journal(s, pipe, t['ref'], 'paused', '%s: пауза по лимиту токенов (%s), возобновление %s UTC%s' % (
+            run.get('role') or run['id'], 'агент' if by=='agent' else 'сервер по журналу сессии', when.strftime('%d.%m %H:%M'),
+            '; точка остановки: '+checkpoint[:200] if checkpoint else ''), run.get('role'), run.get('stage'))
+        patch['pipeline']=pipe
+    return patch
+
+def mark_paused(ref, run_id, event):
+    """Сервер нашёл в журнале сессии отказ по лимиту: пауза до сброса лимита."""
+    with locked():
+        s=state(); at=now()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status'] in ('queued','running')),None)
+        if not run or run.get('paused'): return None
+        write_patches(s, {ref: pause_patch(s, task_for(ref), run, event, at, 'server')})
+        save('workflow.json',s); return run['paused']
+
+def resume_due(at=None):
+    at=at or now()
+    return [r for r in state()['runs'] if r.get('status') in ('queued','running') and r.get('paused')
+            and (parse_time(r['paused'].get('resume_at')) or at) <= at]
+
+def mark_resumed(ref, run_id, info, by='server'):
+    """Сессия продолжена после паузы: пауза уходит в историю, аренда — обычная."""
+    with locked():
+        s=state(); at=now(); t=task_for(ref)
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r.get('paused')),None)
+        if not run: return None
+        done=dict(run.pop('paused'), resumed_at=at.isoformat(), resumed_by=by, resumed_session=bool((info or {}).get('resumed')))
+        run['pauses']=(run.get('pauses') or [])[-9:]+[done]
+        patch=dict(status_note='Возобновлено после лимита токенов: %s' % (run.get('role') or run.get('phase') or 'исполнение'))
+        if run['status']=='running':
+            until=(at+timedelta(minutes=settings(s)['lease_minutes'])).isoformat()
+            run.update(lease_until=until, heartbeat_at=at.isoformat())
+            cb=dict(t.get('claimed_by') or {}, lease_until=until); cb.pop('paused_until',None); patch['claimed_by']=cb
+        if info:
+            launches=list(run.get('launches') or []); launches.append(dict(info, at=at.isoformat()))
+            run.update(launches=launches[-5:], launch=dict(run.get('launch') or {}, **info))
+        if t.get('pipeline'):
+            import orchestra, copy
+            pipe=copy.deepcopy(t['pipeline'])
+            orchestra.journal(s, pipe, ref, 'resumed', '%s: работа возобновлена после лимита токенов (%s)' % (
+                run.get('role') or run['id'], 'та же сессия' if (info or {}).get('resumed') else 'новая сессия' if info else by),
+                run.get('role'), run.get('stage'))
+            patch['pipeline']=pipe
+        write_patches(s, {ref: patch}); save('workflow.json',s)
+        return done
+
+LIMIT_RULE=('Лимит токенов: если пришло предупреждение, что лимит почти исчерпан, — закоммить незавершённое в ветку задачи '
+            '(WIP), затем tt_work op=pause ref=%s run=%s worker=%s checkpoint="что сделано, что осталось, следующий шаг" '
+            'и остановись. Сервер сам продолжит эту же сессию после сброса лимита (время сброса — из журнала сессии, '
+            'без него — через 5 часов). Если лимит оборвал тебя без предупреждения, сервер увидит это в журнале сам. '
+            'После «продолжай» не начинай заново: продолжи с точки остановки.')
+
+def resume_prompt(t, run):
+    """Первая реплика после паузы: та же сессия продолжает, новая — получает точку остановки."""
+    pz=run.get('paused') or {}; worker=run.get('worker') or worker_id(run, run.get('agent') or 'claude')
+    lines=['Лимит токенов восстановлен — продолжай задачу TaskTreker %s с места остановки.' % t['ref']]
+    if pz.get('checkpoint'): lines.append('Точка остановки: %s' % pz['checkpoint'])
+    if run['status']=='running':
+        lines.append('Запуск %s уже твой (worker %s): claim не нужен. Сначала tt_work op=heartbeat ref=%s run=%s worker=%s, '
+                     'затем tt_work op=packet ref=%s%s — проверь, что изменилось, и продолжай.' % (
+                         run['id'], worker, t['ref'], run['id'], worker, t['ref'], ' run='+run['id'] if run.get('role') else ''))
+    else:
+        lines.append('Запуск %s ещё не принят: выполни задание из первой реплики — начни с tt_work op=claim.' % run['id'])
+    return '\n'.join(lines)
 
 def task_branch(s, ref):
     """Рабочая копия и ветка последнего запуска исполнения задачи."""
@@ -729,6 +818,10 @@ def autocheck_run(ref, run_id):
     with locked():
         s=state(); at=now()
         patch=dict(auto_check=result)
+        for r in s['runs']:   # итог проверки — и в запуске: история проверок для метрик
+            if r['id']==run_id and r['ref']==ref:
+                r['autocheck']=dict(ok=bool(result['ok']), at=at.isoformat(),
+                                    checks=[dict(name=c.get('name'), ok=bool(c.get('ok'))) for c in result.get('checks') or []])
         if result['ok']:
             agent=reviewer_for(s, run.get('agent'))
             route=recommendation(dict(t, status='review'), agent=agent)
@@ -1025,7 +1118,7 @@ def action(req):
                 patch.update(status=target, claimed_by=None, status_history=history,
                              status_note=reason if target in ('blocked','cancelled') else None)
                 if current=='done': patch.update(completed_at=None)
-            elif op in ('claim','heartbeat','finish','fail','cancel','assess','review'):
+            elif op in ('claim','heartbeat','finish','fail','cancel','assess','review','pause'):
                 run=next((r for r in s['runs'] if r['id']==req.get('run') and r['ref']==ref),None)
                 if not run: raise ValueError('Запуск не найден')
                 if op=='claim':
@@ -1037,8 +1130,23 @@ def action(req):
                     minutes=req.get('minutes', settings(s)['lease_minutes'])
                     if type(minutes)!=int or not 5<=minutes<=480: raise ValueError('Аренда: от 5 до 480 минут')
                     until=(at+timedelta(minutes=minutes)).isoformat()
+                    if run.get('paused'):   # исполнитель продолжил сам (владелец написал «продолжай» в окне)
+                        run['pauses']=(run.get('pauses') or [])[-9:]+[dict(run.pop('paused'), resumed_at=at.isoformat(), resumed_by='agent')]
+                        patch['status_note']='Возобновлено после лимита токенов'
                     run.update(heartbeat_at=at.isoformat(), lease_until=until)
                     patch['claimed_by']=dict(t.get('claimed_by') or {}, agent=run.get('agent'), worker=run['worker'], run=run['id'], model=run.get('model'), lease_until=until)
+                    patch['claimed_by'].pop('paused_until',None)
+                elif op=='pause':
+                    if run['status']!='running': raise ValueError('Пауза — для выполняемого запуска')
+                    if req.get('worker')!=run.get('worker'): raise ValueError('Ставит паузу принявший исполнитель')
+                    if run.get('paused'): raise ValueError('Запуск уже на паузе до %s' % run['paused']['resume_at'])
+                    if req.get('reason','limit')!='limit': raise ValueError('reason: limit — пауза только по лимиту токенов')
+                    cp=(req.get('checkpoint') or '').strip()
+                    if len(cp)<20: raise ValueError('checkpoint: что сделано, что осталось и следующий шаг (не короче 20 символов)')
+                    resets=req.get('resets_at')
+                    if resets is not None and parse_time(str(resets).replace('Z','+00:00')) is None: raise ValueError('resets_at: время ISO 8601')
+                    patch.update(pause_patch(s, t, run, dict(resets_at=resets, session=(run.get('launch') or {}).get('session')), at, 'agent', cp))
+                    extra=dict(paused=run['paused'])
                 elif op=='review':
                     import autocheck
                     if run['status']!='running' or run.get('phase')!='review': raise ValueError('Заключение принимает только выполняемый запуск ревью')

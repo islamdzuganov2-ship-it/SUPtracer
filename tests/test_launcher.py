@@ -76,7 +76,9 @@ class LauncherTests(DataCase):
              mock.patch.object(launcher,'open_window',return_value=4242) as win:
             r=serve.launch_session(dict(ref='alpha-api/AL-03',agent='claude'))
         cmd,cwd,env=win.call_args[0][0],win.call_args[0][1],win.call_args[0][2]
-        self.assertEqual(cmd[:5],['C:/bin/claude.exe','--model','claude-haiku-5-5','--effort','medium'])
+        self.assertEqual(cmd[:2],['C:/bin/claude.exe','--session-id'])   # сервер знает сессию: пауза по лимиту, --resume
+        self.assertEqual(cmd[3:7],['--model','claude-haiku-5-5','--effort','medium'])
+        self.assertEqual(w.state()['runs'][0]['launch']['session'],cmd[2])
         self.assertIn('tt_work op=claim ref=alpha-api/AL-03 run=RUN-1 model=claude-haiku-5-5 worker=claude-cli:RUN-1',cmd[-1])
         self.assertIn('ai/claude/al-03',cmd[-1])
         self.assertEqual(cwd,r['worktree']['path'])
@@ -101,7 +103,7 @@ class LauncherTests(DataCase):
         run=w.state()['runs'][0]
         self.assertEqual((len(w.state()['runs']),run['agent'],r['route']['model']),(1,'claude','claude-haiku-5-5'))
         self.assertEqual(run['repins'][0]['from_agent'],'codex')
-        self.assertEqual(win.call_args[0][0][1:3],['--model','claude-haiku-5-5'])   # окно — именно Claude
+        self.assertEqual(win.call_args[0][0][3:5],['--model','claude-haiku-5-5'])   # окно — именно Claude
         # Без явного выбора сервер держится закрепления запуска, а не ИИ по умолчанию.
         w.action(dict(op='settings',changes={'default_executor':'codex'}))
         with mock.patch.object(launcher,'find_cli',return_value='C:/bin/x.exe'), mock.patch.object(launcher,'open_window',return_value=6):

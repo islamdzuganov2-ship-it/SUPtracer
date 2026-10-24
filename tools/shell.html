@@ -84,10 +84,18 @@
 </section>
 
 <section class="page" id="page-proj" role="tabpanel" aria-labelledby="tab-proj" hidden>
+  <div class="proj-bar">
+    <label for="proj-select">Проект</label>
+    <select class="sel" id="proj-select" title="Обзор портфеля или один проект: его карточка и графики реализации по спринтам"></select>
+    <span class="proj-hint" id="proj-hint"></span>
+  </div>
   <div id="alertsWrap"></div>
-  <div class="section-h">Сводка</div>
-  <div id="tableWrap"></div>
-  <div class="section-h">Проекты подробно</div>
+  <div class="proj-overview">
+    <div class="section-h">Сводка</div>
+    <div id="tableWrap"></div>
+  </div>
+  <div id="proj-metrics"></div>
+  <div class="section-h" id="cards-h">Проекты подробно</div>
   <div id="cards"></div>
   <div id="discoveredWrap"></div>
   <div id="inboxWrap"></div>

@@ -556,15 +556,14 @@ document.getElementById('cards').innerHTML = order.map(k => {
   </div></details>`;
 }).join('');
 
-document.querySelectorAll('table.pf tbody tr').forEach(tr => tr.onclick = () => {
-  const d = document.getElementById('p-' + tr.dataset.k);
-  d.open = true;
-  d.scrollIntoView({behavior: 'smooth', block: 'start'});
-});
-document.querySelectorAll('.related-project').forEach(button => button.onclick = () => {
-  const card = document.getElementById('p-' + button.dataset.project);
-  if (card) {card.open = true; card.scrollIntoView({behavior:'smooth',block:'start'});}
-});
+// Строка сводки и связанный проект выбирают проект в списке: карточка и графики по спринтам.
+const openProject = k => {
+  if (window.PROJVIEW) return PROJVIEW.select(k, true);
+  const d = document.getElementById('p-' + k);
+  if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+};
+document.querySelectorAll('table.pf tbody tr').forEach(tr => tr.onclick = () => openProject(tr.dataset.k));
+document.querySelectorAll('.related-project').forEach(button => button.onclick = () => openProject(button.dataset.project));
 
 const CM = D.comments.comments || [];
 document.getElementById('commentsWrap').innerHTML = `<div class="section-h">Комментарии — ${CM.length}</div>` +
@@ -735,8 +734,7 @@ function showTab(which) {
       onProject: k => {
         if (!P[k] && !discoveredKeys.includes(k)) return;
         showTab('proj');
-        const d = document.getElementById('p-' + k);
-        if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+        openProject(k);
       },
       onEmpty: () => {
         document.getElementById('treeWrap').textContent =
@@ -744,6 +742,7 @@ function showTab(which) {
       },
     });
   } else TREEVIEW.close();
+  if (cur === 'proj' && window.PROJVIEW) PROJVIEW.shown();   // графики меряют ширину видимой страницы
   try { history.replaceState(null, '', '#' + cur); } catch (e) {}
 }
 // Тема — до первой вкладки: древо читает её при открытии.

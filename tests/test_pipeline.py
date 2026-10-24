@@ -229,3 +229,52 @@ class PipelineTests(DataCase):
                         self.assertLess(it['art'], len(spec['artifacts']), (role, it['id']))
         ids = [it['id'] for r in P.ROLES for st in P.ORDER for it in (P.role_dod(r, st) if r in P.STAGE[st]['roles'] else [])]
         self.assertEqual(len(ids), len(set(ids)))
+
+    # --- реестр дефектов (TT-73)
+
+    def to_testing(self):
+        self.ref = self.idea()
+        self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
+                     needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
+        for role in ('system_analyst', 'solution_architect'):
+            self.do_role(role, 'analysis')
+        gate = self.claim('teamlead', gate='analysis')
+        w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve', notes='Анализ согласован, можно разрабатывать'))
+        self.do_role('developer', 'development', extra=[('app.py', 'x = 3\n'), ('tests/test_app.py', 'assert True\n')])
+        self.do_role('reviewer', 'review', verdict='approve')
+        self.assertEqual(self.task()['pipeline']['stage'], 'testing')
+
+    def test_defects_registered_and_fix_method_checked_by_commits(self):
+        self.to_testing()
+        run = self.claim('qa'); self.write('qa', 'testing')
+        with self.assertRaisesRegex(ValueError, 'defects'):
+            w.action(dict(op='return', ref=self.ref, run=run, worker='w-' + run, to_stage='development',
+                          reason='Пустой портфель роняет выгрузку: исключение вместо пустого файла'))
+        r = w.action(dict(op='return', ref=self.ref, run=run, worker='w-' + run, to_stage='development',
+                          reason='Пустой портфель роняет выгрузку: исключение вместо пустого файла',
+                          defects=[dict(title='Выгрузка падает на пустом портфеле', severity='major', level='integration', test='TC-2')]))
+        self.assertEqual(r['defects'], ['D-1'])
+        d = self.task()['pipeline']['defects'][0]
+        self.assertEqual((d['status'], d['found_by'], d['level']), ('open', 'qa', 'integration'))
+        self.assertTrue(d['base'])
+        dev = self.claim('developer')
+        self.assertEqual(w.action(dict(op='packet', ref=self.ref, run=dev))['defects'][0]['id'], 'D-1')
+        wt = Path(self.task()['pipeline']['worktree']['path'])
+        (wt/'app.py').write_text('x = 4\n', encoding='utf-8'); git('commit', '-qam', 'fix', cwd=wt)
+        r = self.handoff('developer', 'development', dev)
+        self.assertIn('defect:D-1', {f['id'] for f in r['failed']})                       # без способа — не сдать
+        r = self.handoff('developer', 'development', dev, fixes={'D-1': dict(method='test_fix', test_level='unit')})
+        self.assertIn('тестов', next(f for f in r['failed'] if f['id'] == 'defect:D-1')['detail'])   # тесты не правились
+        r = self.handoff('developer', 'development', dev, fixes={'D-1': dict(method='spec_change')})
+        self.assertFalse(r['accepted'])                                                  # ТЗ не правилось
+        r = self.handoff('developer', 'development', dev, fixes={'D-1': dict(method='code_to_spec', note='Пустой список → пустой CSV')})
+        self.assertTrue(r['accepted'], r)
+        d = self.task()['pipeline']['defects'][0]
+        self.assertEqual((d['status'], d['fix']['method'], d['fix']['files']), ('fixed', 'code_to_spec', ['app.py']))
+        self.do_role('reviewer', 'review', verdict='approve')
+        self.do_role('qa', 'testing', signoff=True)
+        self.assertEqual(self.task()['pipeline']['defects'][0]['status'], 'verified')
+        hist = self.task()['pipeline']['history']
+        dev_handoffs = [h['accepted'] for h in hist if h['kind'] == 'handoff' and h['role'] == 'developer']
+        self.assertEqual(dev_handoffs, [True, False, False, False, True])
+        self.assertTrue(any(h['kind'] == 'return' and h['role'] == 'qa' and h['defects'] == ['D-1'] for h in hist))

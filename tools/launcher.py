@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 ENV_BIN = {'claude': 'TASKTREKER_CLAUDE_BIN', 'codex': 'TASKTREKER_CODEX_BIN'}
@@ -56,13 +57,18 @@ def status():
     return out
 
 
-def command(provider, exe, model, effort, prompt, cwd, edits=False):
+def command(provider, exe, model, effort, prompt, cwd, edits=False, session=None, resume=False):
     """edits=True — сессия роли конвейера: правка файлов в рабочей копии задачи без вопросов
-    (Claude: acceptEdits; Codex: песочница workspace-write), команды — по подтверждению."""
+    (Claude: acceptEdits; Codex: песочница workspace-write), команды — по подтверждению.
+
+    session — идентификатор сессии: Claude получает его при открытии (--session-id), чтобы
+    сервер нашёл журнал сессии; resume=True продолжает эту сессию после паузы по лимиту
+    (claude --resume, codex resume) — с местом остановки и всей перепиской."""
     if provider == 'claude':
-        return [exe, '--model', model, '--effort', effort, *(['--permission-mode', 'acceptEdits'] if edits else []), prompt]
+        head = ['--resume', session] if resume else (['--session-id', session] if session else [])
+        return [exe, *head, '--model', model, '--effort', effort, *(['--permission-mode', 'acceptEdits'] if edits else []), prompt]
     if provider == 'codex':
-        return [exe, '-m', model, '-c', 'model_reasoning_effort="%s"' % effort, '-C', cwd,
+        return [exe, *(['resume', session] if resume else []), '-m', model, '-c', 'model_reasoning_effort="%s"' % effort, '-C', cwd,
                 *(['-s', 'workspace-write', '-a', 'on-request'] if edits else []), prompt]
     raise ValueError('Неизвестный ИИ: ' + str(provider))
 
@@ -112,14 +118,18 @@ def open_window(cmd, cwd, env_extra=None):
     return proc.pid
 
 
-def launch(provider, model, effort, prompt, cwd, env_extra=None, edits=False):
+def launch(provider, model, effort, prompt, cwd, env_extra=None, edits=False, resume=None):
+    """Открыть сессию. resume — идентификатор сессии, которую продолжить (пауза по лимиту).
+    Новой сессии Claude сервер сам назначает идентификатор; Codex назначает свой — его
+    находит limits.codex_session по папке и времени запуска."""
     exe = find_cli(provider)
     if not exe:
         raise ValueError(status()[provider]['note'])
     if not cwd or not Path(cwd).is_dir():
         raise ValueError('Рабочая папка проекта не найдена: %s' % (cwd or 'не указана'))
-    cmd = command(provider, exe, model, effort, prompt, cwd, edits)
-    return dict(pid=open_window(cmd, cwd, env_extra), exe=exe, cwd=cwd)
+    session = resume or (str(uuid.uuid4()) if provider == 'claude' else None)
+    cmd = command(provider, exe, model, effort, prompt, cwd, edits, session=session, resume=bool(resume))
+    return dict(pid=open_window(cmd, cwd, env_extra), exe=exe, cwd=cwd, session=session, resumed=bool(resume))
 
 
 def _codex_home():

@@ -113,12 +113,65 @@ def dispatch_once():
     return started
 
 
+def limits_once():
+    """Лимит токенов: найти отказ в журналах открытых сессий — пауза; срок паузы вышел —
+    продолжить ту же сессию с места остановки."""
+    import workflow, limits
+    paused, resumed = [], []
+    for r in workflow.state()["runs"]:
+        if r.get("status") not in ("queued", "running") or not r.get("launch") or r.get("paused"):
+            continue
+        event = limits.detect(r)
+        if event and workflow.mark_paused(r["ref"], r["id"], event):
+            paused.append(r["id"])
+    for r in workflow.resume_due():
+        if time.time() - _auto_attempts.get("resume:" + r["id"], 0) < 300:
+            continue
+        _auto_attempts["resume:" + r["id"]] = time.time()
+        try:
+            resume_session(r)
+            resumed.append(r["id"])
+        except Exception as e:   # noqa: BLE001 — причина видна на карточке, повтор через 5 минут
+            workflow.mark_launch_error(r["ref"], r["id"], "Возобновление после лимита: %s" % e)
+    return dict(paused=paused, resumed=resumed)
+
+
+def resume_session(run):
+    """Продолжить сессию после паузы по лимиту: та же сессия (claude --resume, codex resume),
+    без её идентификатора — новая сессия с точкой остановки."""
+    import workflow, launcher, limits
+    t = workflow.task_for(run["ref"])
+    launch = run.get("launch") or {}
+    agent = launch.get("agent") or run.get("agent") or workflow.settings()["default_executor"]
+    session = (run.get("paused") or {}).get("session") or launch.get("session")
+    if not session and agent == "codex":
+        session = limits.session_of(run)[0]
+    route = (run.get("packet") or {}).get("route") or {}
+    if run.get("role"):
+        import orchestra
+        route = orchestra.role_route(t, run["role"], agent)
+    if not route.get("model"):
+        route = workflow.recommendation(t, agent=agent)
+    prompt = workflow.resume_prompt(t, run)
+    if not session:
+        prompt += "\n\n" + (orchestra.role_prompt(t, run, route, run.get("worker") or workflow.worker_id(run, agent))
+                             if run.get("role") else workflow.action(dict(op="prompt", ref=run["ref"]))["prompt"]
+                             if run["status"] == "queued" else "")
+    cwd = launch.get("cwd")
+    opened = launcher.launch(agent, route["model"], route["effort"], prompt.strip(), cwd, edits=bool(run.get("role")), resume=session,
+                             env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix(),
+                                        "TASKTREKER_SYSTEM": os.path.dirname(os.path.abspath(workflow.__file__))})
+    return workflow.mark_resumed(run["ref"], run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]),
+                                                             session=opened.get("session"), resumed=opened.get("resumed"), cwd=cwd, agent=agent))
+
+
 def dispatcher(interval=15):
     while True:
         time.sleep(interval)
         try:
             import orchestra
             orchestra.tick()          # задачи, ждавшие DoR (например, одобрения владельца)
+            limits_once()             # пауза по лимиту токенов и возобновление с места остановки
             dispatch_once()
         except Exception as e:   # noqa: BLE001 — сервер досок не должен падать из-за автозапуска
             sys.stderr.write("автозапуск: %s\n" % e)
@@ -139,7 +192,7 @@ def launch_role(t, run, req):
     opened = launcher.launch(agent, route["model"], route["effort"], prompt, cwd, edits=True,
                              env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix(),
                                         "TASKTREKER_SYSTEM": os.path.dirname(os.path.abspath(workflow.__file__))})
-    workflow.mark_launched(t["ref"], run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]),
+    workflow.mark_launched(t["ref"], run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]), session=opened.get("session"),
                                                       cwd=cwd, worktree=wt or None, agent=agent, role=run["role"]))
     return dict(run=run["id"], agent=agent, pid=opened["pid"], cwd=cwd, worktree=wt or None, role=run["role"],
                 route=route, worker=worker, prompt=prompt)
@@ -180,7 +233,7 @@ def launch_session(req):
     opened = launcher.launch(agent, info["route"]["model"], info["route"]["effort"], info["prompt"], cwd,
                              env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix(),
                                         "TASKTREKER_SYSTEM": os.path.dirname(os.path.abspath(workflow.__file__))})
-    workflow.mark_launched(ref, run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]),
+    workflow.mark_launched(ref, run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]), session=opened.get("session"),
                                                  cwd=cwd, worktree=worktree, agent=agent))
     return dict(run=run["id"], agent=agent, pid=opened["pid"], cwd=cwd, worktree=worktree,
                 route=info["route"], worker=info["worker"], prompt=info["prompt"])

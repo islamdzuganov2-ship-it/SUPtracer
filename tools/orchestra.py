@@ -11,6 +11,7 @@
 """
 import copy
 
+import filekinds as fk
 import pipeline as P
 import workflow as w
 
@@ -19,6 +20,88 @@ MAX_LOOPS = 3             # возвратов между одной парой 
 RETURN_TO = {'reviewer': ['development'], 'qa': ['development'], 'devops': ['development', 'testing'],
              'developer': ['analysis'], 'system_analyst': ['idea'], 'solution_architect': ['idea'],
              'designer': ['idea'], 'marketer': ['idea']}
+
+
+# Реестр дефектов: кто нашёл, на каком уровне теста, чем исправлено. Способ исправления
+# проверяется по коммитам ветки задачи после возврата, а не по словам исполнителя.
+SEVERITIES = ('critical', 'major', 'minor')
+FIX_METHODS = dict(spec_change='изменение ТЗ', code_to_spec='приведение кода к ТЗ',
+                   workaround='обходная мера', test_fix='поправка теста')
+DEFECT_ROLES = ('reviewer', 'qa', 'devops')
+
+
+def history(pipe, kind, **e):
+    """Полная история передач и возвратов для метрик: журнал режется, история — нет (до 400 событий)."""
+    h = pipe.setdefault('history', []); h.append(dict(e, kind=kind, at=e.get('at') or w.now().isoformat()))
+    pipe['history'] = h[-400:]
+
+
+def branch_head(ctx):
+    if not ctx.repo or not ctx.branch:
+        return None
+    return P._git(['rev-parse', ctx.branch], ctx.repo).stdout.strip() or None
+
+
+def changed_since(ctx, commit):
+    """Файлы, изменённые в ветке задачи после коммита (момента регистрации дефекта)."""
+    if not ctx.repo or not ctx.branch:
+        return []
+    rng = '%s..%s' % (commit, ctx.branch) if commit else ctx.branch
+    out = P._git(['-c', 'core.quotepath=false', 'log', '--format=', '--name-only', rng], ctx.repo).stdout
+    return sorted({f.strip() for f in out.splitlines() if f.strip()})
+
+
+def register_defects(pipe, run, raw, ctx, at, required):
+    """Проверить и записать дефекты возврата. Ничего не пишет, если хоть один неверен."""
+    raw = raw if raw is not None else []
+    if not isinstance(raw, list) or any(not isinstance(d, dict) for d in raw):
+        raise ValueError('defects: список {title, severity, level[, test]}')
+    if required and not raw:
+        raise ValueError('defects: возврат QA регистрирует дефекты — хотя бы один {title, severity, level}')
+    for d in raw:
+        if not isinstance(d.get('title'), str) or len(d['title'].strip()) < 10:
+            raise ValueError('defects: суть дефекта (title) не короче 10 символов')
+        if d.get('severity') not in SEVERITIES: raise ValueError('defects: severity — critical, major или minor')
+        if d.get('level') not in fk.LEVELS: raise ValueError('defects: level — уровень теста: ' + ', '.join(fk.LEVELS))
+    head = branch_head(ctx); out = []
+    reg = pipe.setdefault('defects', [])
+    for d in raw:
+        e = dict(id='D-%d' % (len(reg) + 1), title=d['title'].strip()[:300], severity=d['severity'], level=d['level'],
+                 test=str(d.get('test') or '')[:100], found_by=run['role'], found_stage=run['stage'], found_agent=run.get('agent'),
+                 found_model=run.get('model'), at=at.isoformat(), status='open', base=head)
+        reg.append(e); out.append(e['id'])
+    return out
+
+
+def check_fixes(t, pipe, ctx, fixes):
+    """Разработчик сдаёт этап после возврата: у каждого открытого дефекта — способ, подтверждённый коммитами."""
+    fixes = fixes if isinstance(fixes, dict) else {}
+    fails, done = [], {}
+    for d in [x for x in pipe.get('defects') or [] if x['status'] == 'open']:
+        f = fixes.get(d['id']); fid = 'defect:' + d['id']
+        if not isinstance(f, dict) or f.get('method') not in FIX_METHODS:
+            fails.append(dict(id=fid, text=d['title'], detail='укажите fixes.%s.method: %s' % (d['id'], ', '.join(FIX_METHODS)))); continue
+        files = changed_since(ctx, d.get('base'))
+        kinds = {fk.classify(x) for x in files}
+        spec = [x for x in files if fk.classify(x) == 'spec']
+        note = str(f.get('note') or '').strip()
+        method = f['method']
+        if method == 'spec_change' and not spec:
+            why = 'изменение ТЗ: после регистрации дефекта не правились артефакты анализа (SRS, BRD, HLD, API…)'
+        elif method in ('code_to_spec', 'workaround') and 'code' not in kinds:
+            why = '%s: после регистрации дефекта в ветке нет правок кода' % FIX_METHODS[method]
+        elif method == 'workaround' and len(note) < 20:
+            why = 'обходная мера: опишите в note, что обходится и почему не исправлено по ТЗ (не короче 20 символов)'
+        elif method == 'test_fix' and 'test' not in kinds:
+            why = 'поправка теста: после регистрации дефекта не правились файлы тестов'
+        elif method == 'test_fix' and f.get('test_level') not in fk.LEVELS:
+            why = 'поправка теста: укажите test_level — ' + ', '.join(fk.LEVELS)
+        else:
+            done[d['id']] = dict(method=method, test_level=f.get('test_level') if method == 'test_fix' else None, note=note[:500],
+                                 files=[x for x in files if fk.classify(x) in ('spec', 'code', 'test')][:20])
+            continue
+        fails.append(dict(id=fid, text=d['title'], detail=why))
+    return fails, done
 
 
 def key(stage, role):
@@ -152,6 +235,7 @@ def orchestrate(s, t, pipe, at):
                 break
         st.update(passed=True, passed_at=at.isoformat())
         journal(s, pipe, t['ref'], 'stage_passed', 'Этап «%s» сдан по DoD' % P.STAGE[stage]['title'], stage=stage)
+        history(pipe, 'stage_passed', stage=stage, at=at.isoformat())
         idx = P.ORDER.index(stage)
         if idx == len(P.ORDER) - 1:
             pipe['stage'] = 'done'
@@ -213,15 +297,27 @@ def op_handoff(s, req, t, at):
         if isinstance(acc, list) and all(isinstance(a, str) and a.strip() for a in acc):
             patch['acceptance'] = [a.strip() for a in acc]
         if isinstance(handoff.get('needs'), dict): pipe['needs'] = handoff['needs']
-    results = P.evaluate_role(role, stage, ctx_for(dict(t, **patch), pipe, handoff))
+    ctx = ctx_for(dict(t, **patch), pipe, handoff)
+    results = P.evaluate_role(role, stage, ctx)
     fails = P.failures(results)
+    fixed = {}
+    if role == 'developer':
+        defect_fails, fixed = check_fixes(t, pipe, ctx, req.get('fixes'))
+        fails = fails + defect_fails
     k = key(stage, role); entry = pipe['roles'].setdefault(k, {})
     entry['result'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in results]
+    history(pipe, 'handoff', role=role, stage=stage, agent=run.get('agent'), model=run.get('model'), run=run['id'],
+            accepted=not fails, failed=[f['id'] for f in fails], at=at.isoformat())
     if fails:
         journal(s, pipe, t['ref'], 'handoff_rejected', '%s: передача не принята — %s' % (
             P.ROLES[role]['title'], '; '.join('%s (%s)' % (f['id'], f['detail']) for f in fails)), role, stage)
         w.write_patches(s, {t['ref']: dict(patch, pipeline=pipe)})
         return dict(accepted=False, failed=fails, hint='Исправь пункты и пришли handoff снова — запуск остаётся твоим.')
+    for d in pipe.get('defects') or []:
+        if d['id'] in fixed:
+            d.update(status='fixed', fix=dict(fixed[d['id']], at=at.isoformat(), agent=run.get('agent'), model=run.get('model')))
+        elif role == 'qa' and handoff.get('signoff') and d['status'] == 'fixed':
+            d.update(status='verified', verified_at=at.isoformat(), verified_by=run.get('agent'))
     heavy = P.pending_heavy(results)
     run.update(status='done', finished_at=at.isoformat(), evidence=req['summary'].strip(), tokens=req.get('tokens'),
                handoff=handoff)
@@ -247,6 +343,8 @@ def job(ref, role, stage, run_id):
         s = w.state(); at = w.now(); t = w.task_for(ref); pipe = copy.deepcopy(t['pipeline'])
         entry = pipe['roles'].setdefault(key(stage, role), {})
         entry['result'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in results]
+        history(pipe, 'check', role=role, stage=stage, agent=run.get('agent'), model=run.get('model'), run=run_id,
+                accepted=not fails, failed=[f['id'] for f in fails], at=at.isoformat())
         if fails:
             entry['state'] = 'returned'
             text = '; '.join('%s (%s)' % (f['id'], f['detail']) for f in fails)
@@ -316,10 +414,17 @@ def op_return(s, req, t, at):
         miss = P.check_document(ctx_for(t, pipe).artifact(spec), spec)
         if miss: raise ValueError('Возврат с замечаниями требует артефакта: ' + miss)
     roles = [r for r in (req.get('roles') or []) if r in P.STAGE[to_stage]['roles']]
+    if req.get('defects') is not None and role not in DEFECT_ROLES:
+        raise ValueError('Дефекты регистрируют ревьюер, QA и DevOps')
+    defects = register_defects(pipe, run, req.get('defects'), ctx_for(t, pipe), at, required=role == 'qa') if role in DEFECT_ROLES else []
+    history(pipe, 'return', role=role, stage=run['stage'], to_stage=to_stage, agent=run.get('agent'), model=run.get('model'),
+            run=run['id'], defects=defects, roles=roles, at=at.isoformat())
+    if defects:
+        reason += ' · дефекты: ' + ', '.join(defects)
     run.update(status='done', finished_at=at.isoformat(), evidence='Возврат на «%s»: %s' % (P.STAGE[to_stage]['title'], reason))
     return_to(s, t, pipe, at, to_stage, roles, reason, P.ROLES[role]['title'])
     w.write_patches(s, {t['ref']: dict(orchestrate(s, t, pipe, at), claimed_by=None)})
-    return dict(returned=to_stage)
+    return dict(returned=to_stage, defects=defects)
 
 
 def op_gate(s, req, t, at):
@@ -336,6 +441,8 @@ def op_gate(s, req, t, at):
         to_stage = req.get('to_stage') or ('analysis' if gate == 'analysis' else 'development')
         if to_stage not in P.ORDER[:P.ORDER.index(pipe['stage'] if pipe['stage'] != 'done' else P.ORDER[-1]) + 1]:
             raise ValueError('to_stage: этап не позже текущего')
+        history(pipe, 'return', role='teamlead', stage=pipe['stage'], to_stage=to_stage, agent=run.get('agent'),
+                model=run.get('model'), run=run['id'], gate=gate, defects=[], roles=req.get('roles') or [], at=at.isoformat())
         return_to(s, t, pipe, at, to_stage, req.get('roles') or [], notes, 'Тимлид')
     elif gate == 'escalation':
         pipe.pop('blocked', None)
@@ -397,11 +504,18 @@ def role_packet(t, run, agent):
                                   optional=bool(a.get('optional'))) for a in spec['artifacts']],
                   dod=[dict(id=i['id'], text=i['text'], kind=i['kind'], allow_na=bool(i.get('allow_na'))) for i in dod],
                   upstream=arts, needs=pipe.get('needs'), feedback=entry.get('feedback'),
+                  resume=((run.get('pauses') or [{}])[-1].get('checkpoint') or None),
+                  defects=[{k: d.get(k) for k in ('id', 'title', 'severity', 'level', 'test', 'found_by', 'status')}
+                           for d in pipe.get('defects') or [] if d['status'] in ('open', 'fixed')],
+                  pause='tt_work op=pause ref=%s run=%s worker=<ты> checkpoint=… — при исчерпании лимита токенов' % (t['ref'], run['id']),
                   handoff='tt_work op=handoff ref=%s run=%s worker=<ты> summary=… items={id: {status: done|na, evidence}}' % (t['ref'], run['id']))
     if role == 'product_owner':
         packet['handoff'] += ' acceptance=[бизнес-критерии] needs={design: bool, marketing: bool, reason}'
-    if role == 'reviewer': packet['handoff'] += ' verdict=approve; замечания — op=return to_stage=development'
-    if role == 'qa': packet['handoff'] += ' signoff=true; дефекты — op=return to_stage=development'
+    if role == 'reviewer': packet['handoff'] += ' verdict=approve; замечания — op=return to_stage=development [defects=[…]]'
+    if role == 'qa': packet['handoff'] += ' signoff=true; дефекты — op=return to_stage=development defects=[{title, severity, level, test}]'
+    if role == 'developer' and any(d['status'] == 'open' for d in pipe.get('defects') or []):
+        packet['handoff'] += (' fixes={"D-n": {"method": "spec_change|code_to_spec|workaround|test_fix", "test_level": "…", "note": "…"}}'
+                              ' — по каждому открытому дефекту; способ сервер сверяет с коммитами ветки')
     if role == 'teamlead':
         packet['gate_task'] = dict(
             analysis='Проверь, что SRS, HLD, ADR, модель угроз и (если нужны) дизайн и GTM согласованы между собой и с BRD, '
@@ -432,5 +546,6 @@ def role_prompt(t, run, route, worker=None):
               '2) tt_work op=packet ref=%s run=%s — паспорт роли: DoD, артефакты, предыдущие артефакты, замечания.' % (t['ref'], run['id']),
               '3) Сделай работу, закоммить артефакты, затем %s — это уведомление тимлиду. Не принятая передача вернёт список несделанных пунктов.'
               % ('op=gate' if role == 'teamlead' else 'op=handoff'),
+              w.LIMIT_RULE % (t['ref'], run['id'], worker or '<id этой сессии>'),
               'Работай только через MCP tt_work. Твой worker во всех вызовах: %s.' % (worker or '<id этой сессии>')]
     return '\n'.join(lines)

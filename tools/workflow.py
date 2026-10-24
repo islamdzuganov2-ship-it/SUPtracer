@@ -113,9 +113,12 @@ def state():
 
 REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна доработка', 'spec_change': 'Принято с изменением ТЗ'}
 
+MAX_SESSIONS = 4   # окон ИИ, которые сервер досок держит открытыми одновременно
+
 def settings(s=None):
     return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
-                     reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={}),
+                     reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={},
+                     max_sessions=MAX_SESSIONS),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -561,61 +564,91 @@ def per_ai(points):
     """Сколько параллельных сессий на ИИ даёт объём готового бэклога (очки размера S=1, M=3, L=8)."""
     return 1 if points < 10 else 2 if points < 40 else 3
 
-def start_plan(project, agents, sessions, tasks, runs, at):
-    """«Запустить проект»: какие готовые задачи бэклога и каким ИИ отдать одним нажатием.
+def open_sessions(runs, at=None, hours=12):
+    """Сессии, открытые сервером и ещё не закончившие: выполняются или открыты и ждут claim.
+    Пауза по лимиту окна не занимает; открытое, но брошенное окно перестаёт считаться через 12 ч."""
+    edge=(at or now())-timedelta(hours=hours); n=0
+    for r in runs:
+        if r.get('paused') or not r.get('launched_at'): continue
+        if r.get('status')=='running' or (r.get('status')=='queued' and (parse_time(r['launched_at']) or edge) > edge): n+=1
+    return n
 
-    Число сессий — из объёма готового бэклога (per_ai), не больше заданного владельцем.
-    Порядок — приоритет, затем сколько открытых задач ждут эту, затем меньший размер.
-    Две задачи с пересекающейся областью в один пакет не попадают; назначенный ИИ соблюдается."""
+def start_plan(project, agents, sessions, tasks, runs, at):
+    """«Запустить проект»: какие задачи бэклога и каким ИИ отдать одним нажатием.
+
+    Кандидаты — готовые задачи вне конвейера и задачи конвейера, чья роль ждёт неоткрытую сессию.
+    Число сессий — из объёма этого бэклога (per_ai) и не больше свободных мест под лимитом
+    одновременных сессий; владелец может уменьшить. Порядок — приоритет, затем сколько открытых
+    задач ждут эту, затем меньший размер. Две задачи с пересекающейся областью в пакет не попадают;
+    назначенный ИИ соблюдается; сессии делятся между выбранными ИИ поровну."""
     mine=[t for t in tasks if t['project']==project]
+    byref={t['ref']:t for t in mine}
     open_=[t for t in mine if t.get('status') not in ('done','cancelled')]
     waiting=Counter(d for t in open_ for d in t.get('depends_on') or [])
-    pipe_runs=[r for r in runs if r['ref'].split('/')[0]==project and r.get('role') and r['status']=='queued'
-               and not r.get('launched_at') and not r.get('paused')]
-    piped={r['ref'] for r in pipe_runs}
-    ready_=[]; skipped=[]
+    cands=[]; skipped=[]
+    for r in runs:
+        t=byref.get(r['ref'])
+        if t and r.get('role') and r['status']=='queued' and not r.get('launched_at') and not r.get('paused'):
+            cands.append(dict(kind='role', task=t, run=r))
+    piped={c['task']['ref'] for c in cands}
     for t in open_:
         if t.get('pipeline'):
-            continue      # задачи конвейера ведёт тимлид: их роли открываются отдельно
+            if t['ref'] not in piped:
+                pipe=t['pipeline']
+                skipped.append(dict(ref=t['ref'], title=t['title'], why='конвейер: %s' % (
+                    'эскалация у тимлида' if pipe.get('blocked') else t.get('status_note') or 'роль уже работает')))
+            continue
         why=('уже ждёт исполнителя' if t.get('queued_run') else
              'в работе' if t.get('status') in ('in_progress','review') and not (t['claim'] or {}).get('stale') else
              'заблокирована' if t.get('status')=='blocked' else
              'ждёт задачи ' + ', '.join(t['blocked_by']) if t['blocked_by'] else
-             'нет плана (критерии, размер)' if t['needs_plan'] else
+             'нет плана (критерии, размер) — перенесите в «Идея», PO проработает' if t['needs_plan'] else
              'назначена ИИ %s — не выбран' % t['executor'] if t.get('executor') and t['executor'] not in agents else
              'занята другим ИИ' if not ready(t) else None)
         if why: skipped.append(dict(ref=t['ref'], title=t['title'], why=why))
-        else: ready_.append(t)
-    ready_.sort(key=lambda t:(PRIORITY_ORDER.get(t.get('priority'),1), -waiting[t['id']], SIZE_POINTS.get(t.get('size'),3), t['id']))
-    points=sum(SIZE_POINTS.get(t.get('size'),3) for t in ready_)
-    auto=min(len(ready_), per_ai(points)*len(agents))
-    limit=auto if sessions in (None,0) else min(int(sessions), len(ready_))
-    # Сессии делятся между ИИ поровну (не больше cap на ИИ), при равенстве — меньшая загрузка в очках.
+        else: cands.append(dict(kind='task', task=t))
+    key=lambda c:(PRIORITY_ORDER.get(c['task'].get('priority'),1), -waiting[c['task']['id']], SIZE_POINTS.get(c['task'].get('size'),3), c['task']['id'])
+    cands.sort(key=key)
+    points=sum(SIZE_POINTS.get(c['task'].get('size'),3) for c in cands)
+    busy=open_sessions(runs, at); cap_total=settings()['max_sessions']; room=max(0, cap_total-busy)
+    auto=min(len(cands), per_ai(points)*len(agents), room)
+    limit=auto if sessions in (None,0) else min(int(sessions), len(cands))
     cap=-(-limit//len(agents)) if limit else 0
     load={a:0 for a in agents}; count={a:0 for a in agents}; picks=[]
-    for t in ready_:
+    for c in cands:
         if len(picks)>=limit: break
-        if scope_conflict(t, tasks, runs, at) or any(t.get('scope') and p['task'].get('scope') and scopes_overlap(t['scope'], p['task']['scope']) for p in picks):
+        t=c['task']
+        if c['kind']=='task' and (scope_conflict(t, tasks, runs, at) or any(t.get('scope') and p['scope'] and scopes_overlap(t['scope'], p['scope']) for p in picks)):
             skipped.append(dict(ref=t['ref'], title=t['title'], why='область пересекается с задачей в работе или в пакете')); continue
-        free=[a for a in ([t['executor']] if t.get('executor') else agents) if count[a]<cap]
+        pinned=t.get('executor') if c['kind']=='task' else None
+        free=[a for a in ([pinned] if pinned else agents) if count[a]<cap]
         if not free: continue      # назначенный ИИ уже получил свою долю сессий — задача в следующий запуск
         agent=min(free, key=lambda a:(count[a], load[a], agents.index(a)))
+        if c['kind']=='role':
+            import orchestra
+            route=orchestra.role_route(t, c['run']['role'], agent)
+            pick=dict(kind='role', run=c['run']['id'], role=c['run']['role'], stage=c['run'].get('stage'))
+        else:
+            try: packet(t['ref'], agent=agent)   # негодный паспорт не должен ронять весь пакет
+            except ValueError as e:
+                skipped.append(dict(ref=t['ref'], title=t['title'], why='паспорт: %s' % e)); continue
+            route=recommendation(t, agent=agent); pick=dict(kind='task')
         load[agent]+=SIZE_POINTS.get(t.get('size'),3); count[agent]+=1
-        route=recommendation(t, agent=agent)
-        picks.append(dict(task=t, ref=t['ref'], title=t['title'], size=t.get('size'), priority=t.get('priority'), agent=agent,
-                          model=route['model'], effort=route['effort'], waiting=waiting[t['id']]))
+        picks.append(dict(pick, ref=t['ref'], title=t['title'], size=t.get('size'), priority=t.get('priority'), agent=agent,
+                          model=route['model'], effort=route['effort'], waiting=waiting[t['id']], scope=t.get('scope') or []))
     picked={p['ref'] for p in picks}
-    rest=[t for t in ready_ if t['ref'] not in picked]
+    later=[dict(ref=c['task']['ref'], title=c['task']['title']) for c in cands if c['task']['ref'] not in picked]
+    n=len(cands)
+    reason=('Кандидатов %d на %d очк. → по %d сессии на ИИ × %d ИИ = %d; свободно мест %d из %d (открыто %d)' % (
+                n, points, per_ai(points), len(agents), per_ai(points)*len(agents), room, cap_total, busy) if n
+            else 'Бэклог пуст' if not open_ else 'Запускать нечего: ' + '; '.join(sorted({x['why'].split(' — ')[0].split(':')[0] for x in skipped}))[:300])
     return dict(project=project, agents=agents,
-                backlog=dict(open=len(open_), ready=len(ready_), points=points, blocked=sum(1 for t in open_ if t['blocked_by'] or t.get('status')=='blocked'),
-                             needs_plan=sum(1 for t in open_ if t['needs_plan']), in_work=sum(1 for t in open_ if t.get('status') in ('in_progress','review')),
+                backlog=dict(open=len(open_), ready=n, points=points, blocked=sum(1 for t in open_ if t['blocked_by'] or t.get('status')=='blocked'),
+                             needs_plan=sum(1 for t in open_ if t['needs_plan'] and not t.get('pipeline')),
+                             in_work=sum(1 for t in open_ if t.get('status') in ('in_progress','review')),
                              pipeline=sum(1 for t in open_ if t.get('pipeline'))),
-                per_ai=per_ai(points), auto_sessions=auto, sessions=len(picks),
-                picks=[{k:v for k,v in p.items() if k!='task'} for p in picks],
-                later=[dict(ref=t['ref'], title=t['title']) for t in rest][:20],
-                skipped=skipped[:40], pipeline_runs=[dict(run=r['id'], ref=r['ref'], role=r['role'], agent=r.get('agent')) for r in pipe_runs],
-                reason='Готово %d задач на %d очк. → по %d сессии на ИИ × %d ИИ = %d' % (len(ready_), points, per_ai(points), len(agents), auto)
-                       if ready_ else ('Бэклог пуст' if not open_ else 'Готовых задач нет: ' + '; '.join(sorted({x['why'].split(' — ')[0] for x in skipped}))[:300]))
+                per_ai=per_ai(points), auto_sessions=auto, sessions=len(picks), open_sessions=busy, max_sessions=cap_total,
+                picks=[{k:v for k,v in p.items() if k!='scope'} for p in picks], later=later[:20], skipped=skipped[:60], reason=reason)
 
 def split(project, agents, tasks, runs, at):
     """Объяснимое распределение: связные группы (зависимости, общая область)
@@ -678,8 +711,11 @@ def start_run(s, t, run, req, at):
     if req.get('agent') and req['agent']!=agent: raise ValueError('Модель %s не принадлежит ИИ %s' % (model, req['agent']))
     if t.get('executor') and t['executor']!=agent:
         raise ValueError('Задача назначена ИИ %s; ИИ %s её не берёт' % (t['executor'], agent))
+    extra_patch={}
     if run.get('role'):
         import orchestra
+        pipe=orchestra.materialize(s, t)
+        if pipe: t=dict(t, pipeline=pipe); extra_patch['pipeline']=pipe
         p=orchestra.role_packet(t, run, agent)
     else:
         p=packet(t['ref'], agent=agent)
@@ -697,7 +733,7 @@ def start_run(s, t, run, req, at):
         if rework: run['rework']=rework
     if run.get('role'):
         import pipeline as P
-        return dict(status='in_progress', status_note='%s: %s (%s)' % (P.ROLES[run['role']]['title'], PROVIDERS[agent]['name'], worker),
+        return dict(extra_patch, status='in_progress', status_note='%s: %s (%s)' % (P.ROLES[run['role']]['title'], PROVIDERS[agent]['name'], worker),
                     claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until, role=run['role']))
     note={'review':'Идёт ревью', 'assess':'Идёт оценка сложности'}.get(p['phase'],
           'Доработка' if (t.get('auto_check') or {}).get('ok') is False or (t.get('review') or {}).get('verdict')=='changes' else None)
@@ -1055,10 +1091,13 @@ def action(req):
     extra={}
     with locked():
         s=state(); at=now()
-        if op in ('idea','handoff','return','escalate','gate','approve_release'):
+        if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea'):
             import orchestra
             if op=='idea':
                 extra=orchestra.op_idea(s, req, at)
+            elif op=='to_idea':
+                extra=orchestra.op_to_idea(s, req, at)
+                if extra.get('dry_run'): return dict(ok=True, **extra)
             else:
                 t=task_for(req.get('ref',''))
                 if not orchestra.is_pipeline(t): raise ValueError('Задача не идёт по конвейеру')
@@ -1078,7 +1117,8 @@ def action(req):
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions')
+            if 'max_sessions' in changes and (type(changes['max_sessions'])!=int or not 1<=changes['max_sessions']<=12): raise ValueError('max_sessions: от 1 до 12 одновременных сессий')
             if 'reviewer' in changes and changes['reviewer'] not in ('same','other',*PROVIDERS): raise ValueError('Ревьюер: same, other или ИИ')
             if 'roles' in changes:
                 import pipeline as P
@@ -1099,11 +1139,14 @@ def action(req):
             if sessions is not None and (type(sessions)!=int or not 0<=sessions<=12): raise ValueError('sessions: от 1 до 12 (0 — по объёму бэклога)')
             plan=start_plan(project, agents, sessions, snap['tasks'], s['runs'], at)
             if req.get('dry_run', True): return dict(plan, dry_run=True)
-            if not plan['picks'] and not plan['pipeline_runs']: raise ValueError(plan['reason'])
+            if not plan['picks']: raise ValueError(plan['reason'])
             batch='B-%s' % at.strftime('%Y%m%d%H%M%S')
             byref={t['ref']:t for t in snap['tasks']}
             for p in plan['picks']:
-                t=byref[p['ref']]; pk=packet(p['ref'], agent=p['agent'])
+                if p['kind']=='role':   # роль конвейера: ждущий запуск переходит к выбранному ИИ
+                    run=next(r for r in s['runs'] if r['id']==p['run'])
+                    run.update(agent=p['agent'], batch=batch); continue
+                pk=packet(p['ref'], agent=p['agent'])
                 run=new_run(s, p['ref'], pk, at); run.update(agent=p['agent'], batch=batch)
                 p['run']=run['id']
             save('workflow.json',s)
@@ -1320,7 +1363,7 @@ def action(req):
             else: raise ValueError('Неизвестная операция')
             write_patches(s, {ref:patch} if patch else {})
         save('workflow.json',s)
-    if op in ('idea','handoff','return','escalate','gate','approve_release'):
+    if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea'):
         if job: spawn_pipejob(*job)
         return dict(ok=True, **extra)
     spawn=extra.pop('_autocheck',None)

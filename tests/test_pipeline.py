@@ -100,11 +100,12 @@ class PipelineTests(DataCase):
         self.ref = self.idea()
         t = self.task()
         self.assertEqual((t['pipeline']['stage'], t['status']), ('idea', 'queued'))
-        self.assertTrue(t['pipeline']['worktree']['branch'].startswith('task/'))
+        self.assertNotIn('worktree', t['pipeline'])          # рабочая копия — когда роль берёт задачу
         po = self.run_of('product_owner')
         self.assertTrue(po['auto_launch'])
         # Без BRD передача не принимается: DoD железный.
         run = self.claim('product_owner')
+        self.assertTrue(self.task()['pipeline']['worktree']['branch'].startswith('task/'))
         r = self.handoff('product_owner', 'idea', run)
         self.assertFalse(r['accepted'])
         self.assertIn('po-brd', {f['id'] for f in r['failed']})
@@ -278,3 +279,34 @@ class PipelineTests(DataCase):
         dev_handoffs = [h['accepted'] for h in hist if h['kind'] == 'handoff' and h['role'] == 'developer']
         self.assertEqual(dev_handoffs, [True, False, False, False, True])
         self.assertTrue(any(h['kind'] == 'return' and h['role'] == 'qa' and h['defects'] == ['D-1'] for h in hist))
+
+    # --- перенос в «Идея» (TT-77)
+
+    def test_owner_moves_tasks_to_idea(self):
+        # Задача вне конвейера «в работе» и задача конвейера на анализе — обе в «Идея».
+        d = w.read('projects.json', {}); b = d['projects']['alpha-api']['backlog']
+        b[0]['status'] = 'in_progress'; b.append(dict(id='AL-05', title='Без запроса', why='Описание задачи без корня', size='S', status='queued'))
+        w.save('projects.json', d)
+        self.ref = self.idea()
+        self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
+                     needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
+        self.assertEqual(self.task()['pipeline']['stage'], 'analysis')
+        prev = self.run_of('system_analyst')
+        r = w.action(dict(op='to_idea', project='alpha-api'))
+        self.assertTrue(r['dry_run'])
+        self.assertEqual(sorted(x['ref'] for x in r['items']), ['alpha-api/AL-01', 'alpha-api/AL-05', self.ref])
+        self.assertEqual({x['why'] for x in r['skipped_items']}, {'закрыта'})                 # AL-02 готова
+        self.assertEqual(self.task()['pipeline']['stage'], 'analysis')                          # предпросмотр ничего не меняет
+        w.action(dict(op='to_idea', project='alpha-api', dry_run=False))
+        for ref in ('alpha-api/AL-01', 'alpha-api/AL-05', self.ref):
+            t = w.task_for(ref)
+            self.assertEqual((t['pipeline']['stage'], t['status']), ('idea', 'queued'), ref)
+            po = next(x for x in w.state()['runs'] if x['ref'] == ref and x.get('role') == 'product_owner' and x['status'] == 'queued')
+            self.assertFalse(po['auto_launch'])                                                # окна сами не открываются
+        self.assertTrue(w.task_for('alpha-api/AL-05')['root'])                                  # запрос создан из задачи
+        self.assertEqual(next(x for x in w.state()['runs'] if x['id'] == prev['id'])['status'], 'cancelled')
+        self.assertEqual(w.task_for('alpha-api/AL-02')['status'], 'done')
+        # «Запустить проект» берёт роли конвейера в пределах лимита сессий.
+        plan = w.action(dict(op='start', project='alpha-api', agents=['claude', 'codex']))
+        self.assertEqual({p['kind'] for p in plan['picks']}, {'role'})
+        self.assertLessEqual(plan['sessions'], 4)

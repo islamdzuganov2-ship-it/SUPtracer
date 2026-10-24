@@ -96,9 +96,14 @@ def dispatch_once():
     import workflow
     conf = workflow.settings()
     started = []
-    for r in workflow.state()["runs"]:
+    runs = workflow.state()["runs"]
+    busy = workflow.open_sessions(runs)
+    prio = {t["ref"]: workflow.PRIORITY_ORDER.get(t.get("priority"), 1) for t in workflow.snapshot()["tasks"]}
+    for r in sorted(runs, key=lambda r: (prio.get(r["ref"], 1), r.get("created_at") or "")):
         if r.get("status") != "queued" or not r.get("auto_launch") or r.get("launched_at"):
             continue
+        if busy >= conf.get("max_sessions", 4):
+            break                 # лимит одновременных сессий: остальные откроются, когда эти закончат
         # Роли конвейера — по auto_pipeline, ревью старого потока — по auto_launch_review.
         if not (conf["auto_pipeline"] if r.get("role") else conf["auto_launch_review"]):
             continue
@@ -107,7 +112,7 @@ def dispatch_once():
         _auto_attempts[r["id"]] = time.time()
         try:
             launch_session(dict(ref=r["ref"], agent=r.get("agent"), run=r["id"]))
-            started.append(r["id"])
+            started.append(r["id"]); busy += 1
         except Exception as e:   # noqa: BLE001 — причина видна на карточке
             workflow.mark_launch_error(r["ref"], r["id"], e)
     return started
@@ -184,6 +189,14 @@ def launch_role(t, run, req):
     if run.get("agent") and agent != run["agent"]:
         raise ValueError("Роль закреплена за ИИ %s: сменить можно в настройках ролей" % run["agent"])
     wt = (t.get("pipeline") or {}).get("worktree") or {}
+    if not wt:
+        with workflow.locked():
+            s = workflow.state(); t = workflow.task_for(t["ref"])
+            pipe = orchestra.materialize(s, t)
+            if pipe:
+                workflow.write_patches(s, {t["ref"]: dict(pipeline=pipe)}); workflow.save("workflow.json", s)
+                t = dict(t, pipeline=pipe)
+        wt = (t.get("pipeline") or {}).get("worktree") or {}
     project = workflow.read("projects.json", {})["projects"][t["project"]]
     cwd = wt.get("path") or project.get("inspection_path") or project.get("path")
     route = orchestra.role_route(t, run["role"], agent)
@@ -248,7 +261,6 @@ def start_project(req):
                                 sessions=req.get("sessions"), dry_run=False))
     opened, failed = [], []
     jobs = [dict(ref=p["ref"], agent=p["agent"], run=p["run"]) for p in plan["picks"]]
-    jobs += [dict(ref=r["ref"], agent=r.get("agent"), run=r["run"]) for r in plan["pipeline_runs"]]
     for job in jobs:
         try:
             launch_session(job); opened.append(job["run"])

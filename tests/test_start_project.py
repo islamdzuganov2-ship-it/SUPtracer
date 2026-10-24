@@ -65,3 +65,19 @@ class StartProjectTests(DataCase):
             self.start(dry_run=False)
         with self.assertRaisesRegex(ValueError, 'agents'):
             self.start(agents=['gpt'])
+
+    def test_dispatcher_respects_session_limit(self):
+        self.plan(*[dict(id='AL-%d' % i) for i in range(40, 46)])
+        for i in range(40, 46):
+            w.action(dict(op='enqueue', ref='alpha-api/AL-%d' % i, agent='claude'))
+        s = w.state()
+        for r in s['runs']: r['auto_launch'] = True; r['role'] = None
+        s['runs'][0].update(launched_at=w.now().isoformat())        # одно окно уже открыто
+        w.save('workflow.json', s)
+        w.action(dict(op='settings', changes=dict(max_sessions=3, auto_launch_review=True)))
+        with mock.patch.object(serve, 'launch_session', return_value={}) as launch:
+            started = serve.dispatch_once()
+        self.assertEqual(len(started), 2)                              # 3 места − 1 открытое
+        self.assertEqual(launch.call_count, 2)
+        with self.assertRaisesRegex(ValueError, 'max_sessions'):
+            w.action(dict(op='settings', changes=dict(max_sessions=50)))

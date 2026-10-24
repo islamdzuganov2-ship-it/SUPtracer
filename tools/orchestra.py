@@ -155,6 +155,18 @@ def ensure_worktree(t, pipe):
     return pipe.get('worktree')
 
 
+def materialize(s, t):
+    """Рабочая копия задачи — в момент, когда роль её берёт. Возвращает правку pipeline или None."""
+    pipe = t.get('pipeline')
+    if not pipe or pipe.get('worktree'):
+        return None
+    pipe = copy.deepcopy(pipe)
+    if ensure_worktree(t, pipe):
+        journal(s, pipe, t['ref'], 'worktree', 'Рабочая копия задачи: %s, ветка %s' % (pipe['worktree']['path'], pipe['worktree']['branch']))
+        return pipe
+    return None
+
+
 def ctx_for(t, pipe, handoff=None):
     return P.Context(dict(t, pipeline=pipe), project_of(t), pipe.get('worktree'), handoff)
 
@@ -171,7 +183,8 @@ def create_role_run(s, t, pipe, stage, role, at, feedback=None, gate=None):
     run = w.new_run(s, t['ref'], None, at)
     route = role_route(t, role, agent)
     run.update(role=role, stage=stage, phase='role', agent=agent, gate=gate,
-               auto_launch=w.settings(s).get('auto_pipeline', True), packet=dict(route=route, phase='role'))
+               auto_launch=w.settings(s).get('auto_pipeline', True) and not (stage == 'idea' and pipe.get('pause_auto')),
+               packet=dict(route=route, phase='role'))
     if role != 'teamlead':
         k = key(stage, role); prev = pipe['roles'].get(k) or {}
         pipe['roles'][k] = dict(state='queued', run=run['id'], attempts=prev.get('attempts', 0) + (1 if feedback else 0),
@@ -200,7 +213,8 @@ def orchestrate(s, t, pipe, at):
             break
         st = pipe['stages'].setdefault(stage, {})
         if not st.get('dor_ok'):
-            ensure_worktree(t, pipe)
+            if stage != 'idea':      # идее рабочая копия не нужна: её создаёт запуск роли (materialize)
+                ensure_worktree(t, pipe)
             dor = P.check_dor(stage, ctx_for(t, pipe), pipe)
             st['dor'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in dor]
             fails = [d for it, ok, d in dor if not ok]
@@ -250,6 +264,79 @@ def orchestrate(s, t, pipe, at):
 
 
 # ---------------------------------------------------------------- операции
+
+def op_to_idea(s, req, at):
+    """Владелец переносит задачи в «Идея»: агенты начинают их заново по конвейеру.
+
+    Одна задача (ref), проект (project) или все проекты (project='*'). Закрытые и отменённые
+    не трогаются. Активные запуски отменяются, задача вне конвейера становится задачей
+    конвейера на этапе «Идея» (её описание — вход для Product Owner), задача конвейера
+    возвращается на «Идея». Сессии сами не открываются: «▶ Запустить проект» или автозапуск
+    в пределах лимита сессий. dry_run (по умолчанию) — только показать."""
+    reason = (req.get('reason') or '').strip() or 'Владелец перенёс задачу в «Идея»: работа заново по конвейеру'
+    snap = w.snapshot(); project = req.get('project')
+    if req.get('ref'):
+        tasks = [w.task_for(req['ref'])]
+    elif project == '*':
+        tasks = snap['tasks']
+    elif project in snap['projects']:
+        tasks = [t for t in snap['tasks'] if t['project'] == project]
+    else:
+        raise ValueError('Укажите ref задачи, project или project="*" (все проекты)')
+    byref = {t['ref']: t for t in snap['tasks']}
+    moved, skipped = [], []
+    for t in tasks:
+        t = byref.get(t['ref'], t)
+        if t.get('status') in ('done', 'cancelled'):
+            skipped.append(dict(ref=t['ref'], why='закрыта' if t.get('status') == 'done' else 'отменена')); continue
+        pipe = t.get('pipeline')
+        if pipe and pipe.get('stage') == 'idea' and not pipe.get('blocked'):
+            skipped.append(dict(ref=t['ref'], why='уже в «Идея»')); continue
+        moved.append(dict(ref=t['ref'], title=t['title'], from_status=t.get('status'), stage=(pipe or {}).get('stage'),
+                          runs=[r['id'] for r in s['runs'] if r['ref'] == t['ref'] and r['status'] in ('queued', 'running')]))
+    summary = dict(moved=len(moved), skipped=len(skipped), items=moved[:300], skipped_items=skipped[:100],
+                   projects=sorted({m['ref'].split('/')[0] for m in moved}),
+                   cancel_runs=sum(len(m['runs']) for m in moved))
+    if req.get('dry_run', True):
+        return dict(summary, dry_run=True)
+    gaps = [m for m in moved if not byref[m['ref']].get('root') or not (byref[m['ref']].get('why') or '').strip()]
+    if gaps:   # без исходного запроса и описания DoR «Идеи» не пройти: берутся из самой задачи
+        d = w.read('projects.json', {})
+        for m in gaps:
+            t = byref[m['ref']]; fix = {}
+            if not (t.get('why') or '').strip():
+                fix['why'] = t['title']
+            if not t.get('root'):
+                fix['root'] = w.create_roots(t['project'], [dict(new_root=dict(title=t['title'][:200], text=(t.get('why') or t['title'])[:5000]))])[0]['root']
+            for b in d['projects'][t['project']].get('backlog', []):
+                if b['id'] == t['id']:
+                    b.update(fix)
+            byref[m['ref']] = dict(t, **fix)
+        w.save('projects.json', d)
+    patches = {}
+    for m in moved:
+        t = byref[m['ref']]
+        for r in s['runs']:
+            if r['ref'] == t['ref'] and r['status'] in ('queued', 'running'):
+                r.update(status='cancelled', finished_at=at.isoformat(), evidence=reason)
+        old = t.get('pipeline')
+        if old:
+            pipe = copy.deepcopy(old)
+            return_to(s, t, pipe, at, 'idea', [], reason, 'Владелец')
+            pipe['roles'] = {k: v for k, v in pipe['roles'].items() if not k.startswith('idea/')}
+        else:
+            pipe = new_pipe('перенос')
+            journal(s, pipe, t['ref'], 'idea', 'Задача перенесена в «Идея» владельцем (была «%s»): %s' % (m['from_status'] or 'без статуса', t['title']), stage='idea')
+        pipe['pause_auto'] = True          # массовый перенос не открывает окна сам: запуск — кнопкой проекта
+        history(pipe, 'to_idea', from_status=m['from_status'], from_stage=m['stage'], at=at.isoformat())
+        hist = list(t.get('status_history') or [])[-19:]
+        hist.append(dict(at=at.isoformat(), from_status=t.get('status'), to='idea', reason=reason, by='владелец'))
+        patch = orchestrate(s, dict(t, pipeline=pipe), pipe, at)
+        patch.update(claimed_by=None, status_history=hist)
+        patches[t['ref']] = patch
+    w.write_patches(s, patches)
+    return dict(summary, dry_run=False)
+
 
 def op_idea(s, req, at):
     """Идея от владельца (терминал Claude/Codex, доска, CLI) — задача в колонке «Идея»."""

@@ -100,6 +100,7 @@
 <div class="foot" id="foot"></div>
 </div>
 <style id="board-styles">
+  .board-columns{grid-template-columns:repeat(8,minmax(190px,1fr))!important}.board-stage-roles{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 6px}.board-role{font-size:10px;padding:2px 6px;border-radius:6px;background:color-mix(in srgb,var(--accent) 12%,transparent)}.board-role-opt{opacity:.7;border:1px dashed var(--line)}.board-role-gate{background:color-mix(in srgb,#e6a34c 18%,transparent)}.board-dod{font-size:10px!important;padding:3px 7px!important}.board-pipe{font-size:11px;margin:6px 0;display:grid;gap:3px}.board-role-row button{font-size:10px!important;padding:2px 6px!important}.board-approve{background:color-mix(in srgb,var(--accent) 22%,transparent)!important;font-weight:600}.board-note-soft{background:color-mix(in srgb,var(--accent) 8%,transparent)!important}.board-journal{list-style:none;padding:0;font-size:12px;max-height:320px;overflow:auto}.board-journal li{margin:5px 0}.board-journal-box{margin:10px 0;padding:6px 10px;border:1px solid var(--line);border-radius:10px}
 /* Стили досок: сначала расширения (board_extras.js), затем основа (boards.js) — порядок значим. */
   #boards-root{padding:22px;border:1px solid var(--line);border-radius:24px;background:radial-gradient(ellipse at top right,color-mix(in srgb,var(--accent) 9%,transparent),transparent 65%)}
   .board-column{border:1px solid var(--line);border-radius:18px!important;background:color-mix(in srgb,var(--panel2) 85%,transparent)!important;min-height:170px;align-self:start}.board-column h3{font-size:13px}.board-task{border-radius:15px!important;box-shadow:var(--shadow)}.board-task h4{font-size:13px;line-height:1.5}.board-task small{font-size:11px}.board-project h2{font-size:17px!important}.board-task .route-detail{display:none}.board-tag{display:inline-block;background:color-mix(in srgb,var(--project-color) 18%,transparent);border-radius:6px;padding:4px 7px;font-size:10px;color:var(--ink2)}
@@ -113,7 +114,7 @@
 .board-dialog button:hover,#boards-root button:hover{border-color:var(--accent)}
 .board-tools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:16px 0}
 .board-tools input,.board-tools select{padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink)}
-.board-columns{display:grid;grid-template-columns:repeat(5,minmax(210px,1fr));gap:12px;overflow:auto;padding-bottom:12px}
+.board-columns{display:grid;grid-template-columns:repeat(8,minmax(190px,1fr));gap:12px;overflow:auto;padding-bottom:12px}
 .board-column{max-height:68vh;overflow:auto;background:var(--panel2);padding:10px;border-radius:12px}
 .board-task{background:var(--panel);border:1px solid var(--line);padding:13px;margin:10px 0;border-radius:9px}
 .board-task h4{margin:7px 0}
@@ -133,7 +134,7 @@
 .board-claim{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--ink)}
 .board-claim-stale{opacity:.75;font-style:italic}
 .board-type-tag{border-style:dashed}
-.board-columns{grid-template-columns:repeat(6,minmax(200px,1fr))!important}
+.board-columns{grid-template-columns:repeat(8,minmax(190px,1fr))!important}
 .board-column.is-drop{outline:2px dashed var(--accent)}
 .board-task.is-dragging{opacity:.5}
 .board-task[draggable=true]{cursor:grab}

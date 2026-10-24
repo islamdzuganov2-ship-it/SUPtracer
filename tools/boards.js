@@ -53,24 +53,38 @@
     return `<p><b>${esc(type?.name||'Тип не указан')}</b></p>${rows.length?`<dl class="board-dl">${rows.map(([a,b])=>`<dt>${esc(a)}</dt><dd>${esc(b||'—')}</dd>`).join('')}</dl>`:''}<p class="board-workspace"><b>Рабочее место ИИ</b><span>Папка: <code>${esc(p.path||'не указана')}</code></span>${p.active_copy?`<span>Активная копия: <code>${esc(p.active_copy)}</code></span>`:''}<span>Репозиторий: ${p.repo?`<code>${esc(p.repo)}</code>`:'без удалённого репозитория'}</span></p>`;
   }
   function aiMatch(t){return !ai||(ai==='none'?!t.executor:ai==='busy'?!!(t.claim&&!t.claim.stale):t.executor===ai);}
-  const COLUMNS=['queued','in_progress','review','blocked','done','cancelled'];
-  // Запущенная с доски задача сразу в «В работе»: запуск — это решение владельца, даже если ИИ ещё не принял.
-  function column(t){return t.status==='cancelled'?'cancelled':t.status==='done'?'done':t.status==='review'?'review':(t.status==='blocked'||(t.blocked_by.length&&t.status!=='in_progress'))?'blocked':(t.status==='in_progress'||t.claim||t.queued_run)?'in_progress':'queued';}
+  // Колонки — этапы конвейера; их задаёт спецификация сервера (pipeline.py), «Отменено» — в конце.
+  const STAGES=()=>(data.pipeline?.stages)||[];
+  const COLUMNS=()=>[...STAGES().map(s=>s.id),'cancelled'];
+  const stageTitle=id=>id==='cancelled'?'Отменено':id==='done'?'Готово':(STAGES().find(s=>s.id===id)?.title||id);
+  const roleTitle=r=>data.pipeline?.roles?.[r]?.title||r;
+  // Старые задачи вне конвейера: перенос в колонку этапа меняет их статус, как раньше.
+  const LEGACY_STATUS={idea:'queued',analysis:'queued',development:'in_progress',review:'review',testing:'review',deploy_test:'review',deploy_main:'done',cancelled:'cancelled'};
+  // Задача конвейера стоит на своём этапе; старая — по статусу: готовые в «Деплой в main», непроработанные в «Идея».
+  function column(t){
+    if(t.status==='cancelled')return 'cancelled';
+    if(t.pipeline)return t.pipeline.stage==='done'?'deploy_main':t.pipeline.stage;
+    if(t.status==='done')return 'deploy_main';
+    if(t.status==='review')return 'review';
+    if(t.status==='queued'&&t.needs_plan)return 'idea';
+    return 'development';
+  }
   // Шаблоны: каждый возвращает строку разметки и не трогает DOM.
   const headTemplate=()=>`<h1>Доски задач</h1><p>Сначала план и критерии, затем выбор модели и запуск. Фокус влияет на порядок рекомендаций.</p>
       <details><summary>Фокус проектов (${data.focus.length})</summary><div class="board-focus">${Object.entries(data.projects).map(([k,p],i)=>`<label><input type="checkbox" data-focus="${i}" ${data.focus.includes(k)?'checked':''}> ${esc(p.name)}</label>`).join('')}</div></details>`;
   const toolsTemplate=()=>`<div class="board-tools"><input id="board-search" aria-label="Поиск задач" placeholder="Найти задачу" value="${esc(query)}"><select id="board-project" aria-label="Проект доски"><option value="">Все проекты</option>${Object.entries(data.projects).map(([k,p])=>`<option value="${esc(k)}" ${project===k?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
-      <select id="board-status" aria-label="Статус задачи"><option value="">Все статусы</option>${Object.entries(labels).map(([k,v])=>`<option value="${k}" ${status===k?'selected':''}>${v}</option>`).join('')}</select>
+      <select id="board-status" aria-label="Этап"><option value="">Все этапы</option>${COLUMNS().map(k=>`<option value="${k}" ${status===k?'selected':''}>${esc(stageTitle(k))}</option>`).join('')}</select>
       <select id="board-priority" aria-label="Приоритет"><option value="">Все приоритеты</option>${['🔴','🟡','🟢'].map(k=>`<option ${priority===k?'selected':''}>${k}</option>`).join('')}</select>
       <select id="board-ai" aria-label="ИИ-исполнитель"><option value="">Все ИИ</option>${Object.entries(providers()).map(([k,p])=>`<option value="${esc(k)}" ${ai===k?'selected':''}>${esc(p.name)}</option>`).join('')}<option value="none" ${ai==='none'?'selected':''}>Не назначены</option><option value="busy" ${ai==='busy'?'selected':''}>Заняты сейчас</option></select>
-      <label><input type="checkbox" id="board-only-focus" ${onlyFocus?'checked':''}> Только фокус</label><button id="board-next">Что взять следующим</button><button id="board-plan">Добавить план</button><button id="board-refresh">Обновить доски</button><button id="board-split">⇄ Распределить между ИИ</button><label>ИИ по умолчанию <select id="board-default-ai" aria-label="ИИ по умолчанию">${Object.entries(providers()).map(([k,p])=>`<option value="${esc(k)}" ${data.settings?.default_executor===k?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><details class="board-settings"><summary>⚙ Исполнение и ревью</summary><label>Ревью делает <select id="board-reviewer">${[['same','тот же ИИ, что выполнял'],['other','другой ИИ'],...Object.entries(providers()).map(([k,p])=>[k,'всегда '+p.name])].map(([v,l])=>`<option value="${esc(v)}" ${data.settings?.reviewer===v?'selected':''}>${esc(l)}</option>`).join('')}</select></label><label><input type="checkbox" id="board-auto-review" ${data.settings?.auto_launch_review!==false?'checked':''}> Открывать ревью автоматически после автопроверки</label><label><input type="checkbox" id="board-auto-merge" ${data.settings?.auto_merge!==false?'checked':''}> Сливать ветку в базовую после одобренного ревью</label></details></div>${parallel()}`;
+      <label><input type="checkbox" id="board-only-focus" ${onlyFocus?'checked':''}> Только фокус</label><button id="board-next">Что взять следующим</button><button id="board-plan">Добавить план</button><button id="board-idea">💡 Идея</button><button id="board-refresh">Обновить доски</button><button id="board-split">⇄ Распределить между ИИ</button><label>ИИ по умолчанию <select id="board-default-ai" aria-label="ИИ по умолчанию">${Object.entries(providers()).map(([k,p])=>`<option value="${esc(k)}" ${data.settings?.default_executor===k?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><details class="board-settings"><summary>⚙ Исполнение и ревью</summary><label>Ревью делает <select id="board-reviewer">${[['same','тот же ИИ, что выполнял'],['other','другой ИИ'],...Object.entries(providers()).map(([k,p])=>[k,'всегда '+p.name])].map(([v,l])=>`<option value="${esc(v)}" ${data.settings?.reviewer===v?'selected':''}>${esc(l)}</option>`).join('')}</select></label><label><input type="checkbox" id="board-auto-review" ${data.settings?.auto_launch_review!==false?'checked':''}> Открывать ревью автоматически после автопроверки</label><label><input type="checkbox" id="board-auto-merge" ${data.settings?.auto_merge!==false?'checked':''}> Сливать ветку в базовую после одобренного ревью</label><label><input type="checkbox" id="board-auto-pipeline" ${data.settings?.auto_pipeline!==false?'checked':''}> Конвейер: открывать сессии ролей автоматически</label>${Object.keys(data.pipeline?.roles||{}).map(r=>`<label>${esc(roleTitle(r))} <select data-role-ai="${esc(r)}">${[['','по умолчанию'],...Object.entries(providers()).map(([k,p])=>[k,p.name])].map(([v,l])=>`<option value="${esc(v)}" ${(data.settings?.roles||{})[r]===v||(!v&&!(data.settings?.roles||{})[r])?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`).join('')}</details></div>${parallel()}${teamleadJournal()}`;
   const policyTemplate=()=>`<details><summary>Модели и правила экономии</summary><p>${esc(data.policy.availability)}. ${esc(data.policy.evidence)}.</p><ul>${data.policy.rules.map(v=>`<li>${esc(v)}</li>`).join('')}</ul><table><thead><tr><th>ИИ</th><th>Модель</th><th>Сильные стороны</th><th>Ограничения</th></tr></thead><tbody>${data.models.map(m=>`<tr><td>${esc(aiName(m.provider))}</td><td>${esc(m.id)}${Object.values(data.lineup?.[m.provider]||{}).includes(m.id)?'':' · только явно'}</td><td>${esc(m.strength)}</td><td>${esc(m.weakness)}</td></tr>`).join('')}</tbody></table></details><div id="board-list"></div>`;
   function cardTemplate(t){
     const i=data.tasks.indexOf(t),run=data.runs.find(r=>r.ref===t.ref&&['queued','running'].includes(r.status));
-    return `<article class="board-task" draggable="true" data-drag="${i}"><small>${esc(t.id)} · ${esc(t.size||'?')} · ${esc(t.priority||'')}</small><h4>${esc(t.title)}</h4>${aiBadge(t)}${reviewBadge(t)}${manualBadge(t)}<small>${esc(t.route.model)} · ${esc(t.route.effort)}</small><small>${esc(t.route.reason)}${t.route.provisional?' — требуется уточнение':''}</small><small>Бюджет: ${t.route.total_token_budget.toLocaleString('ru')} токенов · ${t.route.max_attempts} попытки</small>${t.review_required?'<small>Лимит попыток достигнут: пересмотрите модель или декомпозицию</small>':""}${t.needs_plan&&t.status!=='done'?'<small>Нужна декомпозиция / критерии приёмки</small>':''}${t.blocked_by.length?`<small>Зависит от: ${esc(t.blocked_by.join(', '))}</small>`:''}${run&&run.status==='queued'?launchState(t,run,i):''}${t.status_note&&['blocked','cancelled'].includes(t.status)?`<div class="board-note">${t.status==='blocked'?'⛔':'✕'} ${esc(t.status_note)}</div>`:''}${t.complexity?.needs_assessment&&!['done','cancelled'].includes(t.status)?`<div class="board-assess" title="${esc((t.complexity.conflicts||[]).join('; ')||'аналитика и декомпозиция оцениваются ИИ по умолчанию')}">🔍 Сначала оценка сложности · уверенность ${t.complexity.confidence}</div>`:''}<button data-detail="${i}">Паспорт</button><button data-priority="${i}">Приоритет</button>${!run&&!['done','cancelled','blocked','review','in_progress'].includes(t.status)&&!t.needs_plan&&!t.review_required&&!t.blocked_by.length?`<span class="board-launch">${launchSelect(t,i)}<button data-launch="${i}">${launchLabel(t,null)}</button></span>`:''}</article>`;
+    return `<article class="board-task" draggable="true" data-drag="${i}"><small>${esc(t.id)} · ${esc(t.size||'?')} · ${esc(t.priority||'')}</small><h4>${esc(t.title)}</h4>${t.pipeline?pipelineBadge(t,i):aiBadge(t)+reviewBadge(t)+manualBadge(t)}${t.pipeline?'':`<small>${esc(t.route.model)} · ${esc(t.route.effort)}</small><small>${esc(t.route.reason)}${t.route.provisional?' — требуется уточнение':''}</small><small>Бюджет: ${t.route.total_token_budget.toLocaleString('ru')} токенов · ${t.route.max_attempts} попытки</small>${t.review_required?'<small>Лимит попыток достигнут: пересмотрите модель или декомпозицию</small>':""}${t.needs_plan&&t.status!=='done'?'<small>Нужна декомпозиция / критерии приёмки</small>':''}`}${t.blocked_by.length?`<small>Зависит от: ${esc(t.blocked_by.join(', '))}</small>`:''}${!t.pipeline&&run&&run.status==='queued'?launchState(t,run,i):''}${t.status_note&&['blocked','cancelled'].includes(t.status)?`<div class="board-note">${t.status==='blocked'?'⛔':'✕'} ${esc(t.status_note)}</div>`:''}${t.complexity?.needs_assessment&&!['done','cancelled'].includes(t.status)?`<div class="board-assess" title="${esc((t.complexity.conflicts||[]).join('; ')||'аналитика и декомпозиция оцениваются ИИ по умолчанию')}">🔍 Сначала оценка сложности · уверенность ${t.complexity.confidence}</div>`:''}<button data-detail="${i}">Паспорт</button><button data-priority="${i}">Приоритет</button>${!t.pipeline&&!run&&!['done','cancelled','blocked','review','in_progress'].includes(t.status)&&!t.needs_plan&&!t.review_required&&!t.blocked_by.length?`<span class="board-launch">${launchSelect(t,i)}<button data-launch="${i}">${launchLabel(t,null)}</button></span>`:''}</article>`;
   }
-  const columnTemplate=(c,ts)=>{const items=ts.filter(t=>column(t)===c);return `<div class="board-column" data-column="${c}"><h3>${labels[c]} · ${items.length}</h3>${items.map(cardTemplate).join('')}</div>`;};
-  const projectTemplate=(k,ts)=>`<section class="board-project"><h2>${data.focus.includes(k)?'★ ':''}${esc(data.projects[k].name)} · ${ts.length}</h2><div class="board-columns">${COLUMNS.map(c=>columnTemplate(c,ts)).join('')}</div></section>`;
+  const columnTemplate=(c,ts)=>{const items=ts.filter(t=>column(t)===c);const st=STAGES().find(s=>s.id===c);
+    return `<div class="board-column" data-column="${c}"><h3>${esc(stageTitle(c))} · ${items.length}</h3>${st?`<div class="board-stage-roles">${st.roles.map(r=>`<span class="board-role${st.optional?.[r]?' board-role-opt':''}" title="${esc(data.pipeline.roles[r].mission)}">${esc(roleTitle(r))}</span>`).join('')}${st.gate?'<span class="board-role board-role-gate" title="Ворота ИИ-тимлида">🚦 тимлид</span>':''}${st.owner_approval?'<span class="board-role board-role-gate" title="Нужно «да» владельца">👤 владелец</span>':''}</div><button class="board-dod" data-stage-info="${c}">DoR / DoD</button>`:''}${items.map(cardTemplate).join('')}</div>`;};
+  const projectTemplate=(k,ts)=>`<section class="board-project"><h2>${data.focus.includes(k)?'★ ':''}${esc(data.projects[k].name)} · ${ts.length}</h2><div class="board-columns">${COLUMNS().map(c=>columnTemplate(c,ts)).join('')}</div></section>`;
   const filtered=()=>data.tasks.filter(t=>(!project||t.project===project)&&(!onlyFocus||data.focus.includes(t.project))&&(!status||column(t)===status)&&(!priority||t.priority===priority)&&aiMatch(t)&&(!query||(t.title+' '+t.id).toLowerCase().includes(query.toLowerCase())));
   const saveFilters=()=>{try {localStorage.setItem('tt-board-filters',JSON.stringify({query,project,status,priority,ai,onlyFocus}));}catch{}};
   // Полная отрисовка: панель инструментов, список, баннеры.
@@ -94,6 +108,9 @@
     root.querySelector('#board-refresh').onclick=()=>refresh().catch(e=>message.textContent=e.message);
     root.querySelector('#board-next').onclick=()=>{const ts=data.tasks.filter(t=>(!project||project===t.project)&&!['done','cancelled','in_progress','review','blocked'].includes(t.status)&&!t.needs_plan&&!t.review_required&&!t.blocked_by.length&&!data.runs.some(r=>r.ref===t.ref&&['queued','running'].includes(r.status))).slice(0,5);modal('Следующие задачи',`<p>Порядок: фокус → приоритет → размер. Зависимости и незавершённая проработка исключают запуск.</p>${ts.map(t=>`<p><b>${esc(t.ref)}</b> — ${esc(t.title)}<br>${Object.entries(t.routes||{[t.route.provider]:t.route}).map(([k,r])=>`${esc(aiName(k))}: ${esc(r.model)} · ${esc(r.effort)}`).join(' · ')}<br><small>${esc(t.route.reason)}</small></p>`).join('')||'<p>Готовых к запуску задач нет.</p>'}`);};
     root.querySelector('#board-plan').onclick=plan;
+    root.querySelector('#board-idea').onclick=ideaDialog;
+    root.querySelector('#board-auto-pipeline').onchange=e=>change({op:'settings',changes:{auto_pipeline:e.target.checked}});
+    root.querySelectorAll('[data-role-ai]').forEach(el=>el.onchange=()=>change({op:'settings',changes:{roles:{[el.dataset.roleAi]:el.value||data.settings?.default_executor}}}));
     root.querySelector('#board-plan').textContent='＋ Новая задача';
     BOARD_EXTRAS.decorateToolbar(root,data,project);
     if(data.server?.stale)root.insertAdjacentHTML('afterbegin','<div class="board-banner" role="alert">⚠ Сервер досок запущен со старым кодом: часть новых функций не работает. Перезапустите его: Ctrl+C в окне сервера, затем <code>py tools/pm.py serve</code>.</div>');
@@ -105,6 +122,9 @@
     const keys=Object.keys(data.projects).filter(k=>(!project||project===k)&&(!onlyFocus||data.focus.includes(k))).sort((a,b)=>Number(data.focus.includes(b))-Number(data.focus.includes(a)));
     const list=root.querySelector('#board-list');
     list.innerHTML=keys.map(k=>{const ts=visible.filter(t=>t.project===k);return !ts.length&&(query||status||priority||ai)?'':projectTemplate(k,ts);}).join('')||'<p>Нет досок по выбранным фильтрам.</p>';
+    root.querySelectorAll('[data-stage-info]').forEach(el=>el.onclick=()=>stageInfo(el.dataset.stageInfo));
+    root.querySelectorAll('[data-approve]').forEach(el=>el.onclick=()=>{const t=data.tasks[Number(el.dataset.approve)];change({op:'approve_release',ref:t.ref});});
+    root.querySelectorAll('[data-role-run]').forEach(el=>el.onclick=async()=>{el.disabled=true;const t=data.tasks[Number(el.dataset.roleTask)];try{await openSession(t,null,el.dataset.roleRun);}catch(e){message.textContent=e.message;el.disabled=false;}});
     root.querySelectorAll('[data-detail]').forEach(el=>el.onclick=()=>detail(data.tasks[Number(el.dataset.detail)]));
     root.querySelectorAll('[data-priority]').forEach(el=>el.onclick=()=>{const t=data.tasks[Number(el.dataset.priority)];change({op:'update',ref:t.ref,changes:{priority:['🔴','🟡','🟢'][(['🔴','🟡','🟢'].indexOf(t.priority)+1)%3]}});});
     root.querySelectorAll('[data-launch-ai]').forEach(sel=>sel.onchange=()=>{const b=root.querySelector(`[data-launch="${sel.dataset.launchAi}"]`);if(b)b.textContent=launchLabel(data.tasks[Number(sel.dataset.launchAi)],sel.value);});
@@ -121,7 +141,8 @@
     hints(list);
   }
   function detail(t){
-    modal(t.ref,`<p>${esc(t.title)}</p>${nextStep(t)}<p>${esc(t.why||'')}</p>${reviewInfo(t)}${typeInfo(t)}<p>Корень: ${esc(t.root||'не указан')} · зависимости: ${esc((t.depends_on||[]).join(', ')||'нет')}</p><h3>Критерии приёмки</h3><ul>${(t.acceptance||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul><h3>План модели</h3><table><thead><tr><th>ИИ</th><th>Модель</th><th>Усилия</th><th>Бюджет</th><th>Почему</th></tr></thead><tbody>${Object.entries(t.routes||{}).map(([k,r])=>`<tr><td>${esc(aiName(k))}${k===t.route.provider?' ✓':''}</td><td>${esc(r.model)}</td><td>${esc(r.effort)}</td><td>${(r.total_token_budget||0).toLocaleString('ru')}</td><td>${esc(r.reason)}${r.source==='manual'?' (ручной выбор)':''}</td></tr>`).join('')}</tbody></table><details><summary>Текущий маршрут целиком</summary><pre>${esc(JSON.stringify(t.route,null,2))}</pre></details><p>Бюджеты — ориентир исполнителю, не технический лимит модели. При превышении остановиться и пересмотреть план.</p>${complexityInfo(t)}<h3>Статус: ${esc(labels[column(t)]||t.status)}</h3>${t.status_note?`<p>${esc(t.status_note)}</p>`:''}<div class="board-status-actions">${statusButtons(t)}</div>${(t.status_history||[]).length?`<details><summary>История статуса</summary><ul>${t.status_history.slice().reverse().map(h=>`<li>${esc(h.at.slice(0,16).replace('T',' '))}: ${esc(labels[h.from_status]||h.from_status)} → ${esc(labels[h.to]||h.to)}${h.reason?' — '+esc(h.reason):''}</li>`).join('')}</ul></details>`:''}<button id="board-packet">Пакет исполнителю</button><button id="board-edit">Проработать задачу</button>`);
+    if(t.pipeline)return pipelineDetail(t);
+    modal(t.ref,`<p>${esc(t.title)}</p>${nextStep(t)}<p>${esc(t.why||'')}</p>${reviewInfo(t)}${typeInfo(t)}<p>Корень: ${esc(t.root||'не указан')} · зависимости: ${esc((t.depends_on||[]).join(', ')||'нет')}</p><h3>Критерии приёмки</h3><ul>${(t.acceptance||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul><h3>План модели</h3><table><thead><tr><th>ИИ</th><th>Модель</th><th>Усилия</th><th>Бюджет</th><th>Почему</th></tr></thead><tbody>${Object.entries(t.routes||{}).map(([k,r])=>`<tr><td>${esc(aiName(k))}${k===t.route.provider?' ✓':''}</td><td>${esc(r.model)}</td><td>${esc(r.effort)}</td><td>${(r.total_token_budget||0).toLocaleString('ru')}</td><td>${esc(r.reason)}${r.source==='manual'?' (ручной выбор)':''}</td></tr>`).join('')}</tbody></table><details><summary>Текущий маршрут целиком</summary><pre>${esc(JSON.stringify(t.route,null,2))}</pre></details><p>Бюджеты — ориентир исполнителю, не технический лимит модели. При превышении остановиться и пересмотреть план.</p>${complexityInfo(t)}<h3>Статус: ${esc(labels[t.status]||t.status)} · колонка «${esc(stageTitle(column(t)))}»</h3>${t.status_note?`<p>${esc(t.status_note)}</p>`:''}<div class="board-status-actions">${statusButtons(t)}</div>${(t.status_history||[]).length?`<details><summary>История статуса</summary><ul>${t.status_history.slice().reverse().map(h=>`<li>${esc(h.at.slice(0,16).replace('T',' '))}: ${esc(labels[h.from_status]||h.from_status)} → ${esc(labels[h.to]||h.to)}${h.reason?' — '+esc(h.reason):''}</li>`).join('')}</ul></details>`:''}<button id="board-packet">Пакет исполнителю</button><button id="board-edit">Проработать задачу</button>`);
     dialog.querySelectorAll('[data-move]').forEach(el=>el.onclick=()=>{dialog.close();moveTo(t,el.dataset.move);});
     const ac=dialog.querySelector('#board-autocheck');
     if(ac)ac.onclick=async()=>{ac.disabled=true;try{await api({op:'autocheck',ref:t.ref});dialog.close();await refresh();message.textContent='Автопроверка запущена: результат появится в паспорте задачи.';}catch(e){message.textContent=e.message;ac.disabled=false;}};
@@ -149,8 +170,8 @@
     const wt=run.launch?.worktree?`<small>Рабочая копия: ${esc(run.launch.worktree.branch)}</small>`:'';
     return `<div class="${cls}">${head}${route} · ${esc(run.id)}${wt}<span>${extra}<button data-prompt="${i}">Задание для ИИ</button><button data-unlaunch="${i}">Отменить запуск</button></span></div>`;
   }
-  async function openSession(t,agent){
-    const r=await fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json','X-TaskTreker':'1'},body:JSON.stringify({ref:t.ref,agent})});
+  async function openSession(t,agent,run){
+    const r=await fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json','X-TaskTreker':'1'},body:JSON.stringify(Object.assign({ref:t.ref},agent?{agent}:{},run?{run}:{}))});
     const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Сессию открыть не удалось');
     await refresh();const d=j.data;
     modal('Сессия открыта: '+t.id,`<p>Открыто окно <b>${esc(aiName(d.agent))}</b>: ${esc(d.route.model)} · ${esc(d.route.effort)}, запуск ${esc(d.run)}.</p><p>Папка: <code>${esc(d.cwd)}</code>${d.worktree?`<br>Отдельная рабочая копия, ветка <code>${esc(d.worktree.branch)}</code>`:''}</p><p>Первым шагом ИИ примет задачу. Тогда на карточке появится 🔒 с именем <code>${esc(d.worker)}</code>. Если окно спросит о доверии к папке или о разрешениях — ответьте в нём.</p><details><summary>Задание, переданное ИИ</summary><pre>${esc(d.prompt)}</pre></details>`);
@@ -218,7 +239,14 @@
     '#board-complete':'Закрыть вручную: нужны все отмеченные критерии и описание проверки',
     '#board-autocheck':'Проверить ветку: коммиты, область, тесты проекта, слияние; затем ревью ИИ и «Готово»',
     '#board-next':'Пять задач, готовых к запуску: по фокусу, приоритету и размеру',
-    '#board-plan':'Создать задачу: проект, тип, исходный запрос и критерии',
+    '#board-plan':'Создать задачу вручную, вне конвейера: проект, тип, запрос и критерии',
+    '#board-idea':'Отправить идею в конвейер: Product Owner → анализ → разработка → ревью → тест → main',
+    '[data-stage-info]':'Роли этапа, DoR и DoD — ровно то, что проверяет сервер',
+    '[data-approve]':'Разрешить деплой в main: ворота тимлида пройдены, нужен ваш ответ',
+    '#pipe-approve':'Разрешить деплой в main',
+    '[data-role-run]':'Открыть сессию роли: модель роли, скилл роли, рабочая копия задачи',
+    '#board-auto-pipeline':'Если включено — сервер досок сам открывает сессии ролей конвейера',
+    '[data-role-ai]':'Какой ИИ выполняет эту роль во всех задачах конвейера',
     '#board-refresh':'Перечитать задачи и запуски с сервера',
     '#board-split':'Предложить распределение задач проекта между ИИ — с предпросмотром',
     '#board-default-ai':'ИИ, который предлагается для задач без назначения; на карточке его можно сменить перед запуском',
@@ -253,7 +281,7 @@
     root.querySelectorAll('[data-column]').forEach(col=>{
       col.ondragover=e=>{e.preventDefault();col.classList.add('is-drop');};
       col.ondragleave=()=>col.classList.remove('is-drop');
-      col.ondrop=e=>{e.preventDefault();col.classList.remove('is-drop');const t=data.tasks[Number(e.dataTransfer.getData('text/plain'))];if(t&&column(t)!==col.dataset.column)moveTo(t,col.dataset.column);};
+      col.ondrop=e=>{e.preventDefault();col.classList.remove('is-drop');const t=data.tasks[Number(e.dataTransfer.getData('text/plain'))];const target=t&&(t.pipeline?col.dataset.column:LEGACY_STATUS[col.dataset.column]);if(t&&target&&(t.pipeline?column(t)!==target:t.status!==target))moveTo(t,target);};
     });
   }
   function manualBadge(t){
@@ -272,6 +300,7 @@
     dialog.querySelector('#start-manual').onclick=()=>{dialog.close();change({op:'status',ref:t.ref,status:'in_progress'});};
   }
   function moveTo(t,target){
+    if(t.pipeline&&target!=='cancelled'){message.textContent='Этап задачи конвейера меняет тимлид по DoR/DoD — вручную её можно только отменить или заблокировать в паспорте.';return;}
     if(target==='in_progress'&&!t.claim&&!t.queued_run){startDialog(t);return;}
     if(target==='done'){message.textContent='«Готово» — только с проверкой критериев: отметьте их в паспорте и нажмите «Завершить с проверкой».';detail(t);return;}
     const needReason=['blocked','cancelled'].includes(target)||t.status==='done';
@@ -282,7 +311,7 @@
       try{await api({op:'status',ref:t.ref,status:target,reason});dialog.close();await refresh();message.textContent='Сохранено';}catch(e){dialog.querySelector('#board-reason-error').textContent=e.message;}};
   }
   function statusButtons(t){
-    const cur=column(t),open=!['done','cancelled'].includes(t.status);
+    const cur=t.status,open=!['done','cancelled'].includes(t.status);
     const b=[];
     if(t.status!=='in_progress'&&open&&!t.claim)b.push(['in_progress','▶ В работу']);
     if(t.status!=='review'&&open)b.push(['review','Проверка']);
@@ -320,6 +349,53 @@
     }catch(e){message.textContent=e.message;}
   }
   function plan(){ BOARD_EXTRAS.form({data,project,modal,dialog,api,refresh}); }
+  // ---------- конвейер
+  const ROLE_STATE={queued:['⏳','ждёт сессии'],running:['▶','работает'],checking:['🔎','проверки сервера'],done:['✅','сдал(а)'],returned:['↩','возврат'],pending:['·','ждёт']};
+  function pipelineBadge(t,i){
+    const p=t.pipeline, st=STAGES().find(s=>s.id===p.stage);
+    if(p.stage==='done')return `<div class="board-review">✅ В main: все этапы сданы по DoD</div>`;
+    const roles=(st?.roles||[]).filter(r=>!st.optional?.[r]||(p.needs||{})[st.optional[r]]);
+    const chips=roles.map(r=>{const e=(p.roles||{})[p.stage+'/'+r]||{};const [ic,tx]=ROLE_STATE[e.state]||ROLE_STATE.pending;
+      const run=data.runs.find(x=>x.id===e.run&&x.status==='queued'&&!x.launched_at);
+      const fails=(e.result||[]).filter(x=>x.ok===false);
+      return `<div class="board-role-row" title="${esc(fails.map(f=>f.id+': '+f.detail).join('\n'))}">${ic} <b>${esc(roleTitle(r))}</b> — ${esc(tx)}${fails.length?` · ✗ DoD: ${fails.length}`:''}${run&&canLaunch(run.agent)?` <button data-role-run="${esc(run.id)}" data-role-task="${i}">Открыть</button>`:''}</div>`;}).join('');
+    const gate=st?.gate&&roles.every(r=>((p.roles||{})[p.stage+'/'+r]||{}).state==='done')?`<div class="board-role-row">🚦 Ворота тимлида: ${esc((p.gates||{})[st.gate]?.decision||'ждут решения')}</div>`:'';
+    const approve=p.stage==='deploy_main'&&(p.gates||{}).release?.decision==='approve'&&!(p.approvals||{}).release?`<button class="board-approve" data-approve="${i}">👤 Одобрить релиз в main</button>`:'';
+    const note=t.status_note?`<div class="board-note${t.status==='blocked'?'':' board-note-soft'}">${t.status==='blocked'?'⛔ ':''}${esc(t.status_note)}</div>`:'';
+    return `<div class="board-pipe">${chips}${gate}</div>${note}${approve}`;
+  }
+  const kindRu={artifact:'артефакт',evidence:'доказательство',machine:'сервер',gate:'ворота'};
+  function stageInfo(id){
+    const st=STAGES().find(s=>s.id===id);if(!st)return;
+    const items=its=>`<ul class="board-checks">${its.map(i=>`<li><code>${esc(i.id)}</code> ${esc(i.text)} <small>${esc(kindRu[i.kind]||i.kind)}${i.allow_na?' · можно «неприменимо» с причиной':''}</small></li>`).join('')}</ul>`;
+    modal('Этап «'+st.title+'»',`<p>Роли: ${st.roles.map(r=>esc(roleTitle(r))+(st.optional?.[r]?' (если нужен по решению PO)':'')+' — скилл <code>'+esc(data.pipeline.roles[r].skill)+'</code>').join('; ')}.</p>${st.gate?'<p>🚦 После сдачи ролей — ворота ИИ-тимлида.</p>':''}${st.owner_approval?'<p>👤 Нужно «да» владельца.</p>':''}<h3>DoR — без него роли не получают задачу</h3>${items(st.dor)}${Object.entries(st.dod).map(([r,its])=>`<h3>DoD: ${esc(roleTitle(r))} — без него передача не принимается</h3>${items(its)}`).join('')}`);
+  }
+  function pipelineDetail(t){
+    const p=t.pipeline;
+    const res=(rows)=>`<ul class="board-checks">${(rows||[]).map(x=>`<li>${x.ok===true?'✅':x.ok===false?'❌':'⏳'} <code>${esc(x.id)}</code><small>${esc(x.detail||'')}</small></li>`).join('')}</ul>`;
+    const stages=STAGES().map(st=>{const s=(p.stages||{})[st.id]||{};const cur=p.stage===st.id;
+      const roles=st.roles.filter(r=>(p.roles||{})[st.id+'/'+r]);
+      return `<details${cur?' open':''}><summary>${s.passed?'✅':cur?'▶':'·'} ${esc(st.title)}${cur?' — текущий':''}</summary>${s.dor?`<p><b>DoR</b></p>${res(s.dor)}`:''}${roles.map(r=>{const e=p.roles[st.id+'/'+r];return `<p><b>${esc(roleTitle(r))}</b> — ${esc((ROLE_STATE[e.state]||[])[1]||e.state)}${e.handoff?.summary?': '+esc(e.handoff.summary):''}</p>${e.result?res(e.result):''}${e.feedback?`<p class="board-note">Замечания: ${esc(e.feedback.map(f=>f.detail||f.text).join('; '))}</p>`:''}`;}).join('')}</details>`;}).join('');
+    const gates=Object.entries(p.gates||{}).map(([g,v])=>`<li>🚦 ${esc(g)}: ${esc(v.decision)} — ${esc(v.notes||'')}</li>`).join('');
+    const wt=p.worktree?`<p class="board-workspace"><b>Ветка задачи</b><span><code>${esc(p.worktree.branch)}</code> · <code>${esc(p.worktree.path)}</code></span><span>Артефакты: <code>docs/tasks/${esc(t.id)}/</code></span></p>`:'';
+    const journal=(p.journal||[]).slice().reverse().map(e=>`<li><small>${esc(e.at.slice(5,16).replace('T',' '))}</small> ${esc(e.text)}</li>`).join('');
+    const i=data.tasks.indexOf(t);
+    modal(t.ref,`<p><b>${esc(t.title)}</b></p><div class="board-next"><p><b>Сейчас:</b> ${esc(p.stage==='done'?'Задача в main.':'Этап «'+stageTitle(p.stage)+'». '+(t.status_note||''))}</p>${p.blocked?`<p><b>Блокер:</b> ${esc(p.blocked.reason)}</p>`:''}</div><p>${esc(t.why||'')}</p>${wt}${(t.acceptance||[]).length?`<h3>Критерии приёмки</h3><ul>${t.acceptance.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>`:''}<h3>Этапы</h3>${stages}${gates?`<h3>Ворота</h3><ul>${gates}</ul>`:''}<h3>Журнал задачи</h3><ul class="board-journal">${journal}</ul>${p.stage==='deploy_main'&&(p.gates||{}).release?.decision==='approve'&&!(p.approvals||{}).release?`<button id="pipe-approve">👤 Одобрить релиз в main</button>`:''}<div class="board-status-actions">${t.status!=='cancelled'?'<button data-move="cancelled">✕ Отменить</button>':''}</div>`);
+    dialog.querySelector('#pipe-approve')?.addEventListener('click',()=>{dialog.close();change({op:'approve_release',ref:t.ref});});
+    dialog.querySelectorAll('[data-move]').forEach(el=>el.onclick=()=>{dialog.close();moveTo(t,el.dataset.move);});
+  }
+  function teamleadJournal(){
+    const ev=(data.teamlead||[]).filter(e=>!project||e.ref.split('/')[0]===project).slice(-30).reverse();
+    if(!ev.length)return '';
+    const icon={handoff:'📨',handoff_rejected:'⛔',check_failed:'❌',check_passed:'✅',stage_passed:'🏁',stage_started:'▶',gate:'🚦',escalation:'🆘',returned:'↩',idea:'💡',run:'⏳',dor_failed:'⚠',dor_wait:'👤',approved:'👤',done:'🎉'};
+    return `<details class="board-journal-box"><summary>📋 Журнал тимлида (${ev.length})</summary><ul class="board-journal">${ev.map(e=>`<li>${icon[e.kind]||'·'} <small>${esc(e.at.slice(5,16).replace('T',' '))} · ${esc(e.ref)}</small> ${esc(e.text)}</li>`).join('')}</ul></details>`;
+  }
+  function ideaDialog(){
+    modal('💡 Новая идея',`<p>Идея попадёт в колонку «Идея»; дальше её подхватит Product Owner, затем аналитика и остальные роли по DoR/DoD.</p><form id="idea-form" class="board-form" novalidate><label class="wide"><span>Проект <b class="board-star">*</b></span><select id="idea-project" required><option value="">Выберите проект</option>${Object.entries(data.projects).map(([k,p])=>`<option value="${esc(k)}" ${project===k?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><label class="wide"><span>Идея коротко <b class="board-star">*</b></span><input id="idea-title" required minlength="5" maxlength="200"></label><label class="wide"><span>Что и зачем, своими словами <b class="board-star">*</b></span><textarea id="idea-text" required minlength="20"></textarea></label><div class="wide"><button type="submit">Отправить в конвейер</button><p id="idea-error" role="alert"></p></div></form>`);
+    const f=dialog.querySelector('#idea-form');
+    f.onsubmit=async e=>{e.preventDefault();f.classList.add('tried');if(!f.checkValidity()){dialog.querySelector('#idea-error').textContent='Заполните подсвеченные поля.';return;}
+      try{const r=await api({op:'idea',project:dialog.querySelector('#idea-project').value,title:dialog.querySelector('#idea-title').value.trim(),text:dialog.querySelector('#idea-text').value.trim(),source:'board'});dialog.close();await refresh();message.textContent='Идея '+r.id+' в конвейере: Product Owner получит её автоматически.';}catch(err){dialog.querySelector('#idea-error').textContent=err.message;}};
+  }
   // Автообновление: пока вкладка видна, доска подтягивает чужие запуски и аренды.
   // Перерисовка не идёт при открытом диалоге и пока пользователь печатает или выбирает в фильтрах:
   // иначе сбросится фокус и введённое.

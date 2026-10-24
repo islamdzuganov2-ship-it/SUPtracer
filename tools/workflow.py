@@ -8,6 +8,7 @@
 import argparse
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 import complexity as cx
@@ -553,6 +554,69 @@ def check_assign(assign, project, agents, result, tasks):
         got={assign[r] for r in g['tasks'] if r in assign}
         if len(got)>1: raise ValueError('Связная группа уходит одному ИИ целиком: '+', '.join(g['tasks']))
 
+SIZE_POINTS={'S':1,'M':3,'L':8,'XL':20}
+PRIORITY_ORDER={'🔴':0,'🟡':1,'🟢':2}
+
+def per_ai(points):
+    """Сколько параллельных сессий на ИИ даёт объём готового бэклога (очки размера S=1, M=3, L=8)."""
+    return 1 if points < 10 else 2 if points < 40 else 3
+
+def start_plan(project, agents, sessions, tasks, runs, at):
+    """«Запустить проект»: какие готовые задачи бэклога и каким ИИ отдать одним нажатием.
+
+    Число сессий — из объёма готового бэклога (per_ai), не больше заданного владельцем.
+    Порядок — приоритет, затем сколько открытых задач ждут эту, затем меньший размер.
+    Две задачи с пересекающейся областью в один пакет не попадают; назначенный ИИ соблюдается."""
+    mine=[t for t in tasks if t['project']==project]
+    open_=[t for t in mine if t.get('status') not in ('done','cancelled')]
+    waiting=Counter(d for t in open_ for d in t.get('depends_on') or [])
+    pipe_runs=[r for r in runs if r['ref'].split('/')[0]==project and r.get('role') and r['status']=='queued'
+               and not r.get('launched_at') and not r.get('paused')]
+    piped={r['ref'] for r in pipe_runs}
+    ready_=[]; skipped=[]
+    for t in open_:
+        if t.get('pipeline'):
+            continue      # задачи конвейера ведёт тимлид: их роли открываются отдельно
+        why=('уже ждёт исполнителя' if t.get('queued_run') else
+             'в работе' if t.get('status') in ('in_progress','review') and not (t['claim'] or {}).get('stale') else
+             'заблокирована' if t.get('status')=='blocked' else
+             'ждёт задачи ' + ', '.join(t['blocked_by']) if t['blocked_by'] else
+             'нет плана (критерии, размер)' if t['needs_plan'] else
+             'назначена ИИ %s — не выбран' % t['executor'] if t.get('executor') and t['executor'] not in agents else
+             'занята другим ИИ' if not ready(t) else None)
+        if why: skipped.append(dict(ref=t['ref'], title=t['title'], why=why))
+        else: ready_.append(t)
+    ready_.sort(key=lambda t:(PRIORITY_ORDER.get(t.get('priority'),1), -waiting[t['id']], SIZE_POINTS.get(t.get('size'),3), t['id']))
+    points=sum(SIZE_POINTS.get(t.get('size'),3) for t in ready_)
+    auto=min(len(ready_), per_ai(points)*len(agents))
+    limit=auto if sessions in (None,0) else min(int(sessions), len(ready_))
+    # Сессии делятся между ИИ поровну (не больше cap на ИИ), при равенстве — меньшая загрузка в очках.
+    cap=-(-limit//len(agents)) if limit else 0
+    load={a:0 for a in agents}; count={a:0 for a in agents}; picks=[]
+    for t in ready_:
+        if len(picks)>=limit: break
+        if scope_conflict(t, tasks, runs, at) or any(t.get('scope') and p['task'].get('scope') and scopes_overlap(t['scope'], p['task']['scope']) for p in picks):
+            skipped.append(dict(ref=t['ref'], title=t['title'], why='область пересекается с задачей в работе или в пакете')); continue
+        free=[a for a in ([t['executor']] if t.get('executor') else agents) if count[a]<cap]
+        if not free: continue      # назначенный ИИ уже получил свою долю сессий — задача в следующий запуск
+        agent=min(free, key=lambda a:(count[a], load[a], agents.index(a)))
+        load[agent]+=SIZE_POINTS.get(t.get('size'),3); count[agent]+=1
+        route=recommendation(t, agent=agent)
+        picks.append(dict(task=t, ref=t['ref'], title=t['title'], size=t.get('size'), priority=t.get('priority'), agent=agent,
+                          model=route['model'], effort=route['effort'], waiting=waiting[t['id']]))
+    picked={p['ref'] for p in picks}
+    rest=[t for t in ready_ if t['ref'] not in picked]
+    return dict(project=project, agents=agents,
+                backlog=dict(open=len(open_), ready=len(ready_), points=points, blocked=sum(1 for t in open_ if t['blocked_by'] or t.get('status')=='blocked'),
+                             needs_plan=sum(1 for t in open_ if t['needs_plan']), in_work=sum(1 for t in open_ if t.get('status') in ('in_progress','review')),
+                             pipeline=sum(1 for t in open_ if t.get('pipeline'))),
+                per_ai=per_ai(points), auto_sessions=auto, sessions=len(picks),
+                picks=[{k:v for k,v in p.items() if k!='task'} for p in picks],
+                later=[dict(ref=t['ref'], title=t['title']) for t in rest][:20],
+                skipped=skipped[:40], pipeline_runs=[dict(run=r['id'], ref=r['ref'], role=r['role'], agent=r.get('agent')) for r in pipe_runs],
+                reason='Готово %d задач на %d очк. → по %d сессии на ИИ × %d ИИ = %d' % (len(ready_), points, per_ai(points), len(agents), auto)
+                       if ready_ else ('Бэклог пуст' if not open_ else 'Готовых задач нет: ' + '; '.join(sorted({x['why'].split(' — ')[0] for x in skipped}))[:300]))
+
 def split(project, agents, tasks, runs, at):
     """Объяснимое распределение: связные группы (зависимости, общая область)
     целиком уходят одному ИИ; группы раскладываются по наименее загруженному."""
@@ -1026,6 +1090,24 @@ def action(req):
             if 'default_executor' in changes and changes['default_executor'] not in PROVIDERS: raise ValueError('Неизвестный ИИ по умолчанию')
             if 'lease_minutes' in changes and (type(changes['lease_minutes'])!=int or not 5<=changes['lease_minutes']<=480): raise ValueError('Аренда: от 5 до 480 минут')
             s.setdefault('settings',{}).update(changes)
+        elif op=='start':
+            project=req.get('project'); snap=snapshot()
+            if project not in snap['projects']: raise ValueError('Неизвестный проект')
+            agents=req.get('agents') or [settings(s)['default_executor']]
+            if not isinstance(agents,list) or not agents or len(set(agents))!=len(agents) or any(a not in PROVIDERS for a in agents): raise ValueError('agents: один или оба ИИ')
+            sessions=req.get('sessions')
+            if sessions is not None and (type(sessions)!=int or not 0<=sessions<=12): raise ValueError('sessions: от 1 до 12 (0 — по объёму бэклога)')
+            plan=start_plan(project, agents, sessions, snap['tasks'], s['runs'], at)
+            if req.get('dry_run', True): return dict(plan, dry_run=True)
+            if not plan['picks'] and not plan['pipeline_runs']: raise ValueError(plan['reason'])
+            batch='B-%s' % at.strftime('%Y%m%d%H%M%S')
+            byref={t['ref']:t for t in snap['tasks']}
+            for p in plan['picks']:
+                t=byref[p['ref']]; pk=packet(p['ref'], agent=p['agent'])
+                run=new_run(s, p['ref'], pk, at); run.update(agent=p['agent'], batch=batch)
+                p['run']=run['id']
+            save('workflow.json',s)
+            return dict(plan, dry_run=False, batch=batch)
         elif op=='split':
             project=req.get('project'); agents=req.get('agents') or list(PROVIDERS)
             snap=snapshot()

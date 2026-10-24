@@ -319,7 +319,7 @@ TOOLS.append({"name": "tt_work", "title": "Планирование и испо�
         "verdict": STR, "criteria": {"type":"array", "items":{"type":"object"}}, "conclusion": STR, "spec": {"type":"object"},
         "items": {"type":"object"}, "summary": STR, "needs": {"type":"object"}, "acceptance": {"type":"array", "items":STR},
         "signoff": {"type":"boolean"}, "to_stage": STR, "roles": {"type":"array", "items":STR}, "decision": STR,
-        "notes": STR, "title": STR, "text": STR, "source": STR, "checkpoint": STR, "resets_at": STR,
+        "notes": STR, "title": STR, "text": STR, "source": STR, "checkpoint": STR, "resets_at": STR, "sessions": {"type":"integer"},
         "defects": {"type":"array", "items":{"type":"object"}}, "fixes": {"type":"object"},
         "tasks": {"type":"array", "items":{"type":"object"}},
         "projects": {"type":"array", "items":STR}, "changes":{"type":"object"}}, ["op"]),

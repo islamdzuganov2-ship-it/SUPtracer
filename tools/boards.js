@@ -84,7 +84,7 @@
   }
   const columnTemplate=(c,ts)=>{const items=ts.filter(t=>column(t)===c);const st=STAGES().find(s=>s.id===c);
     return `<div class="board-column" data-column="${c}"><h3>${esc(stageTitle(c))} · ${items.length}</h3>${st?`<div class="board-stage-roles">${st.roles.map(r=>`<span class="board-role${st.optional?.[r]?' board-role-opt':''}" title="${esc(data.pipeline.roles[r].mission)}">${esc(roleTitle(r))}</span>`).join('')}${st.gate?'<span class="board-role board-role-gate" title="Ворота ИИ-тимлида">🚦 тимлид</span>':''}${st.owner_approval?'<span class="board-role board-role-gate" title="Нужно «да» владельца">👤 владелец</span>':''}</div><button class="board-dod" data-stage-info="${c}">DoR / DoD</button>`:''}${items.map(cardTemplate).join('')}</div>`;};
-  const projectTemplate=(k,ts)=>`<section class="board-project"><h2>${data.focus.includes(k)?'★ ':''}${esc(data.projects[k].name)} · ${ts.length}</h2><div class="board-columns">${COLUMNS().map(c=>columnTemplate(c,ts)).join('')}</div></section>`;
+  const projectTemplate=(k,ts)=>`<section class="board-project"><h2>${data.focus.includes(k)?'★ ':''}${esc(data.projects[k].name)} · ${ts.length} <button class="board-start" data-start="${esc(k)}">▶ Запустить проект</button></h2><div class="board-columns">${COLUMNS().map(c=>columnTemplate(c,ts)).join('')}</div></section>`;
   const filtered=()=>data.tasks.filter(t=>(!project||t.project===project)&&(!onlyFocus||data.focus.includes(t.project))&&(!status||column(t)===status)&&(!priority||t.priority===priority)&&aiMatch(t)&&(!query||(t.title+' '+t.id).toLowerCase().includes(query.toLowerCase())));
   const saveFilters=()=>{try {localStorage.setItem('tt-board-filters',JSON.stringify({query,project,status,priority,ai,onlyFocus}));}catch{}};
   // Полная отрисовка: панель инструментов, список, баннеры.
@@ -123,6 +123,7 @@
     const list=root.querySelector('#board-list');
     list.innerHTML=keys.map(k=>{const ts=visible.filter(t=>t.project===k);return !ts.length&&(query||status||priority||ai)?'':projectTemplate(k,ts);}).join('')||'<p>Нет досок по выбранным фильтрам.</p>';
     root.querySelectorAll('[data-stage-info]').forEach(el=>el.onclick=()=>stageInfo(el.dataset.stageInfo));
+    root.querySelectorAll('[data-start]').forEach(el=>el.onclick=()=>startDialog(el.dataset.start));
     root.querySelectorAll('[data-approve]').forEach(el=>el.onclick=()=>{const t=data.tasks[Number(el.dataset.approve)];change({op:'approve_release',ref:t.ref});});
     root.querySelectorAll('[data-role-run]').forEach(el=>el.onclick=async()=>{el.disabled=true;const t=data.tasks[Number(el.dataset.roleTask)];try{await openSession(t,null,el.dataset.roleRun);}catch(e){message.textContent=e.message;el.disabled=false;}});
     root.querySelectorAll('[data-detail]').forEach(el=>el.onclick=()=>detail(data.tasks[Number(el.dataset.detail)]));
@@ -249,6 +250,10 @@
     '[data-role-ai]':'Какой ИИ выполняет эту роль во всех задачах конвейера',
     '#board-refresh':'Перечитать задачи и запуски с сервера',
     '#board-split':'Предложить распределение задач проекта между ИИ — с предпросмотром',
+    '[data-start]':'Запустить работу по проекту: готовые задачи бэклога одним пакетом, число сессий — по объёму бэклога; сначала предпросмотр',
+    '#start-go':'Поставить задачи пакета в очередь и открыть сессии выбранных ИИ',
+    '[data-start-ai]':'Какие ИИ получают сессии пакета; сессии делятся между ними поровну',
+    '#start-sessions':'Сколько сессий открыть; «по бэклогу» — 1, 2 или 3 на ИИ при готовом бэклоге до 10, до 40 и от 40 очков',
     '#board-default-ai':'ИИ, который предлагается для задач без назначения; на карточке его можно сменить перед запуском',
     '[data-relaunch-ai]':'Какой ИИ откроется; выбор другого ИИ перезакрепит запуск за ним',
     '#board-reviewer':'Кто проверяет готовую работу: тот же ИИ, другой или всегда конкретный',
@@ -332,6 +337,41 @@
     const by={};running.forEach(t=>(by[t.claim.agent||'?']??=[]).push(t));
     return `<div class="board-parallel" aria-label="Параллельная работа ИИ">${Object.entries(by).map(([k,ts])=>`<div><h3>${esc(aiName(k))} · ${ts.length}</h3>${ts.map(t=>`<p class="${t.claim.stale?'board-claim-stale':leaseSoon(t.claim)?'board-claim-soon':''}"><b>${esc(t.ref)}</b> ${esc(t.title)}<br><small>${esc(t.claim.worker||'?')} · ${esc(t.claim.model||'')} · ${t.claim.stale?'аренда истекла':'до '+esc(time(t.claim.lease_until))}${(t.scope||[]).length?' · область: '+esc(t.scope.join(', ')):''}</small></p>`).join('')}</div>`).join('')}</div>`;
   }
+  // «▶ Запустить проект»: предпросмотр пакета (что, кому, почему), затем один запуск.
+  async function startDialog(k){
+    const agents=new Set([data.settings?.default_executor||'claude']);let sessions=0;
+    const show=async()=>{
+      let r;
+      try{r=await api({op:'start',project:k,agents:[...agents],sessions,dry_run:true});}catch(e){message.textContent=e.message;return;}
+      const b=r.backlog,n=r.picks.length+r.pipeline_runs.length;
+      modal('Запустить проект: '+data.projects[k].name,`
+        <p>Бэклог: открыто <b>${b.open}</b>, готово к запуску <b>${b.ready}</b> (${b.points} очк.), в работе ${b.in_work}, ждут зависимостей или заблокированы ${b.blocked}, без плана ${b.needs_plan}${b.pipeline?`, в конвейере ${b.pipeline}`:''}.</p>
+        <p>${esc(r.reason)}</p>
+        <p>ИИ: ${Object.entries(providers()).map(([a,p])=>`<label><input type="checkbox" data-start-ai="${esc(a)}"${agents.has(a)?' checked':''}> ${esc(p.name)}</label>`).join(' ')}
+          · Сессий: <select id="start-sessions"><option value="0">по бэклогу (${r.auto_sessions})</option>${[1,2,3,4,5,6].filter(v=>v<=Math.max(b.ready,1)).map(v=>`<option value="${v}"${sessions===v?' selected':''}>${v}</option>`).join('')}</select></p>
+        ${r.picks.length?`<table class="board-start-table"><thead><tr><th>Задача</th><th>Разм.</th><th>ИИ · модель</th><th>Почему сейчас</th></tr></thead><tbody>${r.picks.map(p=>`<tr><td>${esc(p.priority||'')} <b>${esc(p.ref.split('/')[1])}</b> ${esc(p.title)}</td><td>${esc(p.size||'')}</td><td>${esc(aiName(p.agent))} · ${esc(p.model)} · ${esc(p.effort)}</td><td>${p.waiting?`ждут её: ${p.waiting}`:'по приоритету и размеру'}</td></tr>`).join('')}</tbody></table>`:''}
+        ${r.pipeline_runs.length?`<p>Конвейер: откроются роли ${r.pipeline_runs.map(x=>esc(x.ref.split('/')[1]+' — '+roleTitle(x.role))).join(', ')}.</p>`:''}
+        ${r.later.length?`<details><summary>Готовы, но в следующий запуск (${r.later.length})</summary>${r.later.map(x=>`<div>${esc(x.ref.split('/')[1])} ${esc(x.title)}</div>`).join('')}</details>`:''}
+        ${r.skipped.length?`<details><summary>Не запускаются сейчас (${r.skipped.length})</summary>${r.skipped.map(x=>`<div>${esc(x.ref.split('/')[1])} ${esc(x.title)} — <i>${esc(x.why)}</i></div>`).join('')}</details>`:''}
+        ${n?`<p><button id="start-go" class="primary">▶ Запустить ${n} ${n===1?'сессию':n<5?'сессии':'сессий'}</button></p>`:''}`);
+      dialog.querySelectorAll('[data-start-ai]').forEach(el=>el.onchange=()=>{el.checked?agents.add(el.dataset.startAi):agents.delete(el.dataset.startAi);if(!agents.size){agents.add(el.dataset.startAi);el.checked=true;}show();});
+      dialog.querySelector('#start-sessions').value=String(sessions);
+      dialog.querySelector('#start-sessions').onchange=e=>{sessions=Number(e.target.value);show();};
+      const go=dialog.querySelector('#start-go');
+      if(go)go.onclick=async()=>{
+        go.disabled=true;go.textContent='Открываю сессии…';
+        try{
+          const res=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json','X-TaskTreker':'1'},body:JSON.stringify({project:k,agents:[...agents],sessions})});
+          const j=await res.json();if(!res.ok||!j.ok)throw Error(j.error||'Запуск не выполнен');
+          dialog.close();await refresh();
+          message.textContent=`Запущено: ${j.data.opened.length} сессий${j.data.failed.length?`; не открылись ${j.data.failed.length} — причина на карточках`:''}.`;
+        }catch(e){go.disabled=false;go.textContent='Повторить запуск';message.textContent=e.message;}
+      };
+    };
+    if(location.protocol==='file:'){message.textContent='Запуск проекта работает с сервером досок: py tools/pm.py serve';return;}
+    await show();
+  }
+
   async function splitDialog(){
     const k=project||data.focus[0];
     if(!k){message.textContent='Выберите проект доски: распределение делается внутри одного проекта.';return;}

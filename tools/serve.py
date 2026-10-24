@@ -239,6 +239,25 @@ def launch_session(req):
                 route=info["route"], worker=info["worker"], prompt=info["prompt"])
 
 
+def start_project(req):
+    """«▶ Запустить проект»: пакет готовых задач бэклога ставится в очередь, и по каждой
+    открывается сессия выбранного ИИ; заодно открываются неоткрытые роли конвейера проекта.
+    Сбой одного окна не останавливает остальные — причина пишется на карточку."""
+    import workflow
+    plan = workflow.action(dict(op="start", project=req.get("project"), agents=req.get("agents"),
+                                sessions=req.get("sessions"), dry_run=False))
+    opened, failed = [], []
+    jobs = [dict(ref=p["ref"], agent=p["agent"], run=p["run"]) for p in plan["picks"]]
+    jobs += [dict(ref=r["ref"], agent=r.get("agent"), run=r["run"]) for r in plan["pipeline_runs"]]
+    for job in jobs:
+        try:
+            launch_session(job); opened.append(job["run"])
+        except Exception as e:   # noqa: BLE001 — остальные сессии всё равно открываются
+            workflow.mark_launch_error(job["ref"], job["run"], e)
+            failed.append(dict(job, error=str(e)[:300]))
+    return dict(plan, opened=opened, failed=failed)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TaskTreker"
 
@@ -295,7 +314,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_only():
             return
         path = self.path.split("?")[0]
-        if path not in ("/api/refresh", "/api/connect", "/api/work", "/api/launch"):
+        if path not in ("/api/refresh", "/api/connect", "/api/work", "/api/launch", "/api/start"):
             return self.send_json(404, {"ok": False, "error": "нет такого адреса"})
         if self.headers.get("X-TaskTreker") != "1":
             # Форма с чужого сайта такой заголовок поставить не может.
@@ -312,6 +331,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/launch":
             try:
                 return self.send_json(200, {"ok": True, "data": launch_session(req)})
+            except (ValueError, TypeError, KeyError, OSError) as e:
+                return self.send_json(400, {"ok": False, "error": str(e)})
+        if path == "/api/start":
+            try:
+                return self.send_json(200, {"ok": True, "data": start_project(req)})
             except (ValueError, TypeError, KeyError, OSError) as e:
                 return self.send_json(400, {"ok": False, "error": str(e)})
         if path == "/api/work":

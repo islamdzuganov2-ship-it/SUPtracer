@@ -114,7 +114,7 @@ REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна дора�
 
 def settings(s=None):
     return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
-                     reviewer='same', auto_merge=True, auto_launch_review=True),
+                     reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={}),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -278,7 +278,9 @@ def snapshot():
     tasks.sort(key=lambda t:t['rank'])
     roots=[{k:r.get(k) for k in ('id','title','project')} for r in read('memory/index.json',{}).get('records',[])
            if r.get('kind')=='запрос' and r.get('status')=='активна']
-    return dict(projects={k:dict(workspace(k,p), next_id=next_id(p)) for k,p in projects.items()},
+    import pipeline as P
+    return dict(pipeline=P.spec_for_board(), teamlead=s.get('teamlead',[])[-80:],
+                projects={k:dict(workspace(k,p), next_id=next_id(p)) for k,p in projects.items()},
                 task_types=TASK_TYPES, directions=DIRECTIONS,
                 tasks=tasks, roots=roots, focus=s['focus'], runs=s['runs'][-50:], models=MODELS, policy=POLICY,
                 providers=PROVIDERS, lineup=LINEUP, efforts=EFFORTS, settings=conf)
@@ -612,7 +614,11 @@ def start_run(s, t, run, req, at):
     if req.get('agent') and req['agent']!=agent: raise ValueError('Модель %s не принадлежит ИИ %s' % (model, req['agent']))
     if t.get('executor') and t['executor']!=agent:
         raise ValueError('Задача назначена ИИ %s; ИИ %s её не берёт' % (t['executor'], agent))
-    p=packet(t['ref'], agent=agent)
+    if run.get('role'):
+        import orchestra
+        p=orchestra.role_packet(t, run, agent)
+    else:
+        p=packet(t['ref'], agent=agent)
     if model!=p['route']['model']:
         raise ValueError('Фактическая модель должна совпадать с паспортом: %s' % p['route']['model'])
     conflict=scope_conflict(t, snapshot()['tasks'], s['runs'], at, worker)
@@ -621,6 +627,10 @@ def start_run(s, t, run, req, at):
     until=(at+timedelta(minutes=minutes)).isoformat()
     run.update(status='running',worker=worker,model=model,agent=agent,packet=p,phase=p['phase'],
                claimed_at=at.isoformat(),heartbeat_at=at.isoformat(),lease_until=until)
+    if run.get('role'):
+        import pipeline as P
+        return dict(status='in_progress', status_note='%s: %s (%s)' % (P.ROLES[run['role']]['title'], PROVIDERS[agent]['name'], worker),
+                    claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until, role=run['role']))
     note={'review':'Идёт ревью', 'assess':'Идёт оценка сложности'}.get(p['phase'],
           'Доработка' if (t.get('auto_check') or {}).get('ok') is False or (t.get('review') or {}).get('verdict')=='changes' else None)
     return dict(status='review' if p['phase']=='review' else 'in_progress', status_note=note and '%s: %s (%s)' % (note, PROVIDERS[agent]['name'], worker),
@@ -848,7 +858,15 @@ def action(req):
             if agent and t.get('executor') not in (None,'',agent): continue
             out.append(dict(r, executor=t.get('executor') or '', stale=r['status']=='running' and not lease_alive(r, at)))
         return out[:10]
-    if op=='packet': return packet(req.get('ref',''), agent=agent)
+    if op=='packet':
+        t=task_for(req.get('ref',''))
+        if t.get('pipeline'):
+            import orchestra
+            runs=[r for r in state()['runs'] if r['ref']==t['ref'] and r.get('role') and r['status'] in ('queued','running')]
+            run=next((r for r in runs if r['id']==req.get('run')), runs[0] if len(runs)==1 else None)
+            if not run: raise ValueError('Укажите run: паспорт задачи конвейера — это паспорт роли (%s)' % ', '.join(r['id']+' '+r['role'] for r in runs) or 'нет активных запусков')
+            return orchestra.role_packet(t, run, run.get('agent') or agent or settings()['default_executor'])
+        return packet(t['ref'], agent=agent)
     if op=='prompt':
         # Задание для ждущего запуска — повторно, если владелец закрыл окно после «Запустить».
         t=task_for(req.get('ref',''))
@@ -880,22 +898,37 @@ def action(req):
     extra={}
     with locked():
         s=state(); at=now()
-        if op=='plan':
+        if op in ('idea','handoff','return','escalate','gate','approve_release'):
+            import orchestra
+            if op=='idea':
+                extra=orchestra.op_idea(s, req, at)
+            else:
+                t=task_for(req.get('ref',''))
+                if not orchestra.is_pipeline(t): raise ValueError('Задача не идёт по конвейеру')
+                extra=getattr(orchestra,'op_'+op)(s, req, t, at)
+            save('workflow.json',s)
+            job=extra.pop('_pipejob',None)
+        elif op=='plan':
             project=req.get('project'); tasks=prepare_plan(project,req.get('tasks')); validate_plan(project,tasks)
             tasks=create_roots(project,tasks)   # только после полной проверки: план атомарен
             d=read('projects.json',{}); b=d['projects'][project].setdefault('backlog',[])
             # План модели прорабатывается сразу: для каждого ИИ — модель и усилия под задачу.
             b.extend(dict(t,status='queued',model_plan=model_plan(t)) for t in tasks); save('projects.json',d)
             return dict(ok=True, added=[t['id'] for t in tasks], roots=sorted({t['root'] for t in tasks}))
-        if op=='focus':
+        elif op=='focus':
             keys=req.get('projects'); known=snapshot()['projects']
             if not isinstance(keys,list) or any(not isinstance(k,str) or k not in known for k in keys): raise ValueError('Неизвестные проекты фокуса')
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles')
             if 'reviewer' in changes and changes['reviewer'] not in ('same','other',*PROVIDERS): raise ValueError('Ревьюер: same, other или ИИ')
-            for key in ('auto_merge','auto_launch_review'):
+            if 'roles' in changes:
+                import pipeline as P
+                if not isinstance(changes['roles'],dict) or any(r not in P.ROLES or a not in PROVIDERS for r,a in changes['roles'].items()):
+                    raise ValueError('roles: {роль: claude|codex}')
+                changes['roles']=dict(settings(s).get('roles') or {}, **changes['roles'])
+            for key in ('auto_merge','auto_launch_review','auto_pipeline'):
                 if key in changes and type(changes[key])!=bool: raise ValueError(key+': true или false')
             if 'default_executor' in changes and changes['default_executor'] not in PROVIDERS: raise ValueError('Неизвестный ИИ по умолчанию')
             if 'lease_minutes' in changes and (type(changes['lease_minutes'])!=int or not 5<=changes['lease_minutes']<=480): raise ValueError('Аренда: от 5 до 480 минут')
@@ -917,6 +950,10 @@ def action(req):
         else:
             ref=req.get('ref',''); t=task_for(ref)
             patch={}
+            if t.get('pipeline') and op in ('enqueue','take','complete','autocheck','repin','finish','fail') :
+                raise ValueError('Задача идёт по конвейеру: работу сдают через op=handoff с выполненным DoD, возвращают через op=return')
+            if t.get('pipeline') and op=='status' and req.get('status') not in ('blocked','cancelled','queued'):
+                raise ValueError('Задача идёт по конвейеру: этап меняет тимлид по DoR/DoD; вручную — только блокировка и отмена')
             if op=='update':
                 if any(r['ref']==ref and r['status']=='running' for r in s['runs']): raise ValueError('Паспорт выполняемой задачи менять нельзя: сначала остановите запуск')
                 changes,new_root=update_patch(t, req.get('changes',{}), at); patch.update(changes)
@@ -1093,9 +1130,25 @@ def action(req):
             else: raise ValueError('Неизвестная операция')
             write_patches(s, {ref:patch} if patch else {})
         save('workflow.json',s)
+    if op in ('idea','handoff','return','escalate','gate','approve_release'):
+        if job: spawn_pipejob(*job)
+        return dict(ok=True, **extra)
     spawn=extra.pop('_autocheck',None)
     if spawn: spawn_autocheck(*spawn)
     return dict(ok=True, **extra)
+
+def spawn_pipejob(ref, role, stage, run_id):
+    """Тяжёлые пункты DoD (тесты, слияния) — отдельным процессом, как автопроверка."""
+    if os.environ.get('TASKTREKER_PIPELINE_SYNC')=='1':
+        import orchestra
+        return orchestra.job(ref, role, stage, run_id)
+    import subprocess, sys
+    logs=ROOT/'ops'/'logs'; logs.mkdir(parents=True, exist_ok=True)
+    flags=(subprocess.DETACHED_PROCESS|subprocess.CREATE_NO_WINDOW) if os.name=='nt' else 0
+    with open(logs/'pipeline.log','a',encoding='utf-8') as log:
+        subprocess.Popen([sys.executable, str(Path(__file__)), 'pipejob', ref, '--run', run_id, '--role', role, '--stage', stage],
+                         env=dict(os.environ, TASKTREKER_DATA=data_dir().as_posix()), stdout=log, stderr=log,
+                         stdin=subprocess.DEVNULL, creationflags=flags, cwd=str(ROOT))
 
 def foreign_copy():
     """Запуск из рабочей копии задачи: код ветки может быть старше системы, а данные общие.
@@ -1113,11 +1166,15 @@ def main(args=None):
     if refusal:
         print(refusal); return 2
     parser=argparse.ArgumentParser(description='Доски: list/next/packet; изменения через request JSON')
-    parser.add_argument('op',choices=['list','next','packet','queue','models','request','worktree','autocheck']); parser.add_argument('value',nargs='?')
-    parser.add_argument('--run',help='запуск для autocheck')
+    parser.add_argument('op',choices=['list','next','packet','queue','models','request','worktree','autocheck','pipejob']); parser.add_argument('value',nargs='?')
+    parser.add_argument('--run',help='запуск для autocheck и pipejob')
+    parser.add_argument('--role'); parser.add_argument('--stage')
     parser.add_argument('--agent',choices=sorted(PROVIDERS),help='ИИ, для которого строится маршрут (next, packet, queue)')
     a=parser.parse_args(args)
     try:
+        if a.op=='pipejob':
+            import orchestra
+            print(json.dumps(orchestra.job(a.value or '', a.role, a.stage, a.run),ensure_ascii=False)); return 0
         if a.op=='autocheck':
             print(json.dumps(autocheck_run(a.value or '', a.run or ''),ensure_ascii=False,indent=2)); return 0
         if a.op=='worktree':

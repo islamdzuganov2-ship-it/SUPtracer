@@ -94,17 +94,19 @@ def dashboard_stale():
 def dispatch_once():
     """Автозапуск: ревью после пройденной автопроверки открывается само, если включено."""
     import workflow
-    if not workflow.settings()["auto_launch_review"]:
-        return []
+    conf = workflow.settings()
     started = []
     for r in workflow.state()["runs"]:
         if r.get("status") != "queued" or not r.get("auto_launch") or r.get("launched_at"):
+            continue
+        # Роли конвейера — по auto_pipeline, ревью старого потока — по auto_launch_review.
+        if not (conf["auto_pipeline"] if r.get("role") else conf["auto_launch_review"]):
             continue
         if time.time() - _auto_attempts.get(r["id"], 0) < 300:
             continue
         _auto_attempts[r["id"]] = time.time()
         try:
-            launch_session(dict(ref=r["ref"], agent=r.get("agent")))
+            launch_session(dict(ref=r["ref"], agent=r.get("agent"), run=r["id"]))
             started.append(r["id"])
         except Exception as e:   # noqa: BLE001 — причина видна на карточке
             workflow.mark_launch_error(r["ref"], r["id"], e)
@@ -115,9 +117,32 @@ def dispatcher(interval=15):
     while True:
         time.sleep(interval)
         try:
+            import orchestra
+            orchestra.tick()          # задачи, ждавшие DoR (например, одобрения владельца)
             dispatch_once()
         except Exception as e:   # noqa: BLE001 — сервер досок не должен падать из-за автозапуска
             sys.stderr.write("автозапуск: %s\n" % e)
+
+
+def launch_role(t, run, req):
+    """Сессия роли конвейера: своя модель роли, рабочая копия задачи, скилл роли, право правки файлов."""
+    import workflow, launcher, orchestra
+    agent = req.get("agent") or run.get("agent") or workflow.settings()["default_executor"]
+    if run.get("agent") and agent != run["agent"]:
+        raise ValueError("Роль закреплена за ИИ %s: сменить можно в настройках ролей" % run["agent"])
+    wt = (t.get("pipeline") or {}).get("worktree") or {}
+    project = workflow.read("projects.json", {})["projects"][t["project"]]
+    cwd = wt.get("path") or project.get("inspection_path") or project.get("path")
+    route = orchestra.role_route(t, run["role"], agent)
+    worker = workflow.worker_id(run, agent)
+    prompt = orchestra.role_prompt(t, run, route, worker)
+    opened = launcher.launch(agent, route["model"], route["effort"], prompt, cwd, edits=True,
+                             env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix(),
+                                        "TASKTREKER_SYSTEM": os.path.dirname(os.path.abspath(workflow.__file__))})
+    workflow.mark_launched(t["ref"], run["id"], dict(pid=opened["pid"], cli=os.path.basename(opened["exe"]),
+                                                      cwd=cwd, worktree=wt or None, agent=agent, role=run["role"]))
+    return dict(run=run["id"], agent=agent, pid=opened["pid"], cwd=cwd, worktree=wt or None, role=run["role"],
+                route=route, worker=worker, prompt=prompt)
 
 
 def launch_session(req):
@@ -128,7 +153,10 @@ def launch_session(req):
     import workflow, launcher
     ref = str(req.get("ref") or "")
     t = workflow.task_for(ref)
-    run = next((r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued"), None)
+    run = next((r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued"
+                and (not req.get("run") or r["id"] == req["run"])), None)
+    if run and run.get("role"):
+        return launch_role(t, run, req)
     # ИИ: явный выбор владельца, затем закрепление запуска, исполнитель задачи, ИИ по умолчанию.
     agent = req.get("agent") or (run or {}).get("agent") or t.get("executor") or workflow.settings()["default_executor"]
     workflow.check_executor(agent)

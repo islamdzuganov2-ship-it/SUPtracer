@@ -180,7 +180,7 @@ class ReviewTests(DataCase):
         with mock.patch.object(serve, 'launch_session', side_effect=ValueError('Командная строка не найдена')) as ls:
             self.assertEqual(serve.dispatch_once(), [])
             serve.dispatch_once()                       # повтор раньше 5 минут не делается
-        ls.assert_called_once_with(dict(ref=REF, agent='claude'))
+        ls.assert_called_once_with(dict(ref=REF, agent='claude', run=rv['id']))
         self.assertIn('не найдена', next(r for r in w.state()['runs'] if r['id'] == rv['id'])['launch_error'])
         serve._auto_attempts.clear()
         w.action(dict(op='settings', changes={'auto_launch_review': False}))

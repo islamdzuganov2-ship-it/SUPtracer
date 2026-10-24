@@ -24,7 +24,7 @@ import time
 
 # Поля, которые меняются по ходу исполнения и живут в оперативном слое.
 OPS = ('status', 'status_note', 'status_history', 'claimed_by', 'acceptance_done',
-       'auto_check', 'review', 'evidence')
+       'auto_check', 'review', 'evidence', 'pipeline')
 # Итог задачи: переход в закрытый статус и обратно пишется и в ручной слой.
 OUTCOME = ('status', 'evidence', 'completed_at')
 FINAL = ('done', 'cancelled')

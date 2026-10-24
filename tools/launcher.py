@@ -56,16 +56,25 @@ def status():
     return out
 
 
-def command(provider, exe, model, effort, prompt, cwd):
+def command(provider, exe, model, effort, prompt, cwd, edits=False):
+    """edits=True — сессия роли конвейера: правка файлов в рабочей копии задачи без вопросов
+    (Claude: acceptEdits; Codex: песочница workspace-write), команды — по подтверждению."""
     if provider == 'claude':
-        return [exe, '--model', model, '--effort', effort, prompt]
+        return [exe, '--model', model, '--effort', effort, *(['--permission-mode', 'acceptEdits'] if edits else []), prompt]
     if provider == 'codex':
-        return [exe, '-m', model, '-c', 'model_reasoning_effort="%s"' % effort, '-C', cwd, prompt]
+        return [exe, '-m', model, '-c', 'model_reasoning_effort="%s"' % effort, '-C', cwd,
+                *(['-s', 'workspace-write', '-a', 'on-request'] if edits else []), prompt]
     raise ValueError('Неизвестный ИИ: ' + str(provider))
 
 
 def _git(args, cwd):
     return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+
+def ensure_task_worktree(repo, task_id, base=None):
+    """Рабочая копия задачи конвейера: одна ветка task/<задача> для всех ролей — от идеи
+    до деплоя артефакты и код идут вместе."""
+    return ensure_worktree(repo, None, task_id, base)
 
 
 def ensure_worktree(repo, agent, task_id, base=None):
@@ -77,8 +86,8 @@ def ensure_worktree(repo, agent, task_id, base=None):
     if not (repo / '.git').exists():
         return None
     slug = re.sub(r'[^a-z0-9.-]+', '-', task_id.lower()).strip('-')
-    branch = 'ai/%s/%s' % (agent, slug)
-    path = repo.parent / (repo.name + '.worktrees') / ('%s-%s' % (agent, slug))
+    branch = 'task/%s' % slug if agent is None else 'ai/%s/%s' % (agent, slug)
+    path = repo.parent / (repo.name + '.worktrees') / ('task-%s' % slug if agent is None else '%s-%s' % (agent, slug))
     listed = _git(['worktree', 'list', '--porcelain'], repo).stdout
     if any(line == 'worktree ' + path.as_posix() or line.replace('\\', '/') == 'worktree ' + path.as_posix()
            for line in listed.splitlines()):
@@ -103,13 +112,13 @@ def open_window(cmd, cwd, env_extra=None):
     return proc.pid
 
 
-def launch(provider, model, effort, prompt, cwd, env_extra=None):
+def launch(provider, model, effort, prompt, cwd, env_extra=None, edits=False):
     exe = find_cli(provider)
     if not exe:
         raise ValueError(status()[provider]['note'])
     if not cwd or not Path(cwd).is_dir():
         raise ValueError('Рабочая папка проекта не найдена: %s' % (cwd or 'не указана'))
-    cmd = command(provider, exe, model, effort, prompt, cwd)
+    cmd = command(provider, exe, model, effort, prompt, cwd, edits)
     return dict(pid=open_window(cmd, cwd, env_extra), exe=exe, cwd=cwd)
 
 

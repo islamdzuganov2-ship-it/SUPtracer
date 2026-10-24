@@ -1,0 +1,436 @@
+"""Тимлид-оркестратор конвейера: двигает задачу по этапам, держит DoR/DoD, ведёт журнал.
+
+Оркестратор — сервер, а не ИИ: проверяет DoR и DoD по спецификации (pipeline.py), создаёт
+запуски ролей, принимает передачи. ИИ-тимлид вызывается на воротах «анализ → разработка»
+и «тест → main» и при эскалациях. Каждое событие — передача, отказ в приёме, возврат,
+эскалация, решение ворот — пишется в журнал тимлида: это и есть «агент сообщает тимлиду».
+
+Операции (через tt_work): idea, handoff, return, escalate, gate, approve_release.
+Обычные операции задачи (take, finish, complete…) к задаче конвейера не применяются:
+сдать работу можно только через handoff с выполненным DoD.
+"""
+import copy
+
+import pipeline as P
+import workflow as w
+
+MAX_ATTEMPTS = 3          # провалов DoD у роли подряд — дальше эскалация тимлиду
+MAX_LOOPS = 3             # возвратов между одной парой этапов — дальше эскалация
+RETURN_TO = {'reviewer': ['development'], 'qa': ['development'], 'devops': ['development', 'testing'],
+             'developer': ['analysis'], 'system_analyst': ['idea'], 'solution_architect': ['idea'],
+             'designer': ['idea'], 'marketer': ['idea']}
+
+
+def key(stage, role):
+    return '%s/%s' % (stage, role)
+
+
+def is_pipeline(t):
+    return bool(t.get('pipeline'))
+
+
+def new_pipe(source):
+    return dict(stage='idea', roles={}, stages={}, gates={}, approvals={}, journal=[], loops={}, source=source)
+
+
+def project_of(t):
+    return w.read('projects.json', {}).get('projects', {}).get(t['project'], {})
+
+
+def journal(s, pipe, ref, kind, text, role=None, stage=None):
+    """Событие для тимлида: в задачу и в общий журнал тимлида."""
+    e = dict(at=w.now().isoformat(), ref=ref, kind=kind, role=role, stage=stage or pipe.get('stage'), text=str(text)[:600])
+    pipe.setdefault('journal', []).append(e); pipe['journal'] = pipe['journal'][-60:]
+    tl = s.setdefault('teamlead', []); tl.append(e); s['teamlead'] = tl[-300:]
+    return e
+
+
+def role_agent(s, t, role):
+    roles = w.settings(s).get('roles') or {}
+    return roles.get(role) or t.get('executor') or w.settings(s)['default_executor']
+
+
+def role_route(t, role, agent):
+    """Маршрут роли: модель по сложности задачи, но не ниже класса роли."""
+    base = w.recommendation(dict(t, executor=agent, model=None, model_plan=None), agent=agent)
+    tier, floor = w.model_entry(base['model'])['tier'], P.ROLES[role]['min_tier']
+    if tier >= floor:
+        return dict(base, role=role)
+    model = w.LINEUP[agent][floor]; effort = w.model_entry(model)['effort']
+    return dict(base, model=model, effort=effort, role=role, total_token_budget=w.budget_for(model, effort),
+                reason=base['reason'] + '; роль «%s» — не ниже класса %d' % (P.ROLES[role]['title'], floor))
+
+
+def ensure_worktree(t, pipe):
+    if pipe.get('worktree'):
+        return pipe['worktree']
+    import launcher
+    p = project_of(t); repo = p.get('inspection_path') or p.get('path')
+    wt = launcher.ensure_task_worktree(repo, t['id']) if repo else None
+    if wt:
+        pipe['worktree'] = dict(path=wt['path'], branch=wt['branch'], base=wt.get('base'))
+    return pipe.get('worktree')
+
+
+def ctx_for(t, pipe, handoff=None):
+    return P.Context(dict(t, pipeline=pipe), project_of(t), pipe.get('worktree'), handoff)
+
+
+def active_run(s, ref, role=None, gate=None):
+    return next((r for r in s['runs'] if r['ref'] == ref and r['status'] in ('queued', 'running')
+                 and (role is None or r.get('role') == role) and (gate is None or r.get('gate') == gate)), None)
+
+
+def create_role_run(s, t, pipe, stage, role, at, feedback=None, gate=None):
+    if active_run(s, t['ref'], role=role, gate=gate):
+        return None
+    agent = role_agent(s, t, role)
+    run = w.new_run(s, t['ref'], None, at)
+    route = role_route(t, role, agent)
+    run.update(role=role, stage=stage, phase='role', agent=agent, gate=gate,
+               auto_launch=w.settings(s).get('auto_pipeline', True), packet=dict(route=route, phase='role'))
+    if role != 'teamlead':
+        k = key(stage, role); prev = pipe['roles'].get(k) or {}
+        pipe['roles'][k] = dict(state='queued', run=run['id'], attempts=prev.get('attempts', 0) + (1 if feedback else 0),
+                                feedback=feedback, agent=agent)
+    journal(s, pipe, t['ref'], 'run', '%s: запуск %s поставлен для %s (%s · %s)' % (
+        P.ROLES[role]['title'], run['id'], w.PROVIDERS[agent]['name'], route['model'], route['effort']), role, stage)
+    return run
+
+
+def status_of(s, ref, pipe):
+    if pipe['stage'] == 'done':
+        return 'done'
+    if pipe.get('blocked'):
+        return 'blocked'
+    running = any(r['ref'] == ref and r['status'] == 'running' for r in s['runs'])
+    return 'in_progress' if running else 'queued'
+
+
+def orchestrate(s, t, pipe, at):
+    """Двигать задачу, пока можно: DoR этапа → запуски ролей → ворота → следующий этап.
+    Возвращает правку задачи (status, status_note, pipeline)."""
+    note = None
+    for _ in range(len(P.ORDER) + 1):
+        stage = pipe['stage']
+        if stage == 'done' or pipe.get('blocked'):
+            break
+        st = pipe['stages'].setdefault(stage, {})
+        if not st.get('dor_ok'):
+            ensure_worktree(t, pipe)
+            dor = P.check_dor(stage, ctx_for(t, pipe), pipe)
+            st['dor'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in dor]
+            fails = [d for it, ok, d in dor if not ok]
+            if fails:
+                waiting_owner = all(it['check'] == 'owner_release' for it, ok, _ in dor if not ok)
+                note = ('Ждёт одобрения релиза владельцем' if waiting_owner else
+                        'DoR этапа «%s» не выполнен: %s' % (P.STAGE[stage]['title'], '; '.join(fails)))
+                if st.get('dor_note') != note:
+                    journal(s, pipe, t['ref'], 'dor_wait' if waiting_owner else 'dor_failed', note, stage=stage)
+                    st['dor_note'] = note
+                break
+            st.update(dor_ok=True, started=at.isoformat(), dor_note=None)
+            journal(s, pipe, t['ref'], 'stage_started', 'Этап «%s» начат: DoR выполнен' % P.STAGE[stage]['title'], stage=stage)
+        roles = P.stage_roles(stage, pipe.get('needs'))
+        for r in roles:
+            if (pipe['roles'].get(key(stage, r)) or {}).get('state') in (None, 'pending'):
+                create_role_run(s, t, pipe, stage, r, at, feedback=(pipe['roles'].get(key(stage, r)) or {}).get('feedback'))
+        states = {r: (pipe['roles'].get(key(stage, r)) or {}).get('state') for r in roles}
+        if any(v != 'done' for v in states.values()):
+            busy = [P.ROLES[r]['title'] for r, v in states.items() if v != 'done']
+            note = 'Этап «%s»: работают %s' % (P.STAGE[stage]['title'], ', '.join(busy))
+            break
+        gate = P.STAGE[stage].get('gate')
+        if gate:
+            g = pipe['gates'].get(gate)
+            if not g:
+                if not active_run(s, t['ref'], role='teamlead', gate=gate):
+                    create_role_run(s, t, pipe, stage, 'teamlead', at, gate=gate)
+                note = 'Ждёт ворот тимлида «%s»' % ('анализ → разработка' if gate == 'analysis' else 'тест → main')
+                break
+            if g.get('decision') != 'approve':
+                break
+        st.update(passed=True, passed_at=at.isoformat())
+        journal(s, pipe, t['ref'], 'stage_passed', 'Этап «%s» сдан по DoD' % P.STAGE[stage]['title'], stage=stage)
+        idx = P.ORDER.index(stage)
+        if idx == len(P.ORDER) - 1:
+            pipe['stage'] = 'done'
+            journal(s, pipe, t['ref'], 'done', 'Задача в main: все этапы сданы')
+            break
+        pipe['stage'] = P.ORDER[idx + 1]
+    status = status_of(s, t['ref'], pipe)
+    patch = dict(pipeline=pipe, status=status, status_note=note if status != 'done' else None)
+    if status == 'done':
+        patch.update(completed_at=at.isoformat(), evidence='Конвейер пройден: %s' % ' → '.join(P.STAGE[x]['title'] for x in P.ORDER))
+    return patch
+
+
+# ---------------------------------------------------------------- операции
+
+def op_idea(s, req, at):
+    """Идея от владельца (терминал Claude/Codex, доска, CLI) — задача в колонке «Идея»."""
+    project = req.get('project'); title = (req.get('title') or '').strip(); text = (req.get('text') or '').strip()
+    d = w.read('projects.json', {})
+    if project not in d.get('projects', {}): raise ValueError('Выберите проект: он задаёт папку и репозиторий для агентов')
+    if not 5 <= len(title) <= 200: raise ValueError('Название идеи — от 5 до 200 символов')
+    if len(text) < 20: raise ValueError('Опишите идею своими словами (не короче 20 символов)')
+    source = req.get('source') if req.get('source') in ('claude', 'codex', 'board', 'cli', 'system') else 'system'
+    task = dict(id=w.next_id(d['projects'][project]), title=title, why=text[:1000], size='M',
+                priority=req.get('priority') if req.get('priority') in ('🔴', '🟡', '🟢') else '🟡',
+                risk='medium', status='queued', source='идея: ' + source, new_root=dict(title=title, text=text))
+    task = w.create_roots(project, [task])[0]
+    d = w.read('projects.json', {}); d['projects'][project].setdefault('backlog', []).append(task); w.save('projects.json', d)
+    ref = project + '/' + task['id']
+    pipe = new_pipe(source)
+    journal(s, pipe, ref, 'idea', 'Новая идея (%s): %s' % (source, title), stage='idea')
+    t = dict(task, project=project, ref=ref)
+    w.write_patches(s, {ref: orchestrate(s, t, pipe, at)})
+    return dict(ref=ref, id=task['id'], root=task['root'])
+
+
+def _run(s, req, t, role=None):
+    run = next((r for r in s['runs'] if r['id'] == req.get('run') and r['ref'] == t['ref']), None)
+    if not run or not run.get('role'): raise ValueError('Запуск роли не найден')
+    if run['status'] != 'running': raise ValueError('Запуск не выполняется: сначала claim')
+    if req.get('worker') != run.get('worker'): raise ValueError('Сдаёт работу только принявший запуск исполнитель')
+    if role and run['role'] != role: raise ValueError('Это запуск роли %s' % run['role'])
+    return run
+
+
+def op_handoff(s, req, t, at):
+    """Роль сдаёт этап. Сервер проверяет DoD; без выполненного DoD передача не принимается."""
+    pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
+    role, stage = run['role'], run['stage']
+    if role == 'teamlead': raise ValueError('Тимлид решает ворота через op=gate')
+    if stage != pipe['stage']: raise ValueError('Задача уже не на этапе «%s»' % P.STAGE[stage]['title'])
+    handoff = {k: req.get(k) for k in ('items', 'summary', 'needs', 'acceptance', 'verdict', 'signoff') if req.get(k) is not None}
+    if not isinstance(handoff.get('items') or {}, dict): raise ValueError('items: {id пункта: {status: done|na, evidence}}')
+    if not isinstance(req.get('summary'), str) or len(req['summary'].strip()) < 20:
+        raise ValueError('summary: что сделано — для тимлида (не короче 20 символов)')
+    patch = {}
+    if role == 'product_owner':
+        acc = handoff.get('acceptance')
+        if isinstance(acc, list) and all(isinstance(a, str) and a.strip() for a in acc):
+            patch['acceptance'] = [a.strip() for a in acc]
+        if isinstance(handoff.get('needs'), dict): pipe['needs'] = handoff['needs']
+    results = P.evaluate_role(role, stage, ctx_for(dict(t, **patch), pipe, handoff))
+    fails = P.failures(results)
+    k = key(stage, role); entry = pipe['roles'].setdefault(k, {})
+    entry['result'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in results]
+    if fails:
+        journal(s, pipe, t['ref'], 'handoff_rejected', '%s: передача не принята — %s' % (
+            P.ROLES[role]['title'], '; '.join('%s (%s)' % (f['id'], f['detail']) for f in fails)), role, stage)
+        w.write_patches(s, {t['ref']: dict(patch, pipeline=pipe)})
+        return dict(accepted=False, failed=fails, hint='Исправь пункты и пришли handoff снова — запуск остаётся твоим.')
+    heavy = P.pending_heavy(results)
+    run.update(status='done', finished_at=at.isoformat(), evidence=req['summary'].strip(), tokens=req.get('tokens'),
+               handoff=handoff)
+    entry.update(state='checking' if heavy else 'done', handoff=handoff, at=at.isoformat(), feedback=None)
+    journal(s, pipe, t['ref'], 'handoff', '%s сдал(а) этап: %s%s' % (P.ROLES[role]['title'], req['summary'].strip()[:300],
+            ' · фоновые проверки: ' + ', '.join(heavy) if heavy else ''), role, stage)
+    if heavy:
+        w.write_patches(s, {t['ref']: dict(patch, pipeline=pipe, claimed_by=None, status='in_progress',
+                                           status_note='%s: идут проверки сервера (%s)' % (P.ROLES[role]['title'], ', '.join(heavy)))})
+        return dict(accepted=True, checking=heavy, _pipejob=(t['ref'], role, stage, run['id']))
+    w.write_patches(s, {t['ref']: dict(orchestrate(s, dict(t, **patch), pipe, at), **patch, claimed_by=None)})
+    return dict(accepted=True, stage=pipe['stage'])
+
+
+def job(ref, role, stage, run_id):
+    """Фоновое задание: тяжёлые пункты DoD (тесты, слияния), затем решение и оркестрация."""
+    t = w.task_for(ref); s0 = w.state()
+    run = next(r for r in s0['runs'] if r['id'] == run_id)
+    pipe0 = t['pipeline']
+    results = P.evaluate_role(role, stage, ctx_for(t, pipe0, run.get('handoff') or {}), heavy=True)
+    fails = P.failures(results)
+    with w.locked():
+        s = w.state(); at = w.now(); t = w.task_for(ref); pipe = copy.deepcopy(t['pipeline'])
+        entry = pipe['roles'].setdefault(key(stage, role), {})
+        entry['result'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in results]
+        if fails:
+            entry['state'] = 'returned'
+            text = '; '.join('%s (%s)' % (f['id'], f['detail']) for f in fails)
+            journal(s, pipe, ref, 'check_failed', '%s: проверки сервера не прошли — %s' % (P.ROLES[role]['title'], text), role, stage)
+            if entry.get('attempts', 0) + 1 >= MAX_ATTEMPTS:
+                escalate(s, t, pipe, at, '%s: DoD не сдан %d раза подряд — %s' % (P.ROLES[role]['title'], MAX_ATTEMPTS, text), role)
+            else:
+                create_role_run(s, t, pipe, stage, role, at, feedback=fails)
+            patch = dict(pipeline=pipe, status=status_of(s, ref, pipe), status_note='Возврат роли %s: %s' % (P.ROLES[role]['title'], text[:300]))
+        else:
+            entry['state'] = 'done'
+            journal(s, pipe, ref, 'check_passed', '%s: проверки сервера прошли' % P.ROLES[role]['title'], role, stage)
+            patch = orchestrate(s, t, pipe, at)
+        w.write_patches(s, {ref: patch}); w.save('workflow.json', s)
+    return dict(ok=not fails, failed=fails)
+
+
+def escalate(s, t, pipe, at, reason, role=None):
+    pipe['blocked'] = dict(reason=reason[:500], role=role, at=at.isoformat())
+    journal(s, pipe, t['ref'], 'escalation', reason, role)
+    if not active_run(s, t['ref'], role='teamlead', gate='escalation'):
+        create_role_run(s, t, pipe, pipe['stage'], 'teamlead', at, gate='escalation')
+
+
+def op_escalate(s, req, t, at):
+    pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
+    reason = (req.get('reason') or '').strip()
+    if len(reason) < 20: raise ValueError('reason: в чём блокер и что нужно (не короче 20 символов)')
+    run.update(status='done', finished_at=at.isoformat(), evidence='Эскалация: ' + reason)
+    pipe['roles'].setdefault(key(run['stage'], run['role']), {}).update(state='pending', feedback=None)
+    escalate(s, t, pipe, at, '%s: %s' % (P.ROLES[run['role']]['title'], reason), run['role'])
+    w.write_patches(s, {t['ref']: dict(pipeline=pipe, status='blocked', status_note='Эскалация тимлиду: ' + reason[:300], claimed_by=None)})
+    return dict(escalated=True)
+
+
+def return_to(s, t, pipe, at, to_stage, roles, reason, by):
+    """Вернуть задачу на ранний этап: этапы с него и далее снова не сданы."""
+    cur = pipe['stage'] if pipe['stage'] != 'done' else P.ORDER[-1]
+    loop = '%s>%s' % (cur, to_stage); pipe.setdefault('loops', {})[loop] = pipe['loops'].get(loop, 0) + 1
+    for st in P.ORDER[P.ORDER.index(to_stage):]:
+        pipe['stages'].pop(st, None)
+        gate = P.STAGE[st].get('gate')
+        if gate: pipe['gates'].pop(gate, None)
+        if st == 'deploy_main': pipe.get('approvals', {}).pop('release', None)
+        for r in P.STAGE[st]['roles']:
+            k = key(st, r)
+            if k in pipe['roles']:
+                pipe['roles'][k].update(state='pending', feedback=[dict(id='return', text='Возврат от: ' + by, detail=reason)]
+                                        if st == to_stage and (not roles or r in roles) else None)
+    pipe['stage'] = to_stage; pipe.pop('blocked', None)
+    journal(s, pipe, t['ref'], 'returned', '%s вернул(а) задачу на этап «%s»: %s' % (by, P.STAGE[to_stage]['title'], reason))
+    if pipe['loops'][loop] >= MAX_LOOPS:
+        escalate(s, t, pipe, at, 'Задача %d раза возвращалась с «%s» на «%s»: нужен разбор тимлида' % (
+            pipe['loops'][loop], P.STAGE[cur]['title'], P.STAGE[to_stage]['title']))
+
+
+def op_return(s, req, t, at):
+    """Роль возвращает задачу назад: ревьюер и QA — разработчику, разработчик — в анализ…"""
+    pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
+    role = run['role']; to_stage = req.get('to_stage')
+    if to_stage not in RETURN_TO.get(role, []):
+        raise ValueError('Роль %s возвращает только на: %s' % (P.ROLES[role]['title'], ', '.join(RETURN_TO.get(role, [])) or 'нельзя'))
+    reason = (req.get('reason') or '').strip()
+    if len(reason) < 30: raise ValueError('reason: что не так и что исправить (не короче 30 символов)')
+    if role in ('reviewer', 'qa'):
+        spec = P.ROLES[role]['artifacts'][0 if role == 'reviewer' else 1]
+        miss = P.check_document(ctx_for(t, pipe).artifact(spec), spec)
+        if miss: raise ValueError('Возврат с замечаниями требует артефакта: ' + miss)
+    roles = [r for r in (req.get('roles') or []) if r in P.STAGE[to_stage]['roles']]
+    run.update(status='done', finished_at=at.isoformat(), evidence='Возврат на «%s»: %s' % (P.STAGE[to_stage]['title'], reason))
+    return_to(s, t, pipe, at, to_stage, roles, reason, P.ROLES[role]['title'])
+    w.write_patches(s, {t['ref']: dict(orchestrate(s, t, pipe, at), claimed_by=None)})
+    return dict(returned=to_stage)
+
+
+def op_gate(s, req, t, at):
+    """Решение ИИ-тимлида: ворота анализа, ворота релиза, эскалация."""
+    pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t, role='teamlead')
+    decision = req.get('decision'); notes = (req.get('notes') or '').strip(); gate = run.get('gate')
+    if decision not in ('approve', 'return'): raise ValueError('decision: approve или return')
+    if len(notes) < 30: raise ValueError('notes: основания решения (не короче 30 символов)')
+    run.update(status='done', finished_at=at.isoformat(), evidence='Тимлид: %s — %s' % (decision, notes))
+    if gate in ('analysis', 'release'):
+        pipe['gates'][gate] = dict(decision=decision, notes=notes, at=at.isoformat(), by=run.get('model'))
+    journal(s, pipe, t['ref'], 'gate', 'Тимлид (%s): %s — %s' % (gate, decision, notes), 'teamlead')
+    if decision == 'return':
+        to_stage = req.get('to_stage') or ('analysis' if gate == 'analysis' else 'development')
+        if to_stage not in P.ORDER[:P.ORDER.index(pipe['stage'] if pipe['stage'] != 'done' else P.ORDER[-1]) + 1]:
+            raise ValueError('to_stage: этап не позже текущего')
+        return_to(s, t, pipe, at, to_stage, req.get('roles') or [], notes, 'Тимлид')
+    elif gate == 'escalation':
+        pipe.pop('blocked', None)
+    w.write_patches(s, {t['ref']: dict(orchestrate(s, t, pipe, at), claimed_by=None)})
+    return dict(decision=decision, stage=pipe['stage'])
+
+
+def op_approve_release(s, req, t, at):
+    """«Да» владельца на деплой в main."""
+    pipe = copy.deepcopy(t['pipeline'])
+    if pipe['stage'] != 'deploy_main' or (pipe.get('approvals') or {}).get('release'):
+        raise ValueError('Одобрение нужно только задаче в «Деплой в main», ещё не одобренной')
+    if (pipe['gates'].get('release') or {}).get('decision') != 'approve':
+        raise ValueError('Сначала ворота тимлида «тест → main»')
+    pipe.setdefault('approvals', {})['release'] = dict(at=at.isoformat(), by='владелец')
+    journal(s, pipe, t['ref'], 'approved', 'Владелец одобрил релиз в main')
+    w.write_patches(s, {t['ref']: orchestrate(s, t, pipe, at)})
+    return dict(approved=True)
+
+
+def tick():
+    """Периодически (сервер досок): задачи, ждавшие DoR, проверяются снова."""
+    moved = []
+    with w.locked():
+        s = w.state(); at = w.now(); patches = {}
+        for t in w.snapshot()['tasks']:
+            pipe = t.get('pipeline')
+            if not pipe or pipe['stage'] == 'done' or pipe.get('blocked'): continue
+            st = (pipe.get('stages') or {}).get(pipe['stage']) or {}
+            if st.get('dor_ok'): continue
+            p = copy.deepcopy(pipe); patch = orchestrate(s, t, p, at)
+            if p['stage'] != pipe['stage'] or (p['stages'].get(p['stage']) or {}).get('dor_ok'):
+                patches[t['ref']] = patch; moved.append(t['ref'])
+        if patches:
+            w.write_patches(s, patches); w.save('workflow.json', s)
+    return moved
+
+
+# ---------------------------------------------------------------- паспорт и задание роли
+
+def role_packet(t, run, agent):
+    pipe = t['pipeline']; role, stage = run['role'], run['stage']; spec = P.ROLES[role]
+    route = role_route(t, role, agent)
+    wt = pipe.get('worktree') or {}
+    entry = pipe['roles'].get(key(stage, role)) or {}
+    arts = []
+    for st in P.ORDER[:P.ORDER.index(stage) + 1 if stage in P.ORDER else 0]:
+        for r in P.stage_roles(st, pipe.get('needs')):
+            for a in P.ROLES[r]['artifacts']:
+                arts.append(dict(role=P.ROLES[r]['title'], path=P.art_path(t['id'], a['path']), optional=bool(a.get('optional'))))
+    dod = [] if role == 'teamlead' else P.role_dod(role, stage)
+    packet = dict(ref=t['ref'], title=t['title'], why=t.get('why'), root=t.get('root'), acceptance=t.get('acceptance'),
+                  role=dict(id=role, title=spec['title'], skill='tt-' + role.replace('_', '-'), mission=spec['mission']),
+                  stage=dict(id=stage, title=P.STAGE[stage]['title'] if stage in P.STAGE else stage),
+                  route=route, phase='role', gate=run.get('gate'),
+                  workspace=dict(path=wt.get('path'), branch=wt.get('branch'), base=wt.get('base'),
+                                 note='Работай только в этой рабочей копии; коммить свои файлы в ветку задачи.'),
+                  artifacts=[dict(path=P.art_path(t['id'], a['path']), sections=a['sections'], min_bytes=a['min_bytes'],
+                                  optional=bool(a.get('optional'))) for a in spec['artifacts']],
+                  dod=[dict(id=i['id'], text=i['text'], kind=i['kind'], allow_na=bool(i.get('allow_na'))) for i in dod],
+                  upstream=arts, needs=pipe.get('needs'), feedback=entry.get('feedback'),
+                  handoff='tt_work op=handoff ref=%s run=%s worker=<ты> summary=… items={id: {status: done|na, evidence}}' % (t['ref'], run['id']))
+    if role == 'product_owner':
+        packet['handoff'] += ' acceptance=[бизнес-критерии] needs={design: bool, marketing: bool, reason}'
+    if role == 'reviewer': packet['handoff'] += ' verdict=approve; замечания — op=return to_stage=development'
+    if role == 'qa': packet['handoff'] += ' signoff=true; дефекты — op=return to_stage=development'
+    if role == 'teamlead':
+        packet['gate_task'] = dict(
+            analysis='Проверь, что SRS, HLD, ADR, модель угроз и (если нужны) дизайн и GTM согласованы между собой и с BRD, '
+                     'а разработка пройдёт без двояких трактовок.',
+            release='Проверь отчёт QA, деплой в тест и риски релиза; реши, готово ли к main.',
+            escalation='Разбери блокер из журнала: верни задачу на нужный этап с конкретными замечаниями или разблокируй.'
+        ).get(run.get('gate'))
+        packet['journal'] = pipe.get('journal', [])[-15:]
+        packet['handoff'] = 'tt_work op=gate ref=%s run=%s worker=<ты> decision=approve|return notes=… [to_stage, roles]' % (t['ref'], run['id'])
+    else:
+        packet['escalate'] = 'tt_work op=escalate ref=%s run=%s worker=<ты> reason=… — если без решения тимлида дальше нельзя' % (t['ref'], run['id'])
+        if role in RETURN_TO:
+            packet['return'] = 'tt_work op=return ref=%s run=%s worker=<ты> to_stage=%s reason=…' % (t['ref'], run['id'], '|'.join(RETURN_TO[role]))
+    return packet
+
+
+def role_prompt(t, run, route, worker=None):
+    role = run['role']; spec = P.ROLES[role]; pipe = t['pipeline']; wt = pipe.get('worktree') or {}
+    skill = 'tt-' + role.replace('_', '-')
+    lines = ['Ты — %s в TaskTreker. Задача %s «%s», этап «%s».' % (spec['title'], t['ref'], t['title'],
+             P.STAGE[run['stage']]['title'] if run.get('stage') in P.STAGE else run.get('stage')),
+             'Следуй скиллу %s (/%s): там твой скоуп, DoR, DoD и артефакты — ровно то, что проверяет сервер.' % (skill, skill),
+             'Рабочая копия: %s, ветка %s. Коммить только свои файлы; ветку не сливай — слияния делает сервер.' % (wt.get('path') or '—', wt.get('branch') or '—'),
+             'Модель: %s, усилия: %s.' % (route['model'], route['effort'])]
+    if run.get('gate'):
+        lines.append('Это ворота тимлида: %s.' % run['gate'])
+    lines += ['1) tt_work op=claim ref=%s run=%s model=%s worker=%s' % (t['ref'], run['id'], route['model'], worker or '<id этой сессии>'),
+              '2) tt_work op=packet ref=%s run=%s — паспорт роли: DoD, артефакты, предыдущие артефакты, замечания.' % (t['ref'], run['id']),
+              '3) Сделай работу, закоммить артефакты, затем %s — это уведомление тимлиду. Не принятая передача вернёт список несделанных пунктов.'
+              % ('op=gate' if role == 'teamlead' else 'op=handoff'),
+              'Работай только через MCP tt_work. Твой worker во всех вызовах: %s.' % (worker or '<id этой сессии>')]
+    return '\n'.join(lines)

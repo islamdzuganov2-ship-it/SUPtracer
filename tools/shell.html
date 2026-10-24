@@ -40,42 +40,16 @@
 </div>
 
 <section class="page" id="page-dash" role="tabpanel" aria-labelledby="tab-dash">
-  <div class="kpis" id="kpis"></div>
-  <div class="section-h">За чем следить — портфельные сигналы</div>
-  <div class="signals" id="signals"></div>
-
-  <div class="section-h">Готовность</div>
-  <div class="card-viz" id="c-ready"></div>
-
-  <div class="section-h">Прогресс производства</div>
-  <div class="grid-viz">
-    <div class="card-viz" id="c-progress"></div>
-    <div class="card-viz" id="c-costpoint"></div>
+  <div class="proj-bar">
+    <label for="proj-select">Проект</label>
+    <select class="sel" id="proj-select" title="Весь портфель или один проект: графики реализации по спринтам и качество работ"></select>
+    <span class="proj-hint" id="proj-hint"></span>
   </div>
-
-  <div class="section-h">Затраченное время</div>
-  <div class="grid-viz">
-    <div class="card-viz" id="c-hours"></div>
-    <div class="card-viz" id="c-intensity"></div>
+  <div id="signalsWrap">
+    <div class="section-h">За чем следить — портфельные сигналы</div>
+    <div class="signals" id="signals"></div>
   </div>
-
-  <div class="section-h">Техническое задание: количество и качество</div>
-  <div class="card-viz" id="c-spec"></div>
-  <div class="grid-viz">
-    <div class="card-viz" id="c-specidx"></div>
-    <div class="card-viz" id="c-specparts"></div>
-  </div>
-
-  <div class="section-h">Качество проработки</div>
-  <div class="grid-viz">
-    <div class="card-viz" id="c-eng"></div>
-    <div class="card-viz" id="c-engparts"></div>
-  </div>
-
-  <div class="section-h">Расход по месяцам</div>
-  <div class="card-viz" id="c-months"></div>
-
-  <div id="memWrap"></div>
+  <div id="proj-metrics"></div>
 </section>
 
 <section class="page" id="page-tree" role="tabpanel" aria-labelledby="tab-tree" hidden>
@@ -84,22 +58,15 @@
 </section>
 
 <section class="page" id="page-proj" role="tabpanel" aria-labelledby="tab-proj" hidden>
-  <div class="proj-bar">
-    <label for="proj-select">Проект</label>
-    <select class="sel" id="proj-select" title="Обзор портфеля или один проект: его карточка и графики реализации по спринтам"></select>
-    <span class="proj-hint" id="proj-hint"></span>
-  </div>
   <div id="alertsWrap"></div>
-  <div class="proj-overview">
-    <div class="section-h">Сводка</div>
-    <div id="tableWrap"></div>
-  </div>
-  <div id="proj-metrics"></div>
-  <div class="section-h" id="cards-h">Проекты подробно</div>
+  <div class="section-h">Сводка</div>
+  <div id="tableWrap"></div>
+  <div class="section-h">Проекты подробно</div>
   <div id="cards"></div>
   <div id="discoveredWrap"></div>
   <div id="inboxWrap"></div>
   <div id="commentsWrap"></div>
+  <div id="memWrap"></div>
 </section>
 
 <section class="page" id="page-boards" role="tabpanel" aria-labelledby="tab-boards" hidden>

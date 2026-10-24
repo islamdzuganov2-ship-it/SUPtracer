@@ -74,6 +74,11 @@ class ProjectMetricsTests(DataCase):
         self.assertEqual([f['id'] for f in s['features']], ['AL-01'])      # AL-02 закрыта без даты и коммита — вне спринтов
         self.assertEqual(out['outside_commits'], 1)
         self.assertEqual(out['tests']['levels'], dict(unit=1, e2e=1))
+        # Весь портфель — сумма проектов по тем же спринтам.
+        pf = M.portfolio({'alpha-api': out, 'copy': out}, sp)
+        self.assertEqual(pf['totals']['tokens'], dict(claude=4000, codex=600))
+        self.assertEqual([f['id'] for f in pf['sprints'][0]['features']], ['alpha-api/AL-01', 'copy/AL-01'])
+        self.assertEqual((pf['tests']['levels'], pf['outside_commits']), (dict(unit=2, e2e=2), 2))
 
     def test_quality_from_pipeline_history_and_defects(self):
         p = dict(backlog=[dict(id='AL-09', title='x', status='done', pipeline=dict(

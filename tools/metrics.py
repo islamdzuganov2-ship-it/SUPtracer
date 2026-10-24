@@ -435,6 +435,76 @@ def agent_summary(role_rows, defects, runs):
     return out
 
 
+def portfolio(projects, sprints):
+    """Сводка портфеля: те же метрики, сложенные по проектам — для режима «Весь портфель»."""
+    by_id = {s['id']: blank_sprint(s) for s in sprints}
+    touched = set()
+    for key, m in projects.items():
+        for r in m['sprints']:
+            s = by_id[r['id']]; touched.add(r['id'])
+            for n in PROVIDERS:
+                s['tokens'][n] += r['tokens'][n]; s['usd'][n] = round(s['usd'][n] + r['usd'][n], 4); s['requests'][n] += r['requests'][n]
+            s['commits'] += r['commits']
+            s['features'] += [dict(f, id='%s/%s' % (key, f['id'])) for f in r['features']]
+            for box in ('code', 'tests'):
+                for f in ('added', 'removed', 'files'):
+                    s[box][f] += r[box][f]
+            s['docs']['changed'] += r['docs']['changed']; s['docs']['spec'] += r['docs']['spec']
+            s['docs']['files'] += [dict(d, path='%s: %s' % (key, d['path'])) for d in r['docs']['files']]
+    rows = [by_id[s['id']] for s in sprints if s['id'] in touched]
+    for r in rows:
+        r['docs']['files'] = sorted(r['docs']['files'], key=lambda d: -(d['added'] + d['removed']))[:25]
+    ms = list(projects.values())
+    add = lambda path: sum(_get(m, path) or 0 for m in ms)
+    checks = [m['tests']['last'] for m in ms if m['tests'].get('last')]
+    levels = Counter()
+    for m in ms:
+        levels.update(m['tests'].get('levels') or {})
+    def changes(name):
+        events, base = add((name, 'events')), add((name, 'base'))
+        items = sorted((dict(e, task='%s/%s' % (k, e['task'])) for k, m in projects.items() for e in m[name]['items']),
+                       key=lambda e: e.get('at') or '')[-30:]
+        out = dict(events=events, tasks=add((name, 'tasks')), base=base, per_task=round(events / base, 2) if base else None, items=items)
+        if name == 'code_after_testing':
+            out['rework_runs'] = dict(sum((Counter(m[name].get('rework_runs') or {}) for m in ms), Counter()))
+        return out
+    defects = dict(found=add(('defects', 'found')), fixed=add(('defects', 'fixed')), verified=add(('defects', 'verified')),
+                   open=add(('defects', 'open')),
+                   items=sorted((dict(d, task='%s/%s' % (k, d['task'])) for k, m in projects.items() for d in m['defects']['items']),
+                                key=lambda d: d.get('at') or '')[-40:])
+    for f in ('by_method', 'test_fix_levels', 'by_level', 'by_severity', 'by_finder'):
+        defects[f] = dict(sum((Counter(m['defects'].get(f) or {}) for m in ms), Counter()))
+    roles = {}
+    for m in ms:
+        for r in m['roles']:
+            k = (r['role'], r['agent']); x = roles.setdefault(k, dict(r, tasks=0, handoffs=0, accepted=0, rejected=0, first_try=0,
+                                                                   returns=0, rework_edits=0, _runs=0, _clean=0))
+            for f in ('tasks', 'handoffs', 'accepted', 'rejected', 'first_try', 'returns', 'rework_edits'):
+                x[f] += r[f]
+            x['_runs'] += round(100 * r['first_try'] / r['first_try_pct']) if r.get('first_try_pct') else r['first_try']
+            x['_clean'] += round(r['tasks'] * (r.get('clean_pct') or 0) / 100)
+    role_rows = []
+    for x in roles.values():
+        runs, clean = x.pop('_runs'), x.pop('_clean')
+        x['first_try_pct'] = round(100 * x['first_try'] / runs) if runs else None
+        x['clean_pct'] = round(100 * clean / x['tasks']) if x['tasks'] else None
+        role_rows.append(x)
+    agents = {n: {f: sum(m['agents'][n][f] for m in ms) for f in (ms[0]['agents'][n] if ms else {})} for n in PROVIDERS}
+    return dict(sprints=rows, totals=totals(rows), outside_commits=sum(m['outside_commits'] for m in ms),
+                tests=dict(checks=add(('tests', 'checks')), passed=add(('tests', 'passed')), failed=add(('tests', 'failed')),
+                           last=max(checks, key=lambda c: c.get('at') or '') if checks else None,
+                           pipeline_checks=add(('tests', 'pipeline_checks')), pipeline_failed=add(('tests', 'pipeline_failed')),
+                           signoffs=add(('tests', 'signoffs')), levels=dict(levels)),
+                spec_changes=changes('spec_changes'), code_after_testing=changes('code_after_testing'),
+                defects=defects, roles=sorted(role_rows, key=lambda r: (r['role'], r['agent'])), agents=agents)
+
+
+def _get(m, path):
+    for p in path:
+        m = (m or {}).get(p)
+    return m
+
+
 def collect():
     import taskstate
     usage = load('usage.json', {})
@@ -448,6 +518,7 @@ def collect():
                sprints=sprints, projects={})
     for key, p in projects.items():
         out['projects'][key] = project_metrics(key, p, usage, sprints, idx, wf, since)
+    out['portfolio'] = portfolio(out['projects'], sprints)
     return out
 
 

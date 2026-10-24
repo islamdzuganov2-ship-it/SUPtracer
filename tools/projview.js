@@ -1,4 +1,4 @@
-/* Вкладка «Проекты»: выпадающий список проектов и метрики работ по спринтам.
+/* Вкладка «Дашборд»: выпадающий список (весь портфель или проект) и метрики работ по спринтам.
    Спринт — окно лимита токенов (data/metrics.json, собирает tools/metrics.py).
    Все цифры — подсчёт записанных событий: журналы сессий, git, конвейер. Здесь только отображение. */
 
@@ -20,69 +20,60 @@ const PROJVIEW = (() => {
   const period = s => `${fmtDay(s.start)} ${fmtTime(s.start)}–${fmtTime(s.end)}`;
   const pct = v => v == null ? '—' : v + '%';
   const ai = n => n === 'codex' ? 'GPT / Codex' : n === 'claude' ? 'Claude' : n;
-  const metricsOf = k => ((D.metrics || {}).projects || {})[k];
-
-  function names() {
-    const own = Object.keys(P).sort((a, b) => (P[a].tier - P[b].tier) || String(P[a].name).localeCompare(String(P[b].name), 'ru'));
-    const found = [...document.querySelectorAll('#discoveredWrap details[id^="p-"]')].map(d => d.id.slice(2));
-    return {own, found};
-  }
+  const metricsOf = k => k === ALL ? (D.metrics || {}).portfolio : ((D.metrics || {}).projects || {})[k];
 
   function init() {
     if (ready) return;
     ready = true;
-    const sel = $('proj-select'), {own, found} = names();
-    sel.innerHTML = `<option value="${ALL}">Обзор портфеля — все проекты</option>` +
-      `<optgroup label="Проекты портфеля">${own.map(k => {
+    const sel = $('proj-select');
+    const own = Object.keys(P).sort((a, b) => (P[a].tier - P[b].tier) || String(P[a].name).localeCompare(String(P[b].name), 'ru'));
+    const all = metricsOf(ALL);
+    sel.innerHTML = `<option value="${ALL}">Весь портфель${all && all.sprints.length ? ' · ' + all.sprints.length + ' спр.' : ''}</option>` +
+      `<optgroup label="Проекты">${own.map(k => {
         const m = metricsOf(k), n = m ? m.sprints.length : 0;
-        return `<option value="${esc(k)}">${esc(P[k].name)}${n ? ' · ' + n + ' спр.' : ''}</option>`;
-      }).join('')}</optgroup>` +
-      (found.length ? `<optgroup label="Обнаружены в сессиях">${found.map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('')}</optgroup>` : '');
-    sel.onchange = () => select(sel.value, false);
+        return `<option value="${esc(k)}">${esc(P[k].name)}${n ? ' · ' + n + ' спр.' : ' · нет спринтов'}</option>`;
+      }).join('')}</optgroup>`;
+    sel.onchange = () => select(sel.value);
     let saved = ALL;
     try { saved = localStorage.getItem('tt-proj') || ALL; } catch (e) {}
-    apply([...sel.options].some(o => o.value === saved) ? saved : ALL, false);
+    apply([...sel.options].some(o => o.value === saved) ? saved : ALL);
   }
 
-  function select(k, scroll) {
+  function select(k) {
     init();
     if (![...$('proj-select').options].some(o => o.value === k)) k = ALL;
     try { localStorage.setItem('tt-proj', k); } catch (e) {}
-    apply(k, scroll);
+    apply(k);
   }
 
-  function apply(k, scroll) {
+  function apply(k) {
     current = k;
-    const sel = $('proj-select'); sel.value = k;
-    const all = k === ALL, page = $('page-proj');
-    page.querySelector('.proj-overview').hidden = !all;
-    for (const id of ['alertsWrap', 'inboxWrap', 'commentsWrap']) $(id).hidden = !all;
-    $('cards-h').textContent = all ? 'Проекты подробно' : 'Карточка проекта';
-    const found = names().found.includes(k);
-    $('discoveredWrap').hidden = !all && !found;
-    page.querySelectorAll('#cards > details, #discoveredWrap details[id^="p-"]').forEach(d => {
-      const mine = d.id === 'p-' + k;
-      d.hidden = !all && !mine;
-      if (!all && mine) d.open = true;
-    });
-    $('cards-h').hidden = !all && found;
-    const m = all ? null : metricsOf(k);
-    $('proj-hint').textContent = all ? 'Выберите проект — карточка и графики реализации по спринтам'
-      : m && m.sprints.length ? `${m.sprints.length} спринтов с работой · спринт — окно лимита токенов` : 'Метрик по спринтам ещё нет';
+    $('proj-select').value = k;
+    $('signalsWrap').hidden = k !== ALL;          // портфельные сигналы — в обзоре портфеля
+    const m = metricsOf(k);
+    $('proj-hint').innerHTML = (m && m.sprints.length ? `${m.sprints.length} спринтов с работой · спринт — окно лимита токенов`
+      : 'Метрик по спринтам ещё нет') +
+      (k !== ALL && P[k] ? ` · <a href="#proj" id="proj-card-link">карточка проекта →</a>` : '');
+    const link = $('proj-card-link');
+    if (link) link.onclick = e => {
+      e.preventDefault(); showTab('proj');
+      const d = $('p-' + k); if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+    };
     drawn = null;
     shown();
-    if (scroll) (all ? page : $('proj-metrics')).scrollIntoView({behavior: 'smooth', block: 'start'});
   }
 
   // Графики считают ширину по видимому контейнеру: рисуются, когда вкладка открыта.
   function shown() {
     init();
-    if ($('page-proj').hidden) return;
-    if (current === ALL) { $('proj-metrics').innerHTML = ''; drawn = ALL; return; }
-    if (drawn === current) return;
+    if ($('page-dash').hidden || drawn === current) return;
     drawn = current;
     render(current);
   }
+
+  // Ширина окна изменилась — перерисовать, иначе подписи поедут вместе с масштабом viewBox.
+  let rsz;
+  addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { drawn = null; shown(); }, 160); });
 
   function kpi(v, l, n) {
     return `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div>${n ? `<div class="n">${n}</div>` : ''}</div>`;
@@ -93,7 +84,7 @@ const PROJVIEW = (() => {
   }
 
   function render(k) {
-    const host = $('proj-metrics'), m = metricsOf(k), name = (P[k] || {}).name || k;
+    const host = $('proj-metrics'), m = metricsOf(k), name = k === ALL ? 'весь портфель' : (P[k] || {}).name || k;
     if (!m) {
       host.innerHTML = `<div class="note" style="margin-bottom:14px">Для «${esc(name)}» нет метрик работ. Их собирает
         <span class="mono">py tools/pm.py refresh</span> (шаг «метрики работ по спринтам лимита»).</div>`;

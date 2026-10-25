@@ -91,6 +91,27 @@ def headless_command(provider, exe, model, effort, prompt, cwd, session=None, re
     raise ValueError('Неизвестный ИИ: ' + str(provider))
 
 
+def ask_command(provider, exe, model, question):
+    """Второе мнение для Решалы: другой ИИ отвечает только чтением, ничего не меняя."""
+    if provider == 'claude':
+        return [exe, '-p', '--permission-mode', 'plan', '--model', model, '--effort', 'high', question]
+    if provider == 'codex':
+        return [exe, 'exec', '-m', model, '-c', 'model_reasoning_effort="high"', '-s', 'read-only', '--skip-git-repo-check', question]
+    raise ValueError('Неизвестный ИИ: ' + str(provider))
+
+
+def ask(provider, question, cwd=None, model=None, timeout=900):
+    exe = find_cli(provider)
+    if not exe:
+        raise ValueError(status()[provider]['note'])
+    if not model:
+        import workflow
+        model = workflow.LINEUP[provider][2]
+    r = subprocess.run(ask_command(provider, exe, model, question), cwd=cwd or os.getcwd(), capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', timeout=timeout, stdin=subprocess.DEVNULL)
+    return (r.stdout or '').strip() or (r.stderr or '').strip()[-2000:]
+
+
 def open_background(cmd, cwd, log_path, env_extra=None):
     """Процесс без окна, вывод — в журнал. Ctrl+C в окне сервера его не останавливает. Возвращает pid."""
     log_path = Path(log_path); log_path.parent.mkdir(parents=True, exist_ok=True)

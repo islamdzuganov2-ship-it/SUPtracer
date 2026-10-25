@@ -119,7 +119,8 @@ MAX_SESSIONS = 4   # окон ИИ, которые сервер досок де�
 AUTONOMY = ('step', 'full')
 AUTONOMY_RULE = ('ПОЛНАЯ АВТОНОМИЯ: владелец заранее дал согласие на всю работу. Не задавай вопросов владельцу '
                  'и не жди ответа — его не будет: неясное решай сам в рамках скоупа своей роли, допущения записывай '
-                 'в артефакт (раздел «Допущения»). Что без владельца решить нельзя — op=escalate к тимлиду с вариантами. '
+                 'в артефакт (раздел «Допущения»). Проблема, ограничение или то, что без владельца решить нельзя, — '
+                 'op=escalate к агенту «Решала» (reason, tried, need): он найдёт решение или сам позовёт владельца. '
                  'Работа заканчивается только вызовом tt_work: handoff, return, escalate или pause (для задач вне '
                  'конвейера — finish или fail). Закончить ответом без такого вызова нельзя — сервер вернёт тебя к работе.')
 
@@ -296,6 +297,7 @@ def snapshot():
     import pipeline as P
     return dict(pipeline=P.spec_for_board(), teamlead=s.get('teamlead',[])[-80:], active_projects=s.get('active_projects',[]),
                 provider_limits={a:v for a,v in (s.get('provider_limits') or {}).items() if limited(s, a)},
+                problems=(s.get('problems') or [])[-200:], notifications=notifications(s, tasks),
                 projects={k:dict(workspace(k,p), next_id=next_id(p)) for k,p in projects.items()},
                 task_types=TASK_TYPES, directions=DIRECTIONS,
                 tasks=tasks, roots=roots, focus=s['focus'], runs=s['runs'][-50:], models=MODELS, policy=POLICY,
@@ -612,18 +614,26 @@ def mark_nudged(ref, run_id, info, reason):
         return run
 
 def session_lost(ref, run_id, reason):
-    """Сессия несколько раз закончилась без сдачи: роль — эскалация тимлиду, задача вне конвейера — провал запуска."""
+    """Сессия несколько раз закончилась без сдачи: роль — к Решале; Решала — вопрос владельцу;
+    задача вне конвейера — провал запуска."""
     with locked():
         s=state(); at=now(); t=task_for(ref)
         run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status'] in ('queued','running')),None)
         if not run: return None
         run.update(status='failed', finished_at=at.isoformat(), evidence='Сессия завершалась без сдачи: '+reason)
-        if t.get('pipeline') and run.get('role') and run['role']!='teamlead':
-            import orchestra, copy
+        import orchestra, copy
+        if run.get('role')=='resolver':
+            prob=orchestra.problem(s, run.get('problem'))
+            if prob:
+                prob.update(status='owner', question='Решала не смог разобрать проблему: %s. Как поступить?' % prob['reason'][:600],
+                            why_owner='Сессия Решалы %d раза завершилась без решения (%s)' % (3, reason), notified=False,
+                            options=prob.get('options') or [])
+            write_patches(s, {ref: dict(status='blocked', claimed_by=None, status_note='👤 Нужен владелец: Решала не справился с проблемой')})
+        elif t.get('pipeline') and run.get('role') and run['role']!='teamlead':
             pipe=copy.deepcopy(t['pipeline'])
             pipe['roles'].setdefault(orchestra.key(run['stage'], run['role']), {}).update(state='pending', feedback=None)
-            orchestra.escalate(s, t, pipe, at, '%s: %s' % (run['role'], reason), run['role'])
-            write_patches(s, {ref: dict(pipeline=pipe, status='blocked', status_note='Эскалация тимлиду: '+reason[:300], claimed_by=None)})
+            prob=orchestra.escalate(s, t, pipe, at, '%s: %s' % (run['role'], reason), run['role'], run.get('agent'))
+            write_patches(s, {ref: dict(pipeline=pipe, status='blocked', status_note='Проблема %s у Решалы: %s' % (prob['id'], reason[:300]), claimed_by=None)})
         else:
             write_patches(s, {ref: dict(status='queued', claimed_by=None, status_note='Сессия завершалась без сдачи: '+reason[:300])})
         save('workflow.json',s)
@@ -932,14 +942,23 @@ def failover(s, t, run, at):
         new=new_run(s, t['ref'], None, at)
         new.update(role=run['role'], stage=run.get('stage'), gate=run.get('gate'), phase='role', agent=to, auto_launch=True,
                    packet=dict(route=route, phase='role'), failover=info)
-        pipe=copy.deepcopy(t['pipeline'])
-        if run['role']!='teamlead':
+        if run.get('problem'):
+            new['problem']=run['problem']
+            prob=orchestra.problem(s, run['problem'])
+            if prob: prob['run']=new['id']
+        pipe=copy.deepcopy(t['pipeline']) if t.get('pipeline') else None
+        note='Передано %s: лимит токенов у %s' % (PROVIDERS[to]['name'], PROVIDERS.get(src,{}).get('name',src))
+        if pipe and run['role'] not in ('teamlead','resolver'):
             k=orchestra.key(run['stage'], run['role']); e=pipe['roles'].setdefault(k, {})
             e.update(run=new['id'], state='queued', agent=to, feedback=list(e.get('feedback') or [])+[dict(id='handover', text='Передача между ИИ', detail=text)])
-        orchestra.journal(s, pipe, t['ref'], 'failover', '%s: %s → %s (%s · %s) — лимит токенов у %s' % (
-            run['role'], PROVIDERS.get(src,{}).get('name',src), PROVIDERS[to]['name'], route['model'], route['effort'],
-            PROVIDERS.get(src,{}).get('name',src)), run['role'], run.get('stage'))
-        patch=dict(pipeline=pipe, status='queued', claimed_by=None, status_note='Передано %s: лимит токенов у %s' % (PROVIDERS[to]['name'], PROVIDERS.get(src,{}).get('name',src)))
+        if pipe:
+            orchestra.journal(s, pipe, t['ref'], 'failover', '%s: %s → %s (%s · %s) — лимит токенов у %s' % (
+                run['role'], PROVIDERS.get(src,{}).get('name',src), PROVIDERS[to]['name'], route['model'], route['effort'],
+                PROVIDERS.get(src,{}).get('name',src)), run['role'], run.get('stage'))
+        if run['role']=='resolver':      # задача остаётся заблокированной: проблему разбирает Решала на другом ИИ
+            patch=dict(status_note='Решала: '+note, **({'pipeline':pipe} if pipe else {}))
+        else:
+            patch=dict(pipeline=pipe, status='queued', claimed_by=None, status_note=note)
     else:
         route=recommendation(dict(t, executor=to, model=None), agent=to)
         new=new_run(s, t['ref'], dict(packet(t['ref'], agent=to), route=route), at)
@@ -969,6 +988,42 @@ def reroute_queued(ref, run_id):
         if not out: return None
         write_patches(s, {ref: out.pop('patch')}); save('workflow.json',s)
         return out['agent']
+
+def notifications(s, tasks):
+    """Колокольчик: что ждёт именно владельца. Вопросы Решалы, релизы в пошаговом режиме, сбои запуска."""
+    out=[]; byref={t['ref']:t for t in tasks}
+    for p in s.get('problems') or []:
+        if p.get('status')=='owner':
+            out.append(dict(id='q:'+p['id'], kind='question', ref=p['ref'], title=p.get('title') or byref.get(p['ref'],{}).get('title',''),
+                            text=p.get('question'), why=p.get('why_owner'), options=[o.get('title') for o in p.get('options') or []],
+                            problem=p['id'], at=p.get('decided_at') or p['at']))
+    if not autonomous(s):
+        for t in tasks:
+            pipe=t.get('pipeline') or {}
+            if pipe.get('stage')=='deploy_main' and (pipe.get('gates') or {}).get('release',{}).get('decision')=='approve' and not (pipe.get('approvals') or {}).get('release'):
+                out.append(dict(id='r:'+t['ref'], kind='release', ref=t['ref'], title=t['title'],
+                                text='Ворота тимлида «тест → main» пройдены — нужен ваш «да» на релиз в main', at=pipe['gates']['release'].get('at')))
+    for r in s.get('runs') or []:
+        if r.get('status') in ('queued','running') and r.get('launch_error') and not r.get('paused'):
+            out.append(dict(id='l:'+r['id'], kind='launch', ref=r['ref'], title=byref.get(r['ref'],{}).get('title',''),
+                            text=r['launch_error'], run=r['id'], at=r.get('launch_error_at')))
+    return sorted(out, key=lambda n: n.get('at') or '', reverse=True)
+
+def note_session(ref, run_id, session):
+    """Найденный id сессии Codex — в запуск: по нему продолжение после лимита и токены агента."""
+    with locked():
+        s=state()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
+        if not run or (run.get('launch') or {}).get('session'): return
+        run['launch']=dict(run.get('launch') or {}, session=session)
+        if run.get('launches'): run['launches'][-1]=dict(run['launches'][-1], session=session)
+        save('workflow.json', s)
+
+def mark_notified(ids):
+    """Какие уведомления владельцу уже отправлены системным уведомлением — повторно не шлются."""
+    with locked():
+        s=state(); s['notified']=(list(s.get('notified') or []) + [i for i in ids if i not in (s.get('notified') or [])])[-500:]
+        save('workflow.json', s)
 
 def mark_paused(ref, run_id, event):
     """Сервер нашёл в журнале сессии отказ по лимиту: пауза до сброса лимита."""
@@ -1204,6 +1259,10 @@ def action(req):
         return out[:10]
     if op=='packet':
         t=task_for(req.get('ref',''))
+        role_run=next((r for r in state()['runs'] if r['id']==req.get('run') and r['ref']==t['ref'] and r.get('role')=='resolver'),None)
+        if role_run:      # Решала: свой паспорт и у задачи вне конвейера
+            import orchestra
+            return orchestra.role_packet(t, role_run, role_run.get('agent') or agent or settings()['default_executor'])
         if t.get('pipeline'):
             import orchestra
             runs=[r for r in state()['runs'] if r['ref']==t['ref'] and r.get('role') and r['status'] in ('queued','running')]
@@ -1242,7 +1301,7 @@ def action(req):
     extra={}
     with locked():
         s=state(); at=now()
-        if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea'):
+        if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea','resolve','answer'):
             import orchestra
             if op=='idea':
                 extra=orchestra.op_idea(s, req, at)
@@ -1251,7 +1310,7 @@ def action(req):
                 if extra.get('dry_run'): return dict(ok=True, **extra)
             else:
                 t=task_for(req.get('ref',''))
-                if not orchestra.is_pipeline(t): raise ValueError('Задача не идёт по конвейеру')
+                if not orchestra.is_pipeline(t) and op not in ('escalate','resolve','answer'): raise ValueError('Задача не идёт по конвейеру')
                 extra=getattr(orchestra,'op_'+op)(s, req, t, at)
             save('workflow.json',s)
             job=extra.pop('_pipejob',None)
@@ -1539,7 +1598,7 @@ def action(req):
             else: raise ValueError('Неизвестная операция')
             write_patches(s, {ref:patch} if patch else {})
         save('workflow.json',s)
-    if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea'):
+    if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea','resolve','answer'):
         if job: spawn_pipejob(*job)
         return dict(ok=True, **extra)
     spawn=extra.pop('_autocheck',None)

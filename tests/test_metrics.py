@@ -1,6 +1,7 @@
 """Метрики работ по спринтам лимита: окна, git, фичи, документы, качество (TT-74)."""
 import os
 import subprocess
+from unittest import mock
 from pathlib import Path
 from base import DataCase
 import filekinds as fk
@@ -118,3 +119,39 @@ class FileKindTests(DataCase):
                          ['unit', 'e2e', 'integration', 'load'])
         self.assertTrue(fk.spec_in_task('docs/tasks/TT-1/SRS.md', 'TT-1'))
         self.assertFalse(fk.spec_in_task('docs/tasks/TT-2/SRS.md', 'TT-1'))
+
+
+class TeamTests(DataCase):
+    def test_agents_done_tokens_upcoming_returns(self):
+        p = dict(backlog=[
+            dict(id='AL-1', title='a', status='queued', pipeline=dict(stage='development', needs=dict(design=False, marketing=True),
+                 roles={'development/developer': dict(agent='codex')}, gates={'analysis': dict(decision='approve')},
+                 history=[dict(kind='return', role='reviewer', to_stage='development', roles=[], reason='Нет обработки пустого списка', at='2026-10-20T01:00:00+00:00'),
+                          dict(kind='handoff', role='developer', agent='codex', run='R1', accepted=False, failed=['dev-tests'], at='2026-10-20T00:30:00+00:00')])),
+            dict(id='AL-2', title='b', status='queued', pipeline=dict(stage='idea', roles={})),
+            dict(id='AL-3', title='c', status='queued'),
+        ])
+        wf = dict(runs=[
+            dict(id='R1', ref='alpha-api/AL-1', role='developer', agent='codex', status='done', evidence='Код готов', launch=dict(session='cx-1')),
+            dict(id='R2', ref='alpha-api/AL-1', role='product_owner', agent='claude', status='done', evidence='BRD', launch=dict(session='cl-1'),
+                 launches=[dict(session='cl-1'), dict(session='cl-2')]),
+            dict(id='R3', ref='alpha-api/AL-2', role='product_owner', agent='claude', status='done', evidence='Эскалация Решале: нет данных'),
+            dict(id='R4', ref='alpha-api/AL-3', agent='claude', status='done', evidence='готово'),
+        ])
+        usage = dict(providers=dict(claude=dict(sessions={'cl-1': [1000, 1.5], 'cl-2': [500, 0.5]}), codex=dict(sessions={'cx-1': [300, 0.3]})))
+        with mock.patch.object(M, 'codex_sessions', return_value=[]):
+            t = M.team('alpha-api', p, wf, usage)
+        a = {(x['role'], x['agent']): x for x in t['agents']}
+        self.assertEqual((a[('product_owner', 'claude')]['done'], a[('product_owner', 'claude')]['tokens'], a[('product_owner', 'claude')]['usd']), (1, 1500, 2.0))
+        self.assertEqual((a[('developer', 'codex')]['done'], a[('developer', 'codex')]['tokens']), (1, 300))
+        self.assertEqual(a[(M.EXECUTOR, 'claude')]['done'], 1)                      # задача вне конвейера
+        r = t['roles']
+        self.assertEqual((r['developer']['returns'], r['developer']['dod_rejects'], r['developer']['dod_top']), (1, 1, [('dev-tests', 1)]))
+        self.assertIn('пустого списка', r['developer']['reasons'][0]['reason'])
+        # Предстоит: AL-1 — разработка и дальше; AL-2 — всё с идеи, дизайн и маркетинг «возможно».
+        self.assertEqual((r['developer']['upcoming'], r['qa']['upcoming'], r['product_owner']['upcoming']), (2, 2, 1))
+        self.assertEqual((r['designer']['maybe'], r['marketer']['maybe']), (1, 1))
+        self.assertEqual(r[M.EXECUTOR]['upcoming'], 1)
+        merged = M.merge_team([t, t])
+        self.assertEqual(next(x for x in merged['agents'] if x['role'] == 'developer')['tokens'], 600)
+        self.assertEqual(merged['roles']['developer']['returns'], 2)

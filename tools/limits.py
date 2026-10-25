@@ -159,6 +159,29 @@ def codex_session(cwd, since):
     return (best[0], best[1]) if best else (None, None)
 
 
+def codex_index(home=None):
+    """Все сессии Codex: (папка, начало, id) — по первой строке журнала, переписка не читается."""
+    root = Path(home) if home else codex_home()
+    out = []
+    for path in list((root / 'sessions').glob('*/*/*/rollout-*.jsonl')) + list((root / 'archived_sessions').glob('*.jsonl')):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                row = json.loads(f.readline())
+        except (OSError, ValueError):
+            continue
+        p = row.get('payload') or {}
+        if row.get('type') == 'session_meta' and p.get('id'):
+            out.append((os.path.normcase(os.path.normpath(p.get('cwd') or '')), stamp(p.get('timestamp') or row.get('timestamp')), str(p['id'])))
+    return out
+
+
+def match_codex(index, cwd, since, window=timedelta(minutes=10)):
+    """Сессия Codex, начатая в этой папке в течение окна после запуска."""
+    want = os.path.normcase(os.path.normpath(cwd or ''))
+    hits = sorted((st, sid) for c, st, sid in index if c == want and st and since and since - timedelta(minutes=1) <= st <= since + window)
+    return hits[0][1] if hits else None
+
+
 def session_of(run):
     """Идентификатор и журнал сессии, открытой сервером для запуска."""
     launch = run.get('launch') or {}

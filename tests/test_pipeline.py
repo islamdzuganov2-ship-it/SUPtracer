@@ -197,19 +197,81 @@ class PipelineTests(DataCase):
         with self.assertRaisesRegex(ValueError, 'Одобрение'):
             w.action(dict(op='approve_release', ref=self.ref))
 
-    def test_escalation_blocks_and_teamlead_unblocks(self):
-        self.ref = self.idea()
+    # --- Решала (TT-80)
+
+    OPTS = [dict(title='Уточнить у PO состав выгрузки по прошлому отчёту', pros='быстро', cons='риск неточности'),
+            dict(title='Взять полный набор полей и отметить допущение', pros='без ожидания', cons='лишние поля')]
+
+    def escalate_po(self):
         run = self.claim('product_owner')
-        w.action(dict(op='escalate', ref=self.ref, run=run, worker='w-' + run,
-                      reason='Неясно, для каких инвесторов выгрузка: нужен ответ владельца'))
+        r = w.action(dict(op='escalate', ref=self.ref, run=run, worker='w-' + run,
+                          reason='Неясно, для каких инвесторов выгрузка и какие поля нужны',
+                          tried='Прочитал запрос и прошлые записи памяти', need='Состав полей CSV'))
+        return r['problem']
+
+    def test_escalation_goes_to_resolver_and_continues(self):
+        self.ref = self.idea()
+        pid = self.escalate_po()
         t = self.task()
         self.assertEqual(t['status'], 'blocked')
-        gate = self.claim('teamlead', gate='escalation')
-        w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve',
-                      notes='Владелец уточнил: инвесторы фонда, формат как в прошлом отчёте'))
+        prob = next(p for p in w.state()['problems'] if p['id'] == pid)
+        self.assertEqual((prob['status'], prob['role'], prob['source']), ('resolving', 'product_owner', 'agent'))
+        rs = self.run_of('resolver')
+        self.assertEqual(rs['problem'], pid)
+        po_agent = next(r for r in w.state()['runs'] if r.get('role') == 'product_owner')['agent']
+        self.assertNotEqual(rs['agent'], po_agent)                                  # свежий взгляд — другой ИИ
+        self.assertFalse(any(r.get('role') == 'teamlead' for r in w.state()['runs']))
+        run = self.claim('resolver')
+        packet = w.action(dict(op='packet', ref=self.ref, run=run))
+        self.assertEqual(packet['problem']['id'], pid)
+        self.assertIn('ask', packet['second_opinion'])
+        with self.assertRaisesRegex(ValueError, 'options'):
+            w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS[:1], decision='continue',
+                          notes='Достаточно допущения, владелец не нужен для этого', instructions='Взять полный набор полей'))
+        w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='continue',
+                      notes='Полный набор полей покрывает отчёт, лишнее можно убрать позже',
+                      instructions='Возьми полный набор полей портфеля и запиши допущение в BRD, раздел «Допущения»'))
         t = self.task()
         self.assertEqual(t['status'], 'queued')
-        self.assertTrue(self.run_of('product_owner'))
+        po = self.run_of('product_owner')
+        fb = w.action(dict(op='packet', ref=self.ref, run=po['id']))['feedback']
+        self.assertIn('полный набор полей', fb[0]['detail'])
+        self.assertEqual(next(p for p in w.state()['problems'] if p['id'] == pid)['status'], 'resolved')
+
+    def test_resolver_asks_owner_through_bell(self):
+        import mcp_server
+        self.ref = self.idea()
+        pid = self.escalate_po()
+        run = self.claim('resolver')
+        with self.assertRaisesRegex(ValueError, 'question'):
+            w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='owner',
+                          notes='Состав полей — решение владельца продукта', question='?'))
+        w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='owner',
+                      notes='Состав полей — продуктовое решение владельца, агент его не принимает',
+                      question='Какие поля включить в CSV для инвесторов?', why_owner='Выбор полей — продуктовое решение владельца'))
+        notes = w.snapshot()['notifications']
+        q = next(n for n in notes if n['kind'] == 'question')
+        self.assertEqual((q['problem'], q['ref'], len(q['options'])), (pid, self.ref, 2))
+        self.assertIn('👤', self.task()['status_note'])
+        r = mcp_server.call_tool('tt_work', dict(op='answer', ref=self.ref, problem=pid, option=1))
+        self.assertTrue(r['isError'])                                               # отвечает только владелец
+        w.action(dict(op='answer', ref=self.ref, problem=pid, option=1))
+        self.assertFalse([n for n in w.snapshot()['notifications'] if n['kind'] == 'question'])
+        po = self.run_of('product_owner')
+        fb = w.action(dict(op='packet', ref=self.ref, run=po['id']))['feedback']
+        self.assertIn('Взять полный набор полей', fb[0]['detail'])
+        self.assertEqual(self.task()['status'], 'queued')
+
+    def test_lost_resolver_session_goes_to_owner(self):
+        self.ref = self.idea()
+        pid = self.escalate_po()
+        rs = self.run_of('resolver')
+        w.action(dict(op='claim', ref=self.ref, run=rs['id'], worker='w-' + rs['id'],
+                      model=w.action(dict(op='packet', ref=self.ref, run=rs['id']))['route']['model']))
+        w.session_lost(self.ref, rs['id'], 'сессия 3 раза заканчивалась без сдачи этапа')
+        prob = next(p for p in w.state()['problems'] if p['id'] == pid)
+        self.assertEqual(prob['status'], 'owner')
+        self.assertTrue(any(n['kind'] == 'question' for n in w.snapshot()['notifications']))
 
     def test_idea_validation_and_role_model_floor(self):
         with self.assertRaisesRegex(ValueError, 'проект'):

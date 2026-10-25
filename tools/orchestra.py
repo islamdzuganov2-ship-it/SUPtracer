@@ -212,7 +212,7 @@ def create_role_run(s, t, pipe, stage, role, at, feedback=None, gate=None):
                auto_launch=w.settings(s).get('auto_pipeline', True) and (not (stage == 'idea' and pipe.get('pause_auto'))
                                                                         or t['project'] in s.get('active_projects', [])),
                packet=dict(route=route, phase='role'))
-    if role != 'teamlead':
+    if role not in ('teamlead', 'resolver'):
         k = key(stage, role); prev = pipe['roles'].get(k) or {}
         pipe['roles'][k] = dict(state='queued', run=run['id'], attempts=prev.get('attempts', 0) + (1 if feedback else 0),
                                 feedback=feedback, agent=agent)
@@ -485,22 +485,149 @@ def job(ref, role, stage, run_id):
     return dict(ok=not fails, failed=fails)
 
 
-def escalate(s, t, pipe, at, reason, role=None):
-    pipe['blocked'] = dict(reason=reason[:500], role=role, at=at.isoformat())
-    journal(s, pipe, t['ref'], 'escalation', reason, role)
-    if not active_run(s, t['ref'], role='teamlead', gate='escalation'):
-        create_role_run(s, t, pipe, pipe['stage'], 'teamlead', at, gate='escalation')
+def open_problem(s, t, at, reason, role=None, agent=None, stage=None, source='server', tried=None, need=None):
+    """Проблема в реестр: её разбирает Решала, а если нужен владелец — она в колокольчике."""
+    reg = s.setdefault('problems', [])
+    p = dict(id='P-%d' % (len(reg) + 1), ref=t['ref'], title=t.get('title', ''), role=role, agent=agent, stage=stage,
+             reason=reason[:1500], tried=(tried or '')[:1500], need=(need or '')[:1000], source=source,
+             at=at.isoformat(), status='open')
+    reg.append(p)
+    return p
+
+
+def problem(s, pid):
+    return next((p for p in s.get('problems') or [] if p['id'] == pid), None)
+
+
+def create_resolver_run(s, t, pipe, prob, at):
+    """Запуск Решалы — на другом ИИ, чем агент с проблемой, если тот свободен."""
+    if active_run(s, t['ref'], role='resolver'):
+        return None
+    tt = dict(t, pipeline=pipe) if pipe else t
+    agent = role_agent(s, tt, 'resolver', exclude=(prob['agent'],) if prob.get('agent') else ())
+    run = w.new_run(s, t['ref'], None, at)
+    route = role_route(tt, 'resolver', agent)
+    run.update(role='resolver', stage=(pipe or {}).get('stage'), phase='role', agent=agent, problem=prob['id'],
+               auto_launch=w.settings(s).get('auto_pipeline', True), packet=dict(route=route, phase='role'))
+    prob.update(status='resolving', run=run['id'])
+    if pipe:
+        journal(s, pipe, t['ref'], 'run', 'Решала: запуск %s по проблеме %s (%s · %s)' % (run['id'], prob['id'], route['model'], route['effort']), 'resolver')
+    return run
+
+
+def escalate(s, t, pipe, at, reason, role=None, agent=None, source='server', tried=None, need=None):
+    prob = open_problem(s, t, at, reason, role, agent, pipe['stage'], source, tried, need)
+    pipe['blocked'] = dict(reason=reason[:500], role=role, at=at.isoformat(), problem=prob['id'])
+    journal(s, pipe, t['ref'], 'escalation', '%s → Решала: %s' % (prob['id'], reason), role)
+    create_resolver_run(s, t, pipe, prob, at)
+    return prob
 
 
 def op_escalate(s, req, t, at):
-    pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
+    """Агент столкнулся с проблемой или ограничением — к Решале. Работает и для задач вне конвейера."""
     reason = (req.get('reason') or '').strip()
-    if len(reason) < 20: raise ValueError('reason: в чём блокер и что нужно (не короче 20 символов)')
-    run.update(status='done', finished_at=at.isoformat(), evidence='Эскалация: ' + reason)
-    pipe['roles'].setdefault(key(run['stage'], run['role']), {}).update(state='pending', feedback=None)
-    escalate(s, t, pipe, at, '%s: %s' % (P.ROLES[run['role']]['title'], reason), run['role'])
-    w.write_patches(s, {t['ref']: dict(pipeline=pipe, status='blocked', status_note='Эскалация тимлиду: ' + reason[:300], claimed_by=None)})
-    return dict(escalated=True)
+    if len(reason) < 20: raise ValueError('reason: в чём проблема и что нужно (не короче 20 символов)')
+    tried = (req.get('tried') or '').strip(); need = (req.get('need') or '').strip()
+    if not is_pipeline(t):
+        run = next((r for r in s['runs'] if r['id'] == req.get('run') and r['ref'] == t['ref'] and r['status'] == 'running'), None)
+        if not run: raise ValueError('Запуск не найден или не выполняется')
+        if req.get('worker') != run.get('worker'): raise ValueError('Эскалирует принявший запуск исполнитель')
+        run.update(status='done', finished_at=at.isoformat(), evidence='Эскалация Решале: ' + reason)
+        prob = open_problem(s, t, at, reason, run.get('role'), run.get('agent'), None, 'agent', tried, need)
+        create_resolver_run(s, t, None, prob, at)
+        w.write_patches(s, {t['ref']: dict(status='blocked', status_note='Проблема %s у Решалы: %s' % (prob['id'], reason[:300]), claimed_by=None)})
+        return dict(escalated=True, problem=prob['id'])
+    pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
+    if run['role'] == 'resolver': raise ValueError('Решала не эскалирует сам себе: позови владельца через op=resolve decision=owner')
+    run.update(status='done', finished_at=at.isoformat(), evidence='Эскалация Решале: ' + reason)
+    if run['role'] != 'teamlead':
+        pipe['roles'].setdefault(key(run['stage'], run['role']), {}).update(state='pending', feedback=None)
+    prob = escalate(s, t, pipe, at, '%s: %s' % (P.ROLES[run['role']]['title'], reason), run['role'], run.get('agent'), 'agent', tried, need)
+    w.write_patches(s, {t['ref']: dict(pipeline=pipe, status='blocked', status_note='Проблема %s у Решалы: %s' % (prob['id'], reason[:300]), claimed_by=None)})
+    return dict(escalated=True, problem=prob['id'])
+
+
+DECISIONS = dict(continue_='продолжить с указаниями', return_='вернуть на этап', owner='нужен владелец')
+
+
+def _resume_role(s, t, pipe, prob, at, who, text):
+    """Снять блок и вернуть работу роли, у которой была проблема, с указаниями."""
+    pipe.pop('blocked', None)
+    if prob.get('role') and prob['role'] not in ('teamlead', 'resolver') and prob.get('stage'):
+        pipe['roles'].setdefault(key(prob['stage'], prob['role']), {}).update(
+            state='pending', feedback=[dict(id=who, text='Решение по проблеме %s (%s)' % (prob['id'], 'владелец' if who == 'owner' else 'Решала'), detail=text)])
+    return orchestrate(s, t, pipe, at)
+
+
+def op_resolve(s, req, t, at):
+    """Решение Решалы: пути решения (не меньше двух) и одно из трёх — продолжить, вернуть, позвать владельца."""
+    run = next((r for r in s['runs'] if r['id'] == req.get('run') and r['ref'] == t['ref'] and r.get('role') == 'resolver'), None)
+    if not run or run['status'] != 'running': raise ValueError('Запуск Решалы не найден или не выполняется (сначала claim)')
+    if req.get('worker') != run.get('worker'): raise ValueError('Решение присылает принявший запуск исполнитель')
+    prob = problem(s, run.get('problem'))
+    if not prob: raise ValueError('Проблема запуска не найдена')
+    opts = req.get('options')
+    if not isinstance(opts, list) or len(opts) < 2 or any(not isinstance(o, dict) or len(str(o.get('title') or '').strip()) < 10 for o in opts):
+        raise ValueError('options: не меньше двух путей решения {title ≥10 символов, pros, cons}')
+    decision = req.get('decision'); notes = (req.get('notes') or '').strip()
+    if decision not in ('continue', 'return', 'owner'): raise ValueError('decision: continue (продолжить), return (вернуть на этап) или owner (нужен владелец)')
+    if len(notes) < 30: raise ValueError('notes: почему выбран этот путь (не короче 30 символов)')
+    opts = [dict(title=str(o['title']).strip()[:300], pros=str(o.get('pros') or '')[:500], cons=str(o.get('cons') or '')[:500]) for o in opts[:6]]
+    prob.update(options=opts, decision=decision, notes=notes[:2000], resolved_by=dict(agent=run.get('agent'), model=run.get('model')), decided_at=at.isoformat())
+    run.update(status='done', finished_at=at.isoformat(), evidence='Решала (%s): %s — %s' % (prob['id'], decision, notes[:300]))
+    pipe = copy.deepcopy(t['pipeline']) if is_pipeline(t) else None
+    if decision == 'owner':
+        q = (req.get('question') or '').strip(); why = (req.get('why_owner') or '').strip()
+        if len(q) < 20: raise ValueError('question: что именно решить владельцу (не короче 20 символов)')
+        if len(why) < 20: raise ValueError('why_owner: почему без владельца нельзя (не короче 20 символов)')
+        prob.update(status='owner', question=q[:1500], why_owner=why[:800], notified=False)
+        note = '👤 Нужен владелец (%s): %s' % (prob['id'], q[:250])
+        if pipe:
+            pipe['blocked'] = dict(pipe.get('blocked') or {}, reason=note, problem=prob['id'], owner=True)
+            journal(s, pipe, t['ref'], 'owner_needed', note, 'resolver')
+            w.write_patches(s, {t['ref']: dict(pipeline=pipe, status='blocked', status_note=note, claimed_by=None)})
+        else:
+            w.write_patches(s, {t['ref']: dict(status='blocked', status_note=note, claimed_by=None)})
+        return dict(decision='owner', problem=prob['id'])
+    text = (req.get('instructions') or '').strip()
+    if len(text) < 30: raise ValueError('instructions: что делать роли дальше (не короче 30 символов)')
+    prob.update(status='resolved', instructions=text[:2000])
+    if not pipe:
+        w.write_patches(s, {t['ref']: dict(status='queued', claimed_by=None, status_note='Решала (%s): %s' % (prob['id'], text[:300]))})
+        return dict(decision=decision, problem=prob['id'])
+    if decision == 'return':
+        to_stage = req.get('to_stage')
+        cur = pipe['stage'] if pipe['stage'] != 'done' else P.ORDER[-1]
+        if to_stage not in P.ORDER[:P.ORDER.index(cur) + 1]: raise ValueError('to_stage: этап не позже текущего')
+        roles = [r for r in (req.get('roles') or []) if r in P.STAGE[to_stage]['roles']]
+        history(pipe, 'return', role='resolver', stage=pipe['stage'], to_stage=to_stage, agent=run.get('agent'), model=run.get('model'),
+                run=run['id'], defects=[], roles=roles, reason=text[:500], at=at.isoformat())
+        return_to(s, t, pipe, at, to_stage, roles, text, 'Решала')
+        patch = orchestrate(s, t, pipe, at)
+    else:
+        journal(s, pipe, t['ref'], 'resolved', 'Решала (%s): %s' % (prob['id'], text[:400]), 'resolver')
+        patch = _resume_role(s, t, pipe, prob, at, 'resolver', text)
+    w.write_patches(s, {t['ref']: dict(patch, claimed_by=None)})
+    return dict(decision=decision, problem=prob['id'], stage=pipe['stage'])
+
+
+def op_answer(s, req, t, at):
+    """Ответ владельца на вопрос Решалы (колокольчик). Работа продолжается с ответом в замечаниях роли."""
+    prob = problem(s, req.get('problem'))
+    if not prob or prob['ref'] != t['ref'] or prob['status'] != 'owner': raise ValueError('Вопрос не найден или уже отвечен')
+    answer = (req.get('answer') or '').strip()
+    if not answer and isinstance(req.get('option'), int) and 0 <= req['option'] < len(prob.get('options') or []):
+        answer = 'Выбран путь: ' + prob['options'][req['option']]['title']
+    if len(answer) < 2: raise ValueError('answer: ответ владельца')
+    prob.update(status='answered', answer=answer[:2000], answered_at=at.isoformat())
+    text = 'Вопрос: %s\nОтвет владельца: %s' % (prob.get('question') or '', answer)
+    if not is_pipeline(t):
+        w.write_patches(s, {t['ref']: dict(status='queued', claimed_by=None, status_note='Ответ владельца (%s): %s' % (prob['id'], answer[:300]))})
+        return dict(answered=prob['id'])
+    pipe = copy.deepcopy(t['pipeline'])
+    journal(s, pipe, t['ref'], 'owner_answered', 'Владелец ответил (%s): %s' % (prob['id'], answer[:400]))
+    w.write_patches(s, {t['ref']: dict(_resume_role(s, t, pipe, prob, at, 'owner', text), claimed_by=None)})
+    return dict(answered=prob['id'], stage=pipe['stage'])
 
 
 def return_to(s, t, pipe, at, to_stage, roles, reason, by):
@@ -541,7 +668,7 @@ def op_return(s, req, t, at):
         raise ValueError('Дефекты регистрируют ревьюер, QA и DevOps')
     defects = register_defects(pipe, run, req.get('defects'), ctx_for(t, pipe), at, required=role == 'qa') if role in DEFECT_ROLES else []
     history(pipe, 'return', role=role, stage=run['stage'], to_stage=to_stage, agent=run.get('agent'), model=run.get('model'),
-            run=run['id'], defects=defects, roles=roles, at=at.isoformat())
+            run=run['id'], defects=defects, roles=roles, reason=reason[:500], at=at.isoformat())
     if defects:
         reason += ' · дефекты: ' + ', '.join(defects)
     run.update(status='done', finished_at=at.isoformat(), evidence='Возврат на «%s»: %s' % (P.STAGE[to_stage]['title'], reason))
@@ -565,7 +692,7 @@ def op_gate(s, req, t, at):
         if to_stage not in P.ORDER[:P.ORDER.index(pipe['stage'] if pipe['stage'] != 'done' else P.ORDER[-1]) + 1]:
             raise ValueError('to_stage: этап не позже текущего')
         history(pipe, 'return', role='teamlead', stage=pipe['stage'], to_stage=to_stage, agent=run.get('agent'),
-                model=run.get('model'), run=run['id'], gate=gate, defects=[], roles=req.get('roles') or [], at=at.isoformat())
+                model=run.get('model'), run=run['id'], gate=gate, defects=[], roles=req.get('roles') or [], reason=notes[:500], at=at.isoformat())
         return_to(s, t, pipe, at, to_stage, req.get('roles') or [], notes, 'Тимлид')
     elif gate == 'escalation':
         pipe.pop('blocked', None)
@@ -606,7 +733,44 @@ def tick():
 
 # ---------------------------------------------------------------- паспорт и задание роли
 
+def resolver_packet(t, run, agent):
+    s = w.state(); prob = problem(s, run.get('problem')) or {}
+    pipe = t.get('pipeline') or {}
+    others = [r for r in s['runs'] if r['ref'] == t['ref'] and r['id'] != run['id']][-6:]
+    other_ai = [a for a in w.PROVIDERS if a != agent]
+    return dict(ref=t['ref'], title=t['title'], why=t.get('why'), acceptance=t.get('acceptance'),
+                role=dict(id='resolver', title=P.ROLES['resolver']['title'], skill='tt-resolver', mission=P.ROLES['resolver']['mission']),
+                route=role_route(t, 'resolver', agent), phase='role',
+                problem={k: prob.get(k) for k in ('id', 'role', 'agent', 'stage', 'reason', 'tried', 'need', 'source', 'at')},
+                stage=pipe.get('stage'), worktree=pipe.get('worktree'),
+                role_state=(pipe.get('roles') or {}).get(key(prob.get('stage') or '', prob.get('role') or '')),
+                journal=(pipe.get('journal') or [])[-15:],
+                recent_runs=[{k: r.get(k) for k in ('id', 'role', 'agent', 'status', 'evidence', 'launch_error')} for r in others],
+                second_opinion=('py "%s" ask %s "<вопрос с контекстом>" — пути решения от второго ИИ' % (w.ROOT / 'tools' / 'pm.py', other_ai[0])) if other_ai else None,
+                handoff=('tt_work op=resolve ref=%s run=%s worker=<ты> options=[{title, pros, cons}, …≥2] decision=continue|return|owner '
+                         'notes=… instructions=… (continue/return) to_stage=… roles=[…] (return) question=… why_owner=… (owner)' % (t['ref'], run['id'])))
+
+
+def resolver_prompt(t, run, route, worker=None):
+    s = w.state(); prob = problem(s, run.get('problem')) or {}
+    wt = (t.get('pipeline') or {}).get('worktree') or {}
+    lines = ['Ты — Решала в TaskTreker: разбираешь проблему %s по задаче %s «%s».' % (prob.get('id', '?'), t['ref'], t['title']),
+             'Проблема (%s, роль %s): %s' % ('агент' if prob.get('source') == 'agent' else 'сервер', prob.get('role') or '—', prob.get('reason', '')),
+             'Следуй скиллу tt-resolver (/tt-resolver). Модель: %s, усилия: %s.' % (route['model'], route['effort']),
+             'Рабочая копия задачи: %s.' % (wt.get('path') or 'нет — смотри репозиторий проекта'),
+             '1) tt_work op=claim ref=%s run=%s model=%s worker=%s' % (t['ref'], run['id'], route['model'], worker or '<id этой сессии>'),
+             '2) tt_work op=packet ref=%s run=%s — проблема, журнал, последние запуски.' % (t['ref'], run['id']),
+             '3) Найди не меньше двух путей решения (второе мнение — у другого ИИ, команда в паспорте), выбери лучший и пришли tt_work op=resolve.',
+             'Владельца зови (decision=owner) только если без его прав, денег, доступов или продуктового решения дальше нельзя.',
+             w.LIMIT_RULE % (t['ref'], run['id'], worker or '<id этой сессии>'),
+             *([w.AUTONOMY_RULE] if w.autonomous() else []),
+             'Работай только через MCP tt_work. Твой worker во всех вызовах: %s.' % (worker or '<id этой сессии>')]
+    return '\n'.join(lines)
+
+
 def role_packet(t, run, agent):
+    if run.get('role') == 'resolver':
+        return resolver_packet(t, run, agent)
     pipe = t['pipeline']; role, stage = run['role'], run['stage']; spec = P.ROLES[role]
     route = role_route(t, role, agent)
     wt = pipe.get('worktree') or {}
@@ -644,18 +808,21 @@ def role_packet(t, run, agent):
             analysis='Проверь, что SRS, HLD, ADR, модель угроз и (если нужны) дизайн и GTM согласованы между собой и с BRD, '
                      'а разработка пройдёт без двояких трактовок.',
             release='Проверь отчёт QA, деплой в тест и риски релиза; реши, готово ли к main.',
-            escalation='Разбери блокер из журнала: верни задачу на нужный этап с конкретными замечаниями или разблокируй.'
+            escalation='Прежняя эскалация тимлиду (до Решалы): разбери блокер, верни задачу или разблокируй.'
         ).get(run.get('gate'))
         packet['journal'] = pipe.get('journal', [])[-15:]
         packet['handoff'] = 'tt_work op=gate ref=%s run=%s worker=<ты> decision=approve|return notes=… [to_stage, roles]' % (t['ref'], run['id'])
     else:
-        packet['escalate'] = 'tt_work op=escalate ref=%s run=%s worker=<ты> reason=… — если без решения тимлида дальше нельзя' % (t['ref'], run['id'])
+        packet['escalate'] = ('tt_work op=escalate ref=%s run=%s worker=<ты> reason=… tried=… need=… — проблема или ограничение: '
+                              'разберёт агент «Решала»' % (t['ref'], run['id']))
         if role in RETURN_TO:
             packet['return'] = 'tt_work op=return ref=%s run=%s worker=<ты> to_stage=%s reason=…' % (t['ref'], run['id'], '|'.join(RETURN_TO[role]))
     return packet
 
 
 def role_prompt(t, run, route, worker=None):
+    if run.get('role') == 'resolver':
+        return resolver_prompt(t, run, route, worker)
     role = run['role']; spec = P.ROLES[role]; pipe = t['pipeline']; wt = pipe.get('worktree') or {}
     skill = 'tt-' + role.replace('_', '-')
     lines = ['Ты — %s в TaskTreker. Задача %s «%s», этап «%s».' % (spec['title'], t['ref'], t['title'],
@@ -669,6 +836,8 @@ def role_prompt(t, run, route, worker=None):
               '2) tt_work op=packet ref=%s run=%s — паспорт роли: DoD, артефакты, предыдущие артефакты, замечания.' % (t['ref'], run['id']),
               '3) Сделай работу, закоммить артефакты, затем %s — это уведомление тимлиду. Не принятая передача вернёт список несделанных пунктов.'
               % ('op=gate' if role == 'teamlead' else 'op=handoff'),
+              'Проблема, ограничение, нет доступа, противоречие — не жди и не спрашивай владельца: tt_work op=escalate ref=%s run=%s '
+              'reason=… tried=… need=… — её разберёт агент «Решала».' % (t['ref'], run['id']),
               w.LIMIT_RULE % (t['ref'], run['id'], worker or '<id этой сессии>'),
               *([w.AUTONOMY_RULE] if w.autonomous() else []),
               *([run['failover']['handover']] if run.get('failover') else []),

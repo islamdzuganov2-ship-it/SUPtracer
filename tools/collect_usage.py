@@ -214,6 +214,7 @@ def totals(projects):
 def aggregate(records, provider, scan, source, available, overrides=()):
     projects = defaultdict(zero)
     hours = defaultdict(lambda: defaultdict(lambda: [0, 0.0, 0]))
+    per_session = defaultdict(lambda: [0, 0.0])
     models, months = defaultdict(lambda: defaultdict(zero)), defaultdict(lambda: defaultdict(zero))
     sessions, model_sessions, month_sessions = defaultdict(set), defaultdict(set), defaultdict(set)
     stamps, dates, unknown = defaultdict(list), defaultdict(set), defaultdict(set)
@@ -232,6 +233,7 @@ def aggregate(records, provider, scan, source, available, overrides=()):
         month_sessions[(key, month)].add(sid)
         if rec.get("unpriced_requests"):
             unknown[key].add(model)
+        cell_s = per_session[sid]; cell_s[0] += billable(numeric); cell_s[1] += rec.get("usd", 0) or 0
         point = parse_time(ts)
         if point is not None and billable(numeric):
             cell = hours[key][datetime.fromtimestamp(point, timezone.utc).strftime("%Y-%m-%dT%H")]
@@ -270,7 +272,9 @@ def aggregate(records, provider, scan, source, available, overrides=()):
         # Час UTC -> [токены, $, запросы]: из этого metrics.py собирает спринты.
         p["by_hour"] = {h: [c[0], round(c[1], 4), c[2]] for h, c in sorted(hours[key].items())}
         output[key] = p
-    return {"label": "Claude" if provider == "claude" else "GPT / Codex",
+    # Сессия -> [токены, $]: metrics.py сопоставляет сессии с запусками ролей (токены каждого агента).
+    sessions_out = {sid: [v[0], round(v[1], 4)] for sid, v in per_session.items() if v[0]}
+    return {"label": "Claude" if provider == "claude" else "GPT / Codex", "sessions": sessions_out,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "source": source, "available": available, "scan": scan,
             "projects": output, "total": totals(output)}

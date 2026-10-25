@@ -119,8 +119,17 @@ const PROJVIEW = (() => {
         <div class="card-viz" id="pm-defects"></div>
       </div>
       ${df.found ? `<div class="card-viz">${defectList(df)}</div>` : ''}
+      <div class="section-h" style="margin-top:22px">Агенты — выполнено, токены, предстоит, возвраты</div>
+      <div class="pm-note">Агент — роль конвейера со своим скиллом (и исполнитель задач вне конвейера). Выполнено — задачи,
+        где запуск роли закончен сдачей, возвратом или решением (не эскалацией). Токены — по сессиям запусков роли из журналов
+        Claude и Codex. Предстоит — этапы впереди с учётом решения PO о дизайне и маркетинге; «возможно» — пока PO не решил.</div>
+      ${(m.team && m.team.agents.length) || (m.team && Object.keys(m.team.roles).length) ? `<div class="pm-grid">
+        <div class="card-viz" id="pm-team-done"></div><div class="card-viz" id="pm-team-tokens"></div></div>
+        <div class="pm-grid"><div class="card-viz" id="pm-team-upcoming"></div><div class="card-viz" id="pm-team-returns"></div></div>
+        <div class="block"><h3>Причины возвратов по агентам</h3>${returnsTable(m.team)}</div>` : '<div class="pm-note">Запусков агентов по проекту ещё не было.</div>'}
       <div class="block"><h3>Качество работы ролей и ИИ</h3>${rolesBlock(m.roles, m.agents)}</div>`;
     drawLevels(tests);
+    if (m.team) drawTeam(m.team);
     drawDefects(df);
     if (!S.length) return;
     const room = host.clientWidth < 500 ? 4 : host.clientWidth < 800 ? 7 : CHART_SPRINTS;   // подписи оси не налезают
@@ -143,6 +152,46 @@ const PROJVIEW = (() => {
                      {label: 'Документы', values: last.map(s => s.docs.changed - s.docs.spec)},
                      {label: 'ТЗ', values: last.map(s => s.docs.spec)}],
       fmt: nf, note: 'Высота столбца — число событий спринта разной природы; сравнивайте сегменты одного цвета.'});
+  }
+
+  // Агенты: по ролям, Claude и Codex — отдельными сегментами.
+  function teamRoles(team) {
+    const order = Object.keys((D.workflow || {}).pipeline?.roles || {});
+    const names = new Set([...team.agents.map(a => a.role), ...Object.keys(team.roles)]);
+    return [...names].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+  }
+  function teamTitle(team, r) {
+    return (team.roles[r] || {}).title || (team.agents.find(a => a.role === r) || {}).title || roleTitle(r);
+  }
+  function drawTeam(team) {
+    const roles = teamRoles(team), by = (r, n, f) => team.agents.filter(a => a.role === r && a.agent === n).reduce((s, a) => s + (a[f] || 0), 0);
+    const rows = f => roles.map(r => ({label: teamTitle(team, r), parts: [by(r, 'claude', f), by(r, 'codex', f)]})).filter(x => x.parts.some(v => v > 0));
+    const series = [{label: 'Claude'}, {label: 'GPT / Codex'}];
+    const done = rows('done'), tokens = rows('tokens');
+    if (done.length) VIZ.hstack($('pm-team-done'), {title: 'Выполнено задач', sub: 'По агентам-ролям; Claude и Codex — отдельно.', rows: done, series, fmt: nf});
+    else $('pm-team-done').innerHTML = '<div class="viz-title">Выполнено задач</div><div class="pm-note">Пока ни одной.</div>';
+    if (tokens.length) VIZ.hstack($('pm-team-tokens'), {title: 'Потрачено токенов', sub: 'Оплачиваемые токены сессий запусков роли.', rows: tokens, series, fmt: tok,
+      note: 'Деньги: ' + roles.map(r => { const usd = team.agents.filter(a => a.role === r).reduce((s, a) => s + a.usd, 0); return usd ? `${teamTitle(team, r)} — ${money(usd)}` : ''; }).filter(Boolean).join(', ')});
+    else $('pm-team-tokens').innerHTML = '<div class="viz-title">Потрачено токенов</div><div class="pm-note">Сессии агентов ещё не сопоставлены с журналами.</div>';
+    const up = roles.map(r => ({label: teamTitle(team, r), value: (team.roles[r] || {}).upcoming || 0,
+      tip: `<b>${esc(teamTitle(team, r))}</b><br>предстоит: ${nf((team.roles[r] || {}).upcoming || 0)}${(team.roles[r] || {}).maybe ? `<br>возможно: ${nf(team.roles[r].maybe)}` : ''}`})).filter((x, i) => x.value > 0 || (team.roles[roles[i]] || {}).maybe);
+    if (up.length) VIZ.bars($('pm-team-upcoming'), {title: 'Предстоит задач', sub: 'Сколько задач ещё пройдёт через агента.', rows: up, fmt: nf,
+      note: roles.filter(r => (team.roles[r] || {}).maybe).map(r => `${teamTitle(team, r)}: возможно ещё ${nf(team.roles[r].maybe)}`).join('; ')});
+    else $('pm-team-upcoming').innerHTML = '<div class="viz-title">Предстоит задач</div><div class="pm-note">Открытых задач нет.</div>';
+    const ret = roles.map(r => ({label: teamTitle(team, r), value: ((team.roles[r] || {}).returns || 0) + ((team.roles[r] || {}).dod_rejects || 0),
+      tip: `<b>${esc(teamTitle(team, r))}</b><br>возвратов: ${nf((team.roles[r] || {}).returns || 0)}<br>отказов DoD: ${nf((team.roles[r] || {}).dod_rejects || 0)}`})).filter(x => x.value > 0);
+    if (ret.length) VIZ.bars($('pm-team-returns'), {title: 'Возвраты к агенту', sub: 'Возвраты на его этап и не принятые сервером передачи (DoD).', rows: ret, fmt: nf, color: 'var(--warn)'});
+    else $('pm-team-returns').innerHTML = '<div class="viz-title">Возвраты к агенту</div><div class="pm-note">Возвратов не было.</div>';
+  }
+  function returnsTable(team) {
+    const roles = teamRoles(team).filter(r => (team.roles[r] || {}).returns || (team.roles[r] || {}).dod_rejects);
+    if (!roles.length) return '<div class="pm-note">Возвратов и отказов DoD не было.</div>';
+    return `<div class="pm-scroll"><table class="bl"><thead><tr><th>Агент</th><th class="num">Возвратов</th><th>Кто возвращал</th><th>Причины (последние)</th><th>Чаще всего не сдано по DoD</th></tr></thead><tbody>${
+      roles.map(r => { const v = team.roles[r];
+        return `<tr><td>${esc(v.title)}</td><td class="num">${nf(v.returns)}${v.dod_rejects ? ` <span class="chip warn">DoD ${nf(v.dod_rejects)}</span>` : ''}</td>
+          <td>${Object.entries(v.returned_by || {}).map(([k, n]) => `${esc(k)} — ${nf(n)}`).join('<br>') || '—'}</td>
+          <td>${(v.reasons || []).slice().reverse().slice(0, 5).map(x => `<div style="font-size:12px;margin-bottom:4px"><span class="mono">${esc(x.task)}</span> · ${esc(x.by)}: ${esc(x.reason)}</div>`).join('') || '—'}</td>
+          <td>${(v.dod_top || []).map(([id, n]) => `<span class="chip">${esc(id)} × ${nf(n)}</span>`).join(' ') || '—'}</td></tr>`; }).join('')}</tbody></table></div>`;
   }
 
   function drawLevels(tests) {

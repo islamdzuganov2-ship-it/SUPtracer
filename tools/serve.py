@@ -130,6 +130,10 @@ def limits_once():
     for r in workflow.state()["runs"]:
         if r.get("status") not in ("queued", "running") or not r.get("launch") or r.get("paused"):
             continue
+        if (r.get("launch") or {}).get("agent") == "codex" and not r["launch"].get("session"):
+            sid, _ = limits.session_of(r)
+            if sid:
+                workflow.note_session(r["ref"], r["id"], sid)
         event = limits.detect(r)
         if event and workflow.mark_paused(r["ref"], r["id"], event):
             paused.append(r["id"])
@@ -186,6 +190,7 @@ def dispatcher(interval=15):
             orchestra.tick()          # задачи, ждавшие DoR (например, одобрения владельца)
             limits_once()             # пауза по лимиту токенов и возобновление с места остановки
             watch_once()              # сессия закончилась без сдачи этапа — продолжить или эскалировать
+            notify_once()             # новое в колокольчике — системное уведомление владельцу
             dispatch_once()
         except Exception as e:   # noqa: BLE001 — сервер досок не должен падать из-за автозапуска
             sys.stderr.write("автозапуск: %s\n" % e)
@@ -210,6 +215,39 @@ NUDGE = ("Ты закончил ответ, но этап не сдан: сер�
          "Владелец не ответит — работа автономная. Продолжи с места остановки: tt_work op=packet (с run), доделай "
          "работу по DoD и сдай её вызовом tt_work. Если без решения владельца дальше нельзя — op=escalate с вариантами.")
 MAX_NUDGES = 2
+
+
+def toast(title, text):
+    """Системное уведомление Windows — отдельный сигнал владельцу, даже если страница закрыта."""
+    if os.name != "nt":
+        return False
+    script = ("Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;"
+              "$n=New-Object System.Windows.Forms.NotifyIcon; $n.Icon=[System.Drawing.SystemIcons]::Information;"
+              "$n.BalloonTipTitle=$env:TT_TITLE; $n.BalloonTipText=$env:TT_TEXT; $n.Visible=$true;"
+              "$n.ShowBalloonTip(15000); Start-Sleep -Seconds 16; $n.Dispose()")
+    try:
+        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+                         env=dict(os.environ, TT_TITLE=title[:60], TT_TEXT=text[:240]),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return True
+    except OSError:
+        return False
+
+
+def notify_once():
+    """Новое в колокольчике — системное уведомление (одно на пункт)."""
+    import workflow
+    s = workflow.state()
+    fresh = [n for n in workflow.notifications(s, workflow.snapshot()["tasks"]) if n["id"] not in (s.get("notified") or [])]
+    if not fresh:
+        return []
+    kinds = {"question": "вопрос Решалы", "release": "релиз в main", "launch": "сбой запуска"}
+    head = fresh[0]
+    toast("TaskTreker: нужен владелец" + (" (%d)" % len(fresh) if len(fresh) > 1 else ""),
+          "%s · %s: %s" % (kinds.get(head["kind"], head["kind"]), head["ref"], head.get("text") or head.get("title") or ""))
+    workflow.mark_notified([n["id"] for n in fresh])
+    return [n["id"] for n in fresh]
 
 
 def watch_once():

@@ -91,3 +91,30 @@ class AutonomyTests(DataCase):
         op.assert_not_called()
         self.assertIn('закрыто', w.state()['runs'][0]['launch_error'])
         self.assertEqual(w.open_sessions(w.state()['runs']), 0)           # закрытое окно место не занимает
+
+    def test_legacy_task_escalates_to_resolver(self):
+        w.action(dict(op='enqueue', ref=self.ref, agent='claude'))
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='c1', model='claude-haiku-5-5'))
+        r = w.action(dict(op='escalate', ref=self.ref, run='RUN-1', worker='c1', reason='Нет доступа к тестовой базе партнёра'))
+        self.assertEqual(w.task_for(self.ref)['status'], 'blocked')
+        rs = next(x for x in w.state()['runs'] if x.get('role') == 'resolver')
+        self.assertEqual((rs['problem'], rs['agent']), (r['problem'], 'codex'))
+        model = w.action(dict(op='packet', ref=self.ref, run=rs['id']))['route']['model']
+        w.action(dict(op='claim', ref=self.ref, run=rs['id'], worker='x1', model=model))
+        w.action(dict(op='resolve', ref=self.ref, run=rs['id'], worker='x1', decision='continue',
+                      options=[dict(title='Поднять локальную копию базы из фикстур'), dict(title='Замокать клиента базы в тестах')],
+                      notes='Фикстуры уже есть в репозитории, это быстрее и надёжнее',
+                      instructions='Подними локальную копию из tests/fixtures и прогоняй тесты на ней'))
+        t = w.task_for(self.ref)
+        self.assertEqual(t['status'], 'queued'); self.assertIn('fixtures', t['status_note'])
+
+    def test_bell_items_and_single_system_notification(self):
+        w.action(dict(op='enqueue', ref=self.ref, agent='claude'))
+        w.mark_launch_error(self.ref, 'RUN-1', 'Командная строка не найдена')
+        notes = w.snapshot()['notifications']
+        self.assertEqual([(n['kind'], n['run']) for n in notes], [('launch', 'RUN-1')])
+        with mock.patch.object(serve, 'toast', return_value=True) as t:
+            self.assertEqual(serve.notify_once(), ['l:RUN-1'])
+            self.assertEqual(serve.notify_once(), [])                     # повторно не шлётся
+        self.assertEqual(t.call_count, 1)
+        self.assertIn('сбой запуска', t.call_args.args[1])

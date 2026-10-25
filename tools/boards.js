@@ -466,10 +466,12 @@
       const live=any&&any.launched_at?(any.paused?'⏸ пауза по лимиту до '+time(any.paused.resume_at):any.status==='running'?'работает':'сессия открыта, ждёт claim'):'';
       const fails=(e.result||[]).filter(x=>x.ok===false);
       return `<div class="board-role-row" title="${esc(fails.map(f=>f.id+': '+f.detail).join('\n'))}">${ic} <b>${esc(roleTitle(r))}</b> — ${esc(live||tx)}${fails.length?` · ✗ DoD: ${fails.length}`:''}${run&&canLaunch(run.agent)?` <button data-role-run="${esc(run.id)}" data-role-task="${i}">Открыть</button>`:''}${any?.launch?.headless?` <button data-run-log="${esc(any.id)}">📄 Журнал</button>`:''}</div>`;}).join('');
+    const prob=p.blocked?.problem?(data.problems||[]).find(x=>x.id===p.blocked.problem):null;
+    const blockLine=prob?`<div class="board-role-row">${prob.status==='owner'?'👤 Нужен владелец — ответ в колокольчике 🔔':prob.status==='resolving'?'🧩 Решала разбирает проблему':'🧩 Проблема'} ${esc(prob.id)}: ${esc((prob.question||prob.reason||'').slice(0,160))}</div>`:'';
     const gate=st?.gate&&roles.every(r=>((p.roles||{})[p.stage+'/'+r]||{}).state==='done')?`<div class="board-role-row">🚦 Ворота тимлида: ${esc((p.gates||{})[st.gate]?.decision||'ждут решения')}</div>`:'';
     const approve=p.stage==='deploy_main'&&(p.gates||{}).release?.decision==='approve'&&!(p.approvals||{}).release?`<button class="board-approve" data-approve="${i}">👤 Одобрить релиз в main</button>`:'';
     const note=t.status_note?`<div class="board-note${t.status==='blocked'?'':' board-note-soft'}">${t.status==='blocked'?'⛔ ':''}${esc(t.status_note)}</div>`:'';
-    return `<div class="board-pipe">${chips}${gate}</div>${note}${approve}`;
+    return `<div class="board-pipe">${blockLine}${chips}${gate}</div>${note}${approve}`;
   }
   const kindRu={artifact:'артефакт',evidence:'доказательство',machine:'сервер',gate:'ворота'};
   function stageInfo(id){

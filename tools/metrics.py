@@ -261,7 +261,148 @@ def project_metrics(key, p, usage, sprints, idx, wf, since):
     out = dict(sprints=rows, totals=totals(rows), outside_commits=sum(1 for c in log if not idx.find(c['at'])))
     out.update(quality(key, p, wf, repo))
     out['tests']['levels'] = test_levels(repo)
+    out['team'] = team(key, p, wf, usage)
     return out
+
+
+EXECUTOR = 'executor'     # исполнитель задач вне конвейера — тоже агент в сводке
+_CX = None
+
+
+def codex_sessions():
+    global _CX
+    if _CX is None:
+        try:
+            import limits
+            _CX = limits.codex_index()
+        except Exception:   # noqa: BLE001 — без журналов Codex токены его запусков неизвестны
+            _CX = []
+    return _CX
+
+
+def role_title(role):
+    import pipeline as P
+    return 'Исполнитель (вне конвейера)' if role == EXECUTOR else P.ROLES.get(role, {}).get('title', role)
+
+
+def run_sessions(r):
+    out = []
+    for l in [r.get('launch') or {}] + list(r.get('launches') or []):
+        if l.get('session') and l['session'] not in out:
+            out.append(l['session'])
+    return out
+
+
+def upcoming(t):
+    """Роли, которым задача ещё предстоит: этапы впереди (и несданные роли текущего), ворота, Решала."""
+    import pipeline as P
+    pipe = t.get('pipeline')
+    if not pipe:
+        return {EXECUTOR: 1}, {}
+    sure, maybe = Counter(), Counter()
+    if pipe.get('stage') == 'done':
+        return sure, maybe
+    needs = pipe.get('needs')
+    gates = pipe.get('gates') or {}
+    for st in P.ORDER[P.ORDER.index(pipe['stage']):]:
+        spec = P.STAGE[st]
+        for role in spec['roles']:
+            if st == pipe['stage'] and ((pipe.get('roles') or {}).get('%s/%s' % (st, role)) or {}).get('state') == 'done':
+                continue
+            flag = (spec.get('optional') or {}).get(role)
+            if flag and needs is not None and not needs.get(flag):
+                continue
+            (maybe if flag and needs is None else sure)[role] += 1
+        if spec.get('gate') and (gates.get(spec['gate']) or {}).get('decision') != 'approve':
+            sure['teamlead'] += 1
+    if pipe.get('blocked'):
+        sure['resolver'] += 1
+    return sure, maybe
+
+
+def team(key, p, wf, usage):
+    """Сводка по агентам-ролям: выполнено, токены, предстоит, возвраты и их причины."""
+    sessions = {n: ((usage.get('providers') or {}).get(n) or {}).get('sessions') or {} for n in PROVIDERS}
+    tasks = {key + '/' + t['id']: t for t in p.get('backlog') or []}
+    cx_index = codex_sessions()
+    rows = defaultdict(lambda: dict(done=set(), runs=0, failed=0, tokens=0, usd=0.0, seen=set()))
+    for r in wf.get('runs') or []:
+        t = tasks.get(r.get('ref'))
+        if not t:
+            continue
+        role = r.get('role') or EXECUTOR
+        agent = r.get('agent') or (r.get('launch') or {}).get('agent') or '?'
+        x = rows[(role, agent)]
+        x['runs'] += 1
+        if r.get('status') == 'failed':
+            x['failed'] += 1
+        ev = str(r.get('evidence') or '')
+        if r.get('status') == 'done' and not ev.startswith('Эскалация'):
+            x['done'].add(r['ref'])
+        sids = run_sessions(r)
+        if agent == 'codex' and not sids and cx_index:
+            # Codex назначает id сессии сам: старые запуски сопоставляются по папке и времени открытия.
+            import limits
+            for l in [r.get('launch') or {}] + list(r.get('launches') or []):
+                sid = limits.match_codex(cx_index, l.get('cwd'), stamp(l.get('at') or r.get('launched_at')))
+                if sid and sid not in sids:
+                    sids.append(sid)
+        for sid in sids:
+            if sid in x['seen']:
+                continue
+            x['seen'].add(sid)
+            tok, usd = (sessions.get(agent) or {}).get(sid, [0, 0])
+            x['tokens'] += tok; x['usd'] += usd
+    agents = [dict(role=role, title=role_title(role), agent=agent, done=len(x['done']), runs=x['runs'], failed=x['failed'],
+                   tokens=x['tokens'], usd=round(x['usd'], 2), sessions=len(x['seen']))
+              for (role, agent), x in sorted(rows.items())]
+    roles = defaultdict(lambda: dict(upcoming=0, maybe=0, returns=0, reasons=[], dod_rejects=0, dod_top=Counter(), by=Counter()))
+    for ref, t in tasks.items():
+        if t.get('status') in ('done', 'cancelled'):
+            continue
+        sure, maybe = upcoming(t)
+        for role, n in sure.items(): roles[role]['upcoming'] += n
+        for role, n in maybe.items(): roles[role]['maybe'] += n
+    import pipeline as P
+    for ref, t in tasks.items():
+        pipe = t.get('pipeline') or {}
+        texts = [j['text'] for j in pipe.get('journal') or [] if j.get('kind') == 'returned']
+        for h in pipe.get('history') or []:
+            if h.get('kind') == 'return':
+                targets = h.get('roles') or P.STAGE.get(h.get('to_stage'), {}).get('roles', [])
+                reason = h.get('reason') or next((x.split(':', 1)[-1].strip() for x in texts if (h.get('to_stage') and P.STAGE[h['to_stage']]['title'] in x)), '') or 'причина не записана'
+                for role in targets:
+                    r = roles[role]; r['returns'] += 1; r['by'][h.get('role') or '?'] += 1
+                    r['reasons'].append(dict(task=ref.split('/', 1)[1], by=role_title(h.get('role')), reason=reason[:300], at=h.get('at')))
+            elif h.get('kind') in ('handoff', 'check') and not h.get('accepted') and h.get('role'):
+                r = roles[h['role']]; r['dod_rejects'] += 1
+                r['dod_top'].update(h.get('failed') or [])
+    summary = {role: dict(title=role_title(role), upcoming=v['upcoming'], maybe=v['maybe'], returns=v['returns'],
+                          returned_by={role_title(k): n for k, n in v['by'].items()},
+                          reasons=sorted(v['reasons'], key=lambda x: x.get('at') or '')[-12:],
+                          dod_rejects=v['dod_rejects'], dod_top=v['dod_top'].most_common(6))
+               for role, v in roles.items()}
+    return dict(agents=agents, roles=summary)
+
+
+def merge_team(blocks):
+    agents = {}
+    roles = {}
+    for b in blocks:
+        for a in b['agents']:
+            k = (a['role'], a['agent']); x = agents.setdefault(k, dict(a, done=0, runs=0, failed=0, tokens=0, usd=0.0, sessions=0))
+            for f in ('done', 'runs', 'failed', 'tokens', 'sessions'):
+                x[f] += a[f]
+            x['usd'] = round(x['usd'] + a['usd'], 2)
+        for role, v in b['roles'].items():
+            x = roles.setdefault(role, dict(title=v['title'], upcoming=0, maybe=0, returns=0, returned_by=Counter(), reasons=[], dod_rejects=0, dod_top=Counter()))
+            for f in ('upcoming', 'maybe', 'returns', 'dod_rejects'):
+                x[f] += v[f]
+            x['returned_by'].update(v['returned_by']); x['dod_top'].update(dict(v['dod_top'])); x['reasons'] += v['reasons']
+    for x in roles.values():
+        x['returned_by'] = dict(x['returned_by']); x['dod_top'] = x['dod_top'].most_common(6)
+        x['reasons'] = sorted(x['reasons'], key=lambda r: r.get('at') or '')[-12:]
+    return dict(agents=sorted(agents.values(), key=lambda a: (a['role'], a['agent'])), roles=roles)
 
 
 def totals(rows):
@@ -519,6 +660,7 @@ def collect():
     for key, p in projects.items():
         out['projects'][key] = project_metrics(key, p, usage, sprints, idx, wf, since)
     out['portfolio'] = portfolio(out['projects'], sprints)
+    out['portfolio']['team'] = merge_team([m['team'] for m in out['projects'].values()])
     return out
 
 

@@ -10,6 +10,8 @@
 сдать работу можно только через handoff с выполненным DoD.
 """
 import copy
+import os
+import time
 
 import filekinds as fk
 import pipeline as P
@@ -178,6 +180,40 @@ def ensure_worktree(t, pipe):
     if wt:
         pipe['worktree'] = dict(path=wt['path'], branch=wt['branch'], base=wt.get('base'))
     return pipe.get('worktree')
+
+
+COMMIT_RULE = ('Если git commit не проходит (песочница не даёт писать в .git, «index.lock: Permission denied») — '
+               'не трать попытки и не эскалируй: сервер сам закоммитит файлы рабочей копии при handoff, return, escalate или pause.')
+
+
+def autocommit(pipe, run, label):
+    """Песочница Codex не даёт агенту писать в .git: незакоммиченное в рабочей копии задачи коммитит сервер.
+    Возвращает короткий хеш коммита или None (нечего коммитить, нет рабочей копии, git отказал)."""
+    path = ((pipe or {}).get('worktree') or {}).get('path')
+    if not path or not os.path.isdir(path):
+        return None
+    st = P._git(['status', '--porcelain'], path)
+    if st.returncode != 0 or not st.stdout.strip():
+        return None
+    msg = ('%s: %s\n\nАвтокоммит сервера TaskTreker: правки агента %s (%s) остались незакоммиченными '
+           '— песочница ИИ не даёт писать в .git.' % (run.get('role') or 'исполнитель', str(label)[:120], run.get('agent'), run['id']))
+    for _ in range(3):
+        P._git(['add', '-A'], path)
+        c = P._git(['-c', 'user.name=TaskTreker', '-c', 'user.email=tasktreker@localhost', 'commit', '-q', '-m', msg], path)
+        if c.returncode == 0:
+            return P._git(['rev-parse', '--short', 'HEAD'], path).stdout.strip()
+        if 'index.lock' not in (c.stderr or '') + (c.stdout or ''):
+            return None
+        time.sleep(1)                   # в копии коммитит другая роль
+    return None
+
+
+def _autocommit(s, t, pipe, run, label):
+    sha = autocommit(pipe, run, label)
+    if sha:
+        journal(s, pipe, t['ref'], 'autocommit', '%s: сервер закоммитил правки агента (%s)' % (run.get('role') or run['id'], sha),
+                run.get('role'), run.get('stage'))
+    return sha
 
 
 def materialize(s, t):
@@ -420,6 +456,7 @@ def op_handoff(s, req, t, at):
         if isinstance(acc, list) and all(isinstance(a, str) and a.strip() for a in acc):
             patch['acceptance'] = [a.strip() for a in acc]
         if isinstance(handoff.get('needs'), dict): pipe['needs'] = handoff['needs']
+    _autocommit(s, t, pipe, run, req['summary'].strip())
     ctx = ctx_for(dict(t, **patch), pipe, handoff)
     results = P.evaluate_role(role, stage, ctx)
     fails = P.failures(results)
@@ -539,6 +576,7 @@ def op_escalate(s, req, t, at):
         return dict(escalated=True, problem=prob['id'])
     pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
     if run['role'] == 'resolver': raise ValueError('Решала не эскалирует сам себе: позови владельца через op=resolve decision=owner')
+    _autocommit(s, t, pipe, run, 'WIP перед эскалацией: ' + reason)
     run.update(status='done', finished_at=at.isoformat(), evidence='Эскалация Решале: ' + reason)
     if run['role'] != 'teamlead':
         pipe['roles'].setdefault(key(run['stage'], run['role']), {}).update(state='pending', feedback=None)
@@ -659,6 +697,7 @@ def op_return(s, req, t, at):
         raise ValueError('Роль %s возвращает только на: %s' % (P.ROLES[role]['title'], ', '.join(RETURN_TO.get(role, [])) or 'нельзя'))
     reason = (req.get('reason') or '').strip()
     if len(reason) < 30: raise ValueError('reason: что не так и что исправить (не короче 30 символов)')
+    _autocommit(s, t, pipe, run, 'возврат: ' + reason)
     if role in ('reviewer', 'qa'):
         spec = P.ROLES[role]['artifacts'][0 if role == 'reviewer' else 1]
         miss = P.check_document(ctx_for(t, pipe).artifact(spec), spec)
@@ -836,10 +875,11 @@ def role_prompt(t, run, route, worker=None):
               '2) tt_work op=packet ref=%s run=%s — паспорт роли: DoD, артефакты, предыдущие артефакты, замечания.' % (t['ref'], run['id']),
               '3) Сделай работу, закоммить артефакты, затем %s — это уведомление тимлиду. Не принятая передача вернёт список несделанных пунктов.'
               % ('op=gate' if role == 'teamlead' else 'op=handoff'),
+              COMMIT_RULE,
               'Проблема, ограничение, нет доступа, противоречие — не жди и не спрашивай владельца: tt_work op=escalate ref=%s run=%s '
               'reason=… tried=… need=… — её разберёт агент «Решала».' % (t['ref'], run['id']),
               w.LIMIT_RULE % (t['ref'], run['id'], worker or '<id этой сессии>'),
               *([w.AUTONOMY_RULE] if w.autonomous() else []),
-              *([run['failover']['handover']] if run.get('failover') else []),
+              *([run['failover']['handover']] if (run.get('failover') or {}).get('handover') else []),
               'Работай только через MCP tt_work. Твой worker во всех вызовах: %s.' % (worker or '<id этой сессии>')]
     return '\n'.join(lines)

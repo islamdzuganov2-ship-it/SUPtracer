@@ -328,8 +328,8 @@ def team(key, p, wf, usage):
     rows = defaultdict(lambda: dict(done=set(), runs=0, failed=0, tokens=0, usd=0.0, seen=set()))
     for r in wf.get('runs') or []:
         t = tasks.get(r.get('ref'))
-        if not t:
-            continue
+        if not t or (r.get('status') == 'cancelled' and not r.get('launched_at')):
+            continue                    # отменённый до открытия запуск — не работа агента
         role = r.get('role') or EXECUTOR
         agent = r.get('agent') or (r.get('launch') or {}).get('agent') or '?'
         x = rows[(role, agent)]

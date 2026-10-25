@@ -468,6 +468,12 @@ def serve(stdin=None, stdout=None):
     """Цикл чтения: одна строка — одно сообщение; пакеты (массивы) наследных версий тоже."""
     inp = stdin or sys.stdin.buffer
     out = stdout or sys.stdout.buffer
+    # Журнал ошибок — только UTF-8: Codex читает stderr сервера как UTF-8 и на тексте в cp1251
+    # (русская ошибка на Windows) рвёт соединение — у агента «Transport closed» на каждом tt_work.
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     server = Server()
 
     def send(obj):

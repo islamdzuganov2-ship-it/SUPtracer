@@ -110,7 +110,7 @@ def dispatch_once():
         if workflow.limited(None, r.get("agent")):
             if not workflow.reroute_queued(r["ref"], r["id"]):
                 continue               # все ИИ на лимите: откроется после сброса
-            continue                   # переведён новым запуском — откроется в следующем проходе
+            continue                   # ИИ запуска сменён — откроется в следующем проходе
         if time.time() - _auto_attempts.get(r["id"], 0) < 300:
             continue
         _auto_attempts[r["id"]] = time.time()
@@ -211,6 +211,17 @@ def launch_info(opened, cwd, agent, **extra):
                 **({"resumed": True} if opened.get("resumed") else {}))
 
 
+def session_active(run, seconds=180):
+    """Сессия ещё пишет журнал: codex.exe может завершиться раньше своей сессии, и продолжение
+    той же сессии упадёт с «already has an active writer». Журнал свежее 3 минут — сессия жива."""
+    import limits
+    try:
+        _sid, path = limits.session_of(run)
+        return bool(path) and time.time() - os.path.getmtime(path) < seconds
+    except (OSError, ValueError):
+        return False
+
+
 NUDGE = ("Ты закончил ответ, но этап не сдан: сервер не получил ни handoff, ни return, ни escalate, ни pause. "
          "Владелец не ответит — работа автономная. Продолжи с места остановки: tt_work op=packet (с run), доделай "
          "работу по DoD и сдай её вызовом tt_work. Если без решения владельца дальше нельзя — op=escalate с вариантами.")
@@ -265,7 +276,7 @@ def watch_once():
         last = workflow.parse_time(r.get("last_nudge_at") or (launch.get("at") or r.get("launched_at")))
         if last and (workflow.now() - last).total_seconds() < 60:
             continue                   # процесс только что открыт
-        if launcher.alive(launch["pid"]):
+        if launcher.alive(launch["pid"]) or session_active(r):
             continue
         if not full:
             if not r.get("launch_error"):

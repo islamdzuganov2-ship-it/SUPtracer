@@ -118,3 +118,12 @@ class AutonomyTests(DataCase):
             self.assertEqual(serve.notify_once(), [])                     # повторно не шлётся
         self.assertEqual(t.call_count, 1)
         self.assertIn('сбой запуска', t.call_args.args[1])
+
+    def test_mcp_errors_are_utf8_for_codex(self):
+        # Codex читает stderr MCP-сервера как UTF-8: ошибка в cp1251 рвала соединение («Transport closed»).
+        import io
+        raw = io.BytesIO(); err = io.TextIOWrapper(raw, encoding='cp1251')
+        with mock.patch.object(sys, 'stderr', err):
+            mcp_server.serve(io.BytesIO(b''), io.BytesIO())
+            sys.stderr.write('Ошибка: проверка\n'); sys.stderr.flush()
+        self.assertEqual(raw.getvalue().decode('utf-8').strip(), 'Ошибка: проверка')

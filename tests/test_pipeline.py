@@ -423,3 +423,19 @@ class PipelineTests(DataCase):
         r_hard, r_easy = orchestra.role_route(hard, 'system_analyst', 'claude'), orchestra.role_route(easy, 'system_analyst', 'claude')
         self.assertGreaterEqual(w.model_entry(r_hard['model'])['tier'], w.model_entry(r_easy['model'])['tier'])
         self.assertGreaterEqual(w.EFFORTS['claude'].index(r_hard['effort']), w.EFFORTS['claude'].index(r_easy['effort']))
+
+    def test_server_commits_when_agent_cannot(self):
+        # Песочница Codex не даёт писать в .git: файлы роли коммитит сервер при сдаче.
+        self.ref = self.idea()
+        run = self.claim('product_owner')
+        wt = Path(self.task()['pipeline']['worktree']['path'])
+        for spec in P.ROLES['product_owner']['artifacts']:
+            if spec.get('optional'): continue
+            path = wt / P.art_path(self.task()['id'], spec['path'])
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_text(doc_text(spec, 'product_owner'), encoding='utf-8')
+        r = self.handoff('product_owner', 'idea', run, acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
+                         needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
+        self.assertTrue(r['accepted'], r)
+        self.assertEqual(git('status', '--porcelain', cwd=wt), '')
+        self.assertIn('Автокоммит сервера', git('log', '-1', '--format=%B', cwd=wt))
+        self.assertTrue(any(e['kind'] == 'autocommit' for e in self.task()['pipeline']['journal']))

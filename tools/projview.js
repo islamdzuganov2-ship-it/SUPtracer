@@ -93,7 +93,17 @@ const PROJVIEW = (() => {
     const S = m.sprints, T = m.totals, tests = m.tests, sc = m.spec_changes, ca = m.code_after_testing, df = m.defects;
     const tokAll = T.tokens.claude + T.tokens.codex;
     host.innerHTML = `
-      <div class="section-h">Реализация по спринтам — ${esc(name)}</div>
+      <div class="section-h">Агенты — выполнено, токены, предстоит, возвраты — ${esc(name)}</div>
+      <div class="pm-note">Агент — роль конвейера со своим скиллом (и исполнитель задач вне конвейера). Выполнено — задачи,
+        где запуск роли закончен сдачей, возвратом или решением (не эскалацией). Токены — по сессиям запусков роли из журналов
+        Claude и Codex. Предстоит — этапы впереди с учётом решения PO о дизайне и маркетинге; «возможно» — пока PO не решил.
+        Какой ИИ ведёт роль — таблица ролей (окно «DoR / DoD» на доске): идея и анализ — Claude, разработка, QA и DevOps — Codex.</div>
+      ${m.team ? `<div class="kpis">${aiKpis(m.team)}</div>` : ''}
+      ${(m.team && m.team.agents.length) || (m.team && Object.keys(m.team.roles).length) ? `<div class="pm-grid">
+        <div class="card-viz" id="pm-team-done"></div><div class="card-viz" id="pm-team-tokens"></div></div>
+        <div class="pm-grid"><div class="card-viz" id="pm-team-upcoming"></div><div class="card-viz" id="pm-team-returns"></div></div>
+        <div class="block"><h3>Причины возвратов по агентам</h3>${returnsTable(m.team)}</div>` : '<div class="pm-note">Запусков агентов по проекту ещё не было.</div>'}
+      <div class="section-h" style="margin-top:22px">Реализация по спринтам — ${esc(name)}</div>
       <div class="pm-note">${esc((D.metrics || {}).basis || '')} Спринт попадает сюда, если в нём был расход или коммит проекта.
         Коммитов вне спринтов (без работы ИИ): ${nf(m.outside_commits)}.</div>
       <div class="kpis">
@@ -119,14 +129,6 @@ const PROJVIEW = (() => {
         <div class="card-viz" id="pm-defects"></div>
       </div>
       ${df.found ? `<div class="card-viz">${defectList(df)}</div>` : ''}
-      <div class="section-h" style="margin-top:22px">Агенты — выполнено, токены, предстоит, возвраты</div>
-      <div class="pm-note">Агент — роль конвейера со своим скиллом (и исполнитель задач вне конвейера). Выполнено — задачи,
-        где запуск роли закончен сдачей, возвратом или решением (не эскалацией). Токены — по сессиям запусков роли из журналов
-        Claude и Codex. Предстоит — этапы впереди с учётом решения PO о дизайне и маркетинге; «возможно» — пока PO не решил.</div>
-      ${(m.team && m.team.agents.length) || (m.team && Object.keys(m.team.roles).length) ? `<div class="pm-grid">
-        <div class="card-viz" id="pm-team-done"></div><div class="card-viz" id="pm-team-tokens"></div></div>
-        <div class="pm-grid"><div class="card-viz" id="pm-team-upcoming"></div><div class="card-viz" id="pm-team-returns"></div></div>
-        <div class="block"><h3>Причины возвратов по агентам</h3>${returnsTable(m.team)}</div>` : '<div class="pm-note">Запусков агентов по проекту ещё не было.</div>'}
       <div class="block"><h3>Качество работы ролей и ИИ</h3>${rolesBlock(m.roles, m.agents)}</div>`;
     drawLevels(tests);
     if (m.team) drawTeam(m.team);
@@ -182,6 +184,15 @@ const PROJVIEW = (() => {
       tip: `<b>${esc(teamTitle(team, r))}</b><br>возвратов: ${nf((team.roles[r] || {}).returns || 0)}<br>отказов DoD: ${nf((team.roles[r] || {}).dod_rejects || 0)}`})).filter(x => x.value > 0);
     if (ret.length) VIZ.bars($('pm-team-returns'), {title: 'Возвраты к агенту', sub: 'Возвраты на его этап и не принятые сервером передачи (DoD).', rows: ret, fmt: nf, color: 'var(--warn)'});
     else $('pm-team-returns').innerHTML = '<div class="viz-title">Возвраты к агенту</div><div class="pm-note">Возвратов не было.</div>';
+  }
+  // Сводка по ИИ: кто сколько сделал, сколько стоил, сколько запусков сорвалось.
+  function aiKpis(team) {
+    return ['claude', 'codex'].map(n => {
+      const rows = team.agents.filter(a => a.agent === n);
+      const sum = f => rows.reduce((s, a) => s + (a[f] || 0), 0);
+      return kpi(nf(sum('done')), (n === 'claude' ? 'Claude' : 'GPT / Codex') + ': задач выполнено',
+        `${tok(sum('tokens'))} токенов · ${money(sum('usd'))} · запусков ${nf(sum('runs'))}${sum('failed') ? `, сорвалось ${nf(sum('failed'))}` : ''}`);
+    }).join('');
   }
   function returnsTable(team) {
     const roles = teamRoles(team).filter(r => (team.roles[r] || {}).returns || (team.roles[r] || {}).dod_rejects);

@@ -129,7 +129,9 @@ def render(role):
             '1. `tt_work op=claim ref=… run=… model=… worker=…` — ровно как в задании сессии.',
             '2. `tt_work op=packet ref=… run=…` — паспорт роли: DoD, артефакты, артефакты предыдущих этапов (`upstream`), замечания (`feedback`).',
             '3. Прочитай артефакты предыдущих этапов. Работай только в рабочей копии задачи; коммить только свои файлы '
-            '(`git add <свои файлы>`; при `index.lock` повтори через несколько секунд — в копии могут работать другие роли).',
+            '(`git add <свои файлы>`; при `index.lock` повтори через несколько секунд — в копии могут работать другие роли). '
+            'Если песочница вообще не даёт писать в `.git` («Permission denied»), не трать попытки: сервер сам закоммитит '
+            'файлы рабочей копии при handoff, return, escalate или pause.',
             '4. `tt_work op=handoff ref=… run=… worker=… summary=… items={"<id>": {"status": "done"|"na", "evidence": "…"}}`'
             + {'product_owner': ' acceptance=[бизнес-критерии приёмки] needs={"design": bool, "marketing": bool, "reason": "…"}',
                'reviewer': ' verdict="approve"', 'qa': ' signoff=true',

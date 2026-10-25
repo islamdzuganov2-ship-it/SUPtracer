@@ -208,3 +208,29 @@ class LimitTests(DataCase):
         self.assertEqual(out['handed'][0]['agent'], 'codex')
         # Ждущий запуск ИИ на лимите автозапуск не открывает, а переводит.
         self.assertTrue(w.limited(None, 'claude'))
+
+    def test_unlaunched_run_switches_ai_in_place(self):
+        # Неоткрытый запуск ИИ на лимите меняет ИИ сам, без новых запусков (раньше — сотни передач).
+        w.action(dict(op='settings', changes=dict(failover=True)))
+        w.action(dict(op='enqueue', ref=self.ref, agent='claude'))
+        s = w.state(); w.note_limit(s, 'claude', datetime.now(timezone.utc) + timedelta(hours=1), datetime.now(timezone.utc)); w.save('workflow.json', s)
+        with mock.patch.object(w, 'cli_ok', return_value=True):
+            self.assertEqual(w.reroute_queued(self.ref, 'RUN-1'), 'codex')
+            self.assertEqual(w.reroute_queued(self.ref, 'RUN-1'), 'codex')        # повтор ничего не плодит
+        runs = w.state()['runs']
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((runs[0]['agent'], runs[0]['status'], runs[0]['packet']['route']['provider']), ('codex', 'queued', 'codex'))
+        self.assertEqual(runs[0]['repins'][-1]['by'], 'лимит токенов')
+        self.assertNotIn('Передача', w.launch_prompt(w.task_for(self.ref), runs[0], runs[0]['packet']['route'], {}))
+        # Назначение задачи прежнему ИИ не мешает принять запуск.
+        d = w.read('projects.json', {}); d['projects']['alpha-api']['backlog'][-1]['executor'] = 'claude'; w.save('projects.json', d)
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='codex-1', model=runs[0]['packet']['route']['model']))
+
+    def test_watch_keeps_session_that_still_writes(self):
+        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)))
+        self.launched_run()
+        path = self.claude_log('sess-1', [dict(type='user', timestamp=iso(datetime.now(timezone.utc)))])
+        s = w.state(); s['runs'][0]['launch']['pid'] = 999999; s['runs'][0]['launch']['at'] = s['runs'][0]['launched_at'] = '2026-01-01T00:00:00+00:00'; w.save('workflow.json', s)
+        with mock.patch.object(launcher, 'alive', return_value=False), mock.patch.object(serve, 'open_session') as op:
+            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[]))           # журнал свежий — сессия жива
+        op.assert_not_called()

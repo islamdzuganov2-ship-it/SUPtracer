@@ -213,6 +213,8 @@ def lease_alive(run, at=None):
     """Живая аренда. У старых запусков без срока аренда бессрочна."""
     if run.get('status') != 'running': return False
     until = parse_time(run.get('lease_until'))
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)      # старые записи без пояса — это UTC
     return until is None or until > (at or now())
 
 def active(runs):
@@ -846,7 +848,7 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
     if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
     lines.append(LIMIT_RULE % (ref, run['id'], worker or '<id этой сессии>'))
     if autonomous(): lines.append(AUTONOMY_RULE)
-    if run.get('failover'): lines.append(run['failover']['handover'])
+    if (run.get('failover') or {}).get('handover'): lines.append(run['failover']['handover'])
     lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
 
@@ -979,15 +981,42 @@ def failover_run(ref, run_id):
         return out
 
 def reroute_queued(ref, run_id):
-    """Ждущий, ещё не открытый запуск закреплён за ИИ на лимите — перевести на свободный."""
+    """Ждущий, ещё не открытый запуск закреплён за ИИ на лимите — сменить ИИ в самом запуске.
+
+    Работы ещё не было, передавать нечего: ни нового запуска, ни отмены, ни заметки о передаче.
+    (Раньше здесь создавался новый запуск — при чередовании лимитов запуски множились сотнями.)"""
     with locked():
         s=state(); at=now(); t=task_for(ref)
         run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status']=='queued' and not r.get('launched_at')),None)
-        if not run or not limited(s, run.get('agent'), at): return run and run.get('agent')
-        out=failover(s, t, run, at)
-        if not out: return None
-        write_patches(s, {ref: out.pop('patch')}); save('workflow.json',s)
-        return out['agent']
+        if not run: return None
+        src=run.get('agent')
+        if not limited(s, src, at): return src
+        if not settings(s).get('failover', True): return None
+        if run.get('role'):
+            import orchestra
+            order=orchestra.role_order(s, t, run['role'])
+        else:
+            order=list(PROVIDERS)
+        to=next((a for a in order if a!=src and not limited(s, a, at) and cli_ok(a)), None)
+        if not to: return None
+        patch={}
+        if run.get('role'):
+            route=orchestra.role_route(t, run['role'], to)
+            if t.get('pipeline') and run['role'] not in ('teamlead','resolver'):
+                import copy
+                pipe=copy.deepcopy(t['pipeline'])
+                e=(pipe.get('roles') or {}).get(orchestra.key(run.get('stage'), run['role']))
+                if e and e.get('run')==run['id']:
+                    e['agent']=to; patch['pipeline']=pipe
+        else:
+            route=recommendation(dict(t, executor=to, model=None), agent=to)
+            run['failover']=dict(from_agent=src, inplace=True, handover='')   # пропуск назначения задачи прежнему ИИ
+        run['packet']=dict(run.get('packet') or {}, route=route)
+        run['agent']=to
+        run['repins']=(run.get('repins') or [])[-9:]+[dict(at=at.isoformat(), from_agent=src, to=to, by='лимит токенов')]
+        if patch: write_patches(s, {ref: patch})
+        save('workflow.json',s)
+        return to
 
 def notifications(s, tasks):
     """Колокольчик: что ждёт именно владельца. Вопросы Решалы, релизы в пошаговом режиме, сбои запуска."""
@@ -1502,6 +1531,9 @@ def action(req):
                     if len(cp)<20: raise ValueError('checkpoint: что сделано, что осталось и следующий шаг (не короче 20 символов)')
                     resets=req.get('resets_at')
                     if resets is not None and parse_time(str(resets).replace('Z','+00:00')) is None: raise ValueError('resets_at: время ISO 8601')
+                    if t.get('pipeline'):
+                        import orchestra
+                        orchestra.autocommit(t['pipeline'], run, 'WIP перед паузой по лимиту: '+cp)
                     patch.update(pause_patch(s, t, run, dict(resets_at=resets, session=(run.get('launch') or {}).get('session')), at, 'agent', cp))
                     extra=dict(paused=run['paused'])
                     moved=failover(s, dict(t, **{k:v for k,v in patch.items() if k=='pipeline'}), run, at)

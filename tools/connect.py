@@ -134,6 +134,14 @@ def find_cli():
     exe = shutil.which("claude")
     if exe:
         return exe
+    try:
+        # Приложение кладёт CLI в claude-code/<версия>/<сборка>/claude.exe — тот же поиск, что у запуска сессий.
+        import launcher
+        exe = launcher.find_cli("claude")
+        if exe:
+            return exe
+    except Exception:   # noqa: BLE001 — подключение не должно падать из-за поиска
+        pass
     bundled = glob.glob(os.path.expanduser("~/AppData/Roaming/Claude/claude-code/*/claude.exe"))
 
     def ver(p):

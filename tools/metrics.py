@@ -107,13 +107,18 @@ def build_sprints(usage):
             end = nxt
         spans.append([h, end, set(), 'activity']); starts.append(h); starts.sort()
     spans.sort(key=lambda x: x[0])
+    # Окна Claude и Codex сдвинуты друг относительно друга: склейка перекрывающихся окон
+    # тянула цепочку в один «спринт» на сутки и больше. Перекрытое окно начинается там,
+    # где кончилось предыдущее, — спринт не длиннее одного окна; хвост короче 15 минут
+    # отходит предыдущему спринту.
     merged = []
     for a, b, who, basis in spans:
         if merged and a < merged[-1][1]:
-            m = merged[-1]; m[1] = max(m[1], b); m[2] |= who
-            m[3] = 'limit' if 'limit' in (m[3], basis) else basis
-        else:
-            merged.append([a, b, set(who), basis])
+            m = merged[-1]; m[2] |= who
+            if b - m[1] < timedelta(minutes=15):
+                m[1] = max(m[1], b); continue
+            a = m[1]
+        merged.append([a, b, set(who), basis])
     hits = limit_hits(usage)
     out = []
     for i, (a, b, who, basis) in enumerate(merged):

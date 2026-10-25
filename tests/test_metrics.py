@@ -33,12 +33,19 @@ class SprintTests(DataCase):
         self.assertEqual(sp[0]['limit_hit'], ['claude'])
         self.assertEqual(sp[1]['limit_hit'], [])
 
-    def test_overlapping_windows_of_two_ai_are_one_sprint(self):
+    def test_overlapping_windows_do_not_chain_into_long_sprint(self):
+        # Окна двух ИИ сдвинуты: перекрытое окно начинается, где кончилось предыдущее (не склейка на сутки).
         u = usage([2], [5], limits_claude=[dict(provider='claude', at='2026-10-20T04:00:00Z', resets_at='2026-10-20T06:00:00+00:00', kind='five_hour')],
                   limits_codex=[dict(provider='codex', kind='window', resets_at='2026-10-20T09:00:00+00:00', window_minutes=300)])
         sp = M.build_sprints(u)
-        self.assertEqual(len(sp), 1)
-        self.assertEqual((sp[0]['start'], sp[0]['end'], sp[0]['windows']), ('2026-10-20T01:00+00:00', '2026-10-20T09:00+00:00', ['claude', 'codex']))
+        self.assertEqual([(s['start'], s['end']) for s in sp],
+                         [('2026-10-20T01:00+00:00', '2026-10-20T06:00+00:00'), ('2026-10-20T06:00+00:00', '2026-10-20T09:00+00:00')])
+        self.assertEqual(sp[0]['windows'], ['claude', 'codex'])
+        # Цепочка сдвинутых окон за сутки — несколько спринтов, каждый не длиннее окна.
+        chain = [dict(provider='codex', kind='window', resets_at='2026-10-21T%02d:00:00+00:00' % h, window_minutes=300) for h in (5, 8, 11, 14, 17)]
+        sp = M.build_sprints(usage([1], limits_codex=chain))
+        self.assertTrue(all(M.stamp(s['end']) - M.stamp(s['start']) <= M.WINDOW for s in sp))
+        self.assertGreater(len(sp), 3)
 
     def test_weekly_limit_does_not_define_window(self):
         u = usage([10], limits_claude=[dict(provider='claude', at='2026-10-20T10:20:00Z', resets_at='2026-10-25T00:00:00+00:00', kind='seven_day')])

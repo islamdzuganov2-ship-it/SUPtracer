@@ -29,8 +29,10 @@ MIN_NA_REASON = 10
 
 STAGES = [
     dict(id='idea', title='Идея', roles=['product_owner']),
+    # after: роль стартует только после сдачи другой роли этапа — архитектор и дизайнер читают готовое ТЗ (А1).
     dict(id='analysis', title='Анализ', roles=['system_analyst', 'solution_architect', 'designer', 'marketer'],
-         optional={'designer': 'design', 'marketer': 'marketing'}, gate='analysis'),
+         optional={'designer': 'design', 'marketer': 'marketing'}, gate='analysis',
+         after={'solution_architect': 'system_analyst', 'designer': 'system_analyst'}),
     dict(id='development', title='Разработка', roles=['developer']),
     dict(id='review', title='Ревью', roles=['reviewer']),
     dict(id='deploy_test', title='Деплой в тест', roles=['devops']),
@@ -305,6 +307,12 @@ ROUTING = {
     'resolver': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'xhigh', 'xhigh'), cross='escalator',
                      why='разбор проблем — старший класс; другой ИИ, чем агент с проблемой, — свежий взгляд'),
 }
+
+
+def waits_for(stage, role, needs=None):
+    """Роль этапа, которая должна сдать работу раньше этой (или None)."""
+    dep = STAGE[stage].get('after', {}).get(role)
+    return dep if dep and dep in stage_roles(stage, needs) else None
 
 
 def stage_roles(stage, needs=None):

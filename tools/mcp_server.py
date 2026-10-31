@@ -326,7 +326,7 @@ TOOLS.append({"name": "tt_work", "title": "Планирование и испо�
         "tasks": {"type":"array", "items":{"type":"object"}},
         "projects": {"type":"array", "items":STR}, "changes":{"type":"object"}}, ["op"]),
     "annotations": dict(WRITE, idempotentHint=False, title="Планирование и исполнение")})
-OWNER_SETTINGS = {'autonomy', 'consent', 'max_sessions', 'auto_merge', 'failover', 'roles'}
+OWNER_SETTINGS = {'autonomy', 'consent', 'max_sessions', 'auto_merge', 'failover', 'roles', 'sessions_per_ai', 'wip_analysis'}
 
 
 def t_work(a):

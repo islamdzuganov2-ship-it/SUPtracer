@@ -74,10 +74,27 @@ class StartProjectTests(DataCase):
         for r in s['runs']: r['auto_launch'] = True; r['role'] = None
         s['runs'][0].update(launched_at=w.now().isoformat())        # одно окно уже открыто
         w.save('workflow.json', s)
-        w.action(dict(op='settings', changes=dict(max_sessions=3, auto_launch_review=True)))
+        w.action(dict(op='settings', changes=dict(max_sessions=3, auto_launch_review=True, sessions_per_ai=dict(claude=6))))
         with mock.patch.object(serve, 'launch_session', return_value={}) as launch:
             started = serve.dispatch_once()
         self.assertEqual(len(started), 2)                              # 3 места − 1 открытое
         self.assertEqual(launch.call_count, 2)
         with self.assertRaisesRegex(ValueError, 'max_sessions'):
             w.action(dict(op='settings', changes=dict(max_sessions=50)))
+
+    def test_dispatcher_caps_each_ai_and_puts_resolver_first(self):
+        self.plan(*[dict(id='AL-%d' % i) for i in range(50, 56)])
+        for i in range(50, 56):
+            w.action(dict(op='enqueue', ref='alpha-api/AL-%d' % i, agent='claude' if i < 54 else 'codex'))
+        s = w.state()
+        for r in s['runs']: r['auto_launch'] = True; r['role'] = None
+        s['runs'][-1].update(role='resolver')                         # Решала — последним в очереди
+        w.save('workflow.json', s)
+        w.action(dict(op='settings', changes=dict(max_sessions=4, auto_launch_review=True, sessions_per_ai=dict(claude=2, codex=1))))
+        with mock.patch.object(serve, 'launch_session', return_value={}) as launch:
+            serve.dispatch_once()
+        opened = [c.args[0] for c in launch.call_args_list]
+        self.assertEqual(opened[0]['ref'], 'alpha-api/AL-55')             # Решала открыт первым (А5)
+        self.assertEqual(sorted(o['agent'] for o in opened), ['claude', 'claude', 'codex'])   # А7: Claude 2, Codex 1
+        with self.assertRaisesRegex(ValueError, 'sessions_per_ai'):
+            w.action(dict(op='settings', changes=dict(sessions_per_ai=dict(gpt=1))))

@@ -114,6 +114,8 @@ def state():
 REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна доработка', 'spec_change': 'Принято с изменением ТЗ'}
 
 MAX_SESSIONS = 4   # окон ИИ, которые сервер досок держит открытыми одновременно
+SESSIONS_PER_AI = 2   # и не больше стольких на каждый ИИ (А7)
+WIP_ANALYSIS = 6   # задач проекта в анализе одновременно; пока лимит занят, PO новые идеи не разбирает (А2)
 # Режим согласия владельца: step — окна и вопросы на каждом шаге; full — одно согласие на всё:
 # сессии без окон, без вопросов, релиз в main без отдельного «да». В удалённый репозиторий — никогда.
 AUTONOMY = ('step', 'full')
@@ -130,7 +132,8 @@ def autonomous(s=None):
 def settings(s=None):
     return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
                      reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={},
-                     max_sessions=MAX_SESSIONS, autonomy='step', failover=True),
+                     max_sessions=MAX_SESSIONS, autonomy='step', failover=True,
+                     sessions_per_ai={p: SESSIONS_PER_AI for p in PROVIDERS}, wip_analysis=WIP_ANALYSIS),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -586,12 +589,14 @@ def per_ai(points):
     """Сколько параллельных сессий на ИИ даёт объём готового бэклога (очки размера S=1, M=3, L=8)."""
     return 1 if points < 10 else 2 if points < 40 else 3
 
-def open_sessions(runs, at=None, hours=12):
+def open_sessions(runs, at=None, hours=12, agent=None):
     """Сессии, открытые сервером и ещё не закончившие: выполняются или открыты и ждут claim.
-    Пауза по лимиту окна не занимает; открытое, но брошенное окно перестаёт считаться через 12 ч."""
+    Пауза по лимиту окна не занимает; открытое, но брошенное окно перестаёт считаться через 12 ч.
+    agent — только сессии этого ИИ."""
     edge=(at or now())-timedelta(hours=hours); n=0
     for r in runs:
         if r.get('paused') or not r.get('launched_at'): continue
+        if agent and r.get('agent')!=agent: continue
         pid=(r.get('launch') or {}).get('pid')
         if pid and r.get('status') in ('queued','running'):
             import launcher
@@ -1362,7 +1367,7 @@ def action(req):
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent','failover'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, autonomy')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent','failover','sessions_per_ai','wip_analysis'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, sessions_per_ai, wip_analysis, autonomy')
             if 'autonomy' in changes:
                 if changes['autonomy'] not in AUTONOMY: raise ValueError('autonomy: full (полная автономия) или step (пошаговое согласие)')
                 if changes['autonomy']=='full' and changes.pop('consent',None) is not True:
@@ -1370,6 +1375,13 @@ def action(req):
                 changes['autonomy_changed']=dict(at=at.isoformat(), to=changes['autonomy'], by=req.get('by') or 'владелец')
             changes.pop('consent',None)
             if 'max_sessions' in changes and (type(changes['max_sessions'])!=int or not 1<=changes['max_sessions']<=12): raise ValueError('max_sessions: от 1 до 12 одновременных сессий')
+            if 'sessions_per_ai' in changes:
+                v=changes['sessions_per_ai']
+                if not isinstance(v,dict) or any(a not in PROVIDERS or type(n)!=int or not 0<=n<=12 for a,n in v.items()):
+                    raise ValueError('sessions_per_ai: {claude|codex: от 0 до 12 сессий}')
+                changes['sessions_per_ai']=dict(settings(s).get('sessions_per_ai') or {}, **v)
+            if 'wip_analysis' in changes and (type(changes['wip_analysis'])!=int or not 1<=changes['wip_analysis']<=50):
+                raise ValueError('wip_analysis: от 1 до 50 задач в анализе на проект')
             if 'reviewer' in changes and changes['reviewer'] not in ('same','other',*PROVIDERS): raise ValueError('Ревьюер: same, other или ИИ')
             if 'roles' in changes:
                 import pipeline as P

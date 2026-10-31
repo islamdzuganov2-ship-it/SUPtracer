@@ -118,7 +118,8 @@ class PipelineTests(DataCase):
         self.assertEqual(t['pipeline']['stage'], 'analysis')
         self.assertEqual(len(t['acceptance']), 2)
         queued = {x['role'] for x in w.state()['runs'] if x['ref'] == self.ref and x['status'] == 'queued'}
-        self.assertEqual(queued, {'system_analyst', 'solution_architect'})          # дизайн и маркетинг не нужны
+        self.assertEqual(queued, {'system_analyst'})          # дизайн и маркетинг не нужны; архитектор — после ТЗ (А1)
+        self.assertIn('после: Системный аналитик', self.task()['status_note'])
         for role in ('system_analyst', 'solution_architect'):
             self.assertTrue(self.do_role(role, 'analysis')['accepted'])
         self.assertEqual(self.task()['pipeline']['stage'], 'analysis')             # ждёт ворот тимлида
@@ -166,9 +167,10 @@ class PipelineTests(DataCase):
         self.ref = self.idea()
         self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
                      needs=dict(design=True, marketing=False, reason='Нужен экран выгрузки, запуск не нужен'))
+        self.do_role('system_analyst', 'analysis')
         roles = {x['role'] for x in w.state()['runs'] if x['ref'] == self.ref and x['status'] == 'queued'}
-        self.assertIn('designer', roles)
-        for role in ('system_analyst', 'solution_architect', 'designer'):
+        self.assertEqual(roles, {'solution_architect', 'designer'})                   # оба — после ТЗ
+        for role in ('solution_architect', 'designer'):
             self.do_role(role, 'analysis')
         gate = self.claim('teamlead', gate='analysis')
         w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve', notes='Анализ согласован, можно разрабатывать'))

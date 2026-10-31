@@ -93,17 +93,24 @@ def dashboard_stale():
 
 def dispatch_once():
     """Автозапуск: ревью после пройденной автопроверки открывается само, если включено."""
-    import workflow
+    import workflow, orchestra
     conf = workflow.settings()
     started = []
-    runs = workflow.state()["runs"]
+    s = workflow.state(); runs = s["runs"]
     busy = workflow.open_sessions(runs)
-    prio = {t["ref"]: workflow.PRIORITY_ORDER.get(t.get("priority"), 1) for t in workflow.snapshot()["tasks"]}
-    for r in sorted(runs, key=lambda r: (prio.get(r["ref"], 1), r.get("created_at") or "")):
+    per_ai = {a: workflow.open_sessions(runs, agent=a) for a in workflow.PROVIDERS}
+    tasks = {t["ref"]: t for t in workflow.snapshot()["tasks"]}
+    prio = {ref: workflow.PRIORITY_ORDER.get(t.get("priority"), 1) for ref, t in tasks.items()}
+    for r in sorted(runs, key=lambda r: orchestra.dispatch_order(r, tasks, prio)):
         if r.get("status") != "queued" or not r.get("auto_launch") or r.get("launched_at"):
             continue
-        if busy >= conf.get("max_sessions", 4):
-            break                 # лимит одновременных сессий: остальные откроются, когда эти закончат
+        # Лимит одновременных сессий; Решала разбирает блокеры и получает одно место сверх него (А5).
+        if busy >= conf.get("max_sessions", 4) + (1 if r.get("role") == "resolver" else 0):
+            continue
+        if per_ai.get(r.get("agent"), 0) >= (conf.get("sessions_per_ai") or {}).get(r.get("agent"), 99):
+            continue              # у этого ИИ свой лимит сессий (А7): запуски другого ИИ идут дальше
+        if orchestra.hold(s, r, tasks, conf):
+            continue              # порядок анализа, лимит незавершённого, группа контрактов
         # Роли конвейера — по auto_pipeline, ревью старого потока — по auto_launch_review; передачи по лимиту — всегда.
         if not (conf["auto_pipeline"] if r.get("role") else (conf["auto_launch_review"] or r.get("failover"))):
             continue
@@ -116,7 +123,8 @@ def dispatch_once():
         _auto_attempts[r["id"]] = time.time()
         try:
             launch_session(dict(ref=r["ref"], agent=r.get("agent"), run=r["id"]))
-            started.append(r["id"]); busy += 1
+            started.append(r["id"]); busy += 1; per_ai[r.get("agent")] = per_ai.get(r.get("agent"), 0) + 1
+            r["launched_at"] = workflow.now().isoformat()     # группа контрактов видит открытый запуск в этом же проходе
         except Exception as e:   # noqa: BLE001 — причина видна на карточке
             workflow.mark_launch_error(r["ref"], r["id"], e)
     return started

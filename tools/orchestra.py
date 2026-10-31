@@ -257,6 +257,42 @@ def create_role_run(s, t, pipe, stage, role, at, feedback=None, gate=None):
     return run
 
 
+def hold(s, run, tasks, conf=None):
+    """Почему запуск роли пока не открывать (None — можно). Решает диспетчер сервера досок.
+
+    А1 — роль ждёт сдачи предшественника на этапе; А2 — PO не запускается, пока в анализе проекта
+    уже WIP задач; А6 — анализ задач одной группы контрактов идёт по очереди."""
+    t = tasks.get(run['ref']); role, stage = run.get('role'), run.get('stage')
+    if not t or not role or not t.get('pipeline'):
+        return None
+    pipe = t['pipeline']; conf = conf or w.settings(s)
+    if stage in P.STAGE:
+        dep = P.waits_for(stage, role, pipe.get('needs'))
+        if dep and (pipe['roles'].get(key(stage, dep)) or {}).get('state') != 'done':
+            return 'ждёт сдачи роли «%s»' % P.ROLES[dep]['title']
+    if role == 'product_owner' and stage == 'idea':
+        wip = conf.get('wip_analysis', w.WIP_ANALYSIS)
+        n = sum(1 for x in tasks.values() if x.get('project') == t['project'] and (x.get('pipeline') or {}).get('stage') == 'analysis'
+                and not (x['pipeline'].get('blocked')))
+        if n >= wip:
+            return 'в анализе проекта уже %d задач (лимит %d): сначала довести их' % (n, wip)
+    grp = pipe.get('contract_group')
+    if grp and stage == 'analysis':
+        for r in s['runs']:
+            other = tasks.get(r['ref'])
+            if r['ref'] != run['ref'] and r.get('stage') == 'analysis' and r.get('launched_at') and r['status'] in ('queued', 'running') \
+                    and other and (other.get('pipeline') or {}).get('contract_group') == grp:
+                return 'анализ группы контрактов «%s» идёт в %s: задачи группы — по очереди' % (grp, r['ref'])
+    return None
+
+
+def dispatch_order(run, tasks, prio):
+    """Порядок открытия: Решала первым (А5), затем этапы ближе к main, затем приоритет и возраст."""
+    st = run.get('stage')
+    idx = P.ORDER.index(st) if st in P.ORDER else P.ORDER.index('development')
+    return (0 if run.get('role') == 'resolver' else 1, -idx, prio.get(run['ref'], 1), run.get('created_at') or '')
+
+
 def status_of(s, ref, pipe):
     if pipe['stage'] == 'done':
         return 'done'
@@ -301,12 +337,16 @@ def orchestrate(s, t, pipe, at):
             st.update(dor_ok=True, started=at.isoformat(), dor_note=None)
             journal(s, pipe, t['ref'], 'stage_started', 'Этап «%s» начат: DoR выполнен' % P.STAGE[stage]['title'], stage=stage)
         roles = P.stage_roles(stage, pipe.get('needs'))
+        states = {r: (pipe['roles'].get(key(stage, r)) or {}).get('state') for r in roles}
         for r in roles:
-            if (pipe['roles'].get(key(stage, r)) or {}).get('state') in (None, 'pending'):
+            dep = P.waits_for(stage, r, pipe.get('needs'))
+            if states[r] in (None, 'pending') and not (dep and states[dep] != 'done'):
                 create_role_run(s, t, pipe, stage, r, at, feedback=(pipe['roles'].get(key(stage, r)) or {}).get('feedback'))
         states = {r: (pipe['roles'].get(key(stage, r)) or {}).get('state') for r in roles}
         if any(v != 'done' for v in states.values()):
-            busy = [P.ROLES[r]['title'] for r, v in states.items() if v != 'done']
+            busy = [P.ROLES[r]['title'] + (' (после: %s)' % P.ROLES[P.waits_for(stage, r, pipe.get('needs'))]['title']
+                                           if states[r] in (None, 'pending') and P.waits_for(stage, r, pipe.get('needs')) else '')
+                    for r, v in states.items() if v != 'done']
             note = 'Этап «%s»: работают %s' % (P.STAGE[stage]['title'], ', '.join(busy))
             break
         gate = P.STAGE[stage].get('gate')
@@ -446,7 +486,8 @@ def op_handoff(s, req, t, at):
     role, stage = run['role'], run['stage']
     if role == 'teamlead': raise ValueError('Тимлид решает ворота через op=gate')
     if stage != pipe['stage']: raise ValueError('Задача уже не на этапе «%s»' % P.STAGE[stage]['title'])
-    handoff = {k: req.get(k) for k in ('items', 'summary', 'needs', 'acceptance', 'verdict', 'signoff') if req.get(k) is not None}
+    handoff = {k: req.get(k) for k in ('items', 'summary', 'needs', 'acceptance', 'verdict', 'signoff', 'contract_group')
+               if req.get(k) is not None}
     if not isinstance(handoff.get('items') or {}, dict): raise ValueError('items: {id пункта: {status: done|na, evidence}}')
     if not isinstance(req.get('summary'), str) or len(req['summary'].strip()) < 20:
         raise ValueError('summary: что сделано — для тимлида (не короче 20 символов)')
@@ -456,6 +497,11 @@ def op_handoff(s, req, t, at):
         if isinstance(acc, list) and all(isinstance(a, str) and a.strip() for a in acc):
             patch['acceptance'] = [a.strip() for a in acc]
         if isinstance(handoff.get('needs'), dict): pipe['needs'] = handoff['needs']
+        grp = handoff.get('contract_group')
+        if grp is not None:
+            if not isinstance(grp, str) or not grp.strip() or len(grp) > 60:
+                raise ValueError('contract_group: короткое имя группы задач с общими контрактами (API, модель данных), до 60 символов')
+            pipe['contract_group'] = grp.strip().lower()
     _autocommit(s, t, pipe, run, req['summary'].strip())
     ctx = ctx_for(dict(t, **patch), pipe, handoff)
     results = P.evaluate_role(role, stage, ctx)
@@ -865,6 +911,9 @@ def role_packet(t, run, agent):
     if role == 'product_owner':
         packet['handoff'] += ' acceptance=[бизнес-критерии] needs={design: bool, marketing: bool, reason}'
     if role == 'reviewer': packet['handoff'] += ' verdict=approve; замечания — op=return to_stage=development [defects=[…]]'
+    if role == 'product_owner':
+        packet['handoff'] += (' contract_group=<имя группы, если задача делит API или модель данных с другими задачами проекта:'
+                              ' их анализ пойдёт по очереди>')
     if role == 'qa':
         packet['handoff'] += ' signoff=true; дефекты — op=return to_stage=development defects=[{title, severity, level, test}]'
         packet['test_env'] = test_env(t)

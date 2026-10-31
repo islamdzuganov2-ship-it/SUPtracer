@@ -1,4 +1,4 @@
-"""Конвейер задачи: Идея → Анализ → Разработка → Ревью → Тестирование → Деплой в тест → Деплой в main.
+"""Конвейер задачи: Идея → Анализ → Разработка → Ревью → Деплой в тест → Тестирование → Деплой в main.
 
 Один источник правды для трёх потребителей: сервер проверяет по нему DoR и DoD, из него
 генерируются скиллы ролей (tools/skills.py), его показывает доска. Поменять пункт DoD —
@@ -33,8 +33,8 @@ STAGES = [
          optional={'designer': 'design', 'marketer': 'marketing'}, gate='analysis'),
     dict(id='development', title='Разработка', roles=['developer']),
     dict(id='review', title='Ревью', roles=['reviewer']),
-    dict(id='testing', title='Тестирование', roles=['qa']),
-    dict(id='deploy_test', title='Деплой в тест', roles=['devops'], gate='release'),
+    dict(id='deploy_test', title='Деплой в тест', roles=['devops']),
+    dict(id='testing', title='Тестирование', roles=['qa'], gate='release'),
     dict(id='deploy_main', title='Деплой в main', roles=['devops'], owner_approval=True),
 ]
 STAGE = {s['id']: s for s in STAGES}
@@ -164,7 +164,7 @@ ROLES = {
                'Обновление README и документации API; описание изменений (MR).'],
         artifacts=[doc(ART + '/MR.md', ['Что изменено', 'Как проверить', 'Требовани'], 400)],
         dod=[item('dev-code', 'Код в ветке задачи, всё закоммичено', 'machine', check='committed'),
-             item('dev-verify', 'Проверки проекта (verify) проходят', 'machine', check='verify', heavy=True),
+             item('dev-verify', 'CI проекта на ветке задачи зелёный', 'machine', check='verify', heavy=True),
              item('dev-tests', 'Написаны или обновлены тесты', 'machine', check='tests_changed', allow_na=True),
              item('dev-migrations', 'Миграции БД написаны и проверены', 'evidence', allow_na=True),
              item('dev-docs', 'Документация обновлена (README, API)', 'evidence', allow_na=True),
@@ -185,11 +185,13 @@ ROLES = {
              item('rv-tests', 'Тесты проверяют реальную логику', 'evidence'),
              item('rv-security', 'Проверены инъекции, XSS, секреты и работа с персональными данными', 'evidence'),
              item('rv-debt', 'Техдолг заведён задачами', 'evidence', allow_na=True),
+             item('rv-ci', 'CI на ветке задачи зелёный перед слиянием', 'machine', check='ci_task', heavy=True),
              item('rv-merge', 'Ветка задачи слита в базовую ветку проекта', 'machine', check='merge_to_base', heavy=True)]),
 
     'qa': dict(
         title='QA-инженер', stage='testing', min_tier=2,
-        mission='Проверить, что реализация соответствует требованиям, ничего не сломано, и дать решение о допуске.',
+        mission='Проверить развёрнутую тестовую ветку: реализация соответствует требованиям, ничего не сломано; '
+                'дать решение о допуске в main только при отсутствии ошибок.',
         scope=['Ревью требований на тестируемость; тест-дизайн: классы эквивалентности, границы, переходы состояний.',
                'Тест-кейсы и чек-листы; тестовые данные.',
                'Функциональное, интеграционное, UI- и регрессионное тестирование.',
@@ -200,14 +202,15 @@ ROLES = {
                    doc(ART + '/RTM.md', [], 200)],
         dod=[item('qa-cases', 'Тест-кейсы с шагами и ожидаемым результатом (TC-…)', 'artifact', art=0),
              item('qa-report', 'Отчёт: статусы Pass/Fail, дефекты, регресс, решение', 'artifact', art=1),
-             item('qa-blockers', 'Нет открытых дефектов Blocker, Critical, Major', 'machine', check='no_blockers', art=1),
-             item('qa-regression', 'Регресс: проверки проекта на базовой ветке зелёные', 'machine', check='verify_base', heavy=True),
+             item('qa-blockers', 'Нет открытых дефектов Blocker, Critical, Major — ни в отчёте, ни в реестре', 'machine', check='no_blockers', art=1),
+             item('qa-ci', 'CI на развёрнутой тестовой ветке зелёный (последний прогон — на текущем коммите)', 'machine', check='ci_test_green'),
              item('qa-rtm', 'RTM дополнена тест-кейсами (TC-…)', 'machine', check='contains', art=2, needle='TC-'),
              item('qa-signoff', 'Решение о допуске в релиз (QA Sign-off)', 'machine', check='signoff')]),
 
     'devops': dict(
         title='DevOps-инженер', stage=('deploy_test', 'deploy_main'), min_tier=1,
-        mission='Довести проверенную работу до тестовой ветки и, после одобрения, до main — воспроизводимо и с откатом.',
+        mission='Развернуть прошедшую ревью работу в тестовой ветке для тестирования, а после допуска QA и ворот — '
+                'в main: CI на каждом шаге, тег релиза, автоматический откат при красном CI.',
         scope=['Окружение и переменные документированы; секреты не в git.',
                'Сборка и проверки проходят на целевой ветке; слияние без конфликтов.',
                'Runbook: развёртывание, откат, проверка работоспособности.',
@@ -217,14 +220,17 @@ ROLES = {
         dod={'deploy_test': [
                  item('do-runbook', 'Runbook: развёртывание, откат, проверка, окружение', 'artifact', art=0),
                  item('do-secrets', 'Секретов в изменениях нет', 'machine', check='no_secrets'),
-                 item('do-ci', 'CI/CD настроен или обновлён', 'evidence', allow_na=True),
+                 item('do-ci', 'Конфигурация CI проекта есть и проверена (pm.py ci show)', 'machine', check='ci_config'),
                  item('do-monitoring', 'Метрики и оповещения настроены', 'evidence', allow_na=True),
-                 item('do-merge-test', 'Базовая ветка слита в тестовую без конфликтов', 'machine', check='deploy_test', heavy=True),
-                 item('do-verify-test', 'Проверки проекта на тестовой ветке зелёные', 'machine', check='verify_test', heavy=True)],
+                 item('do-merge-test', 'Ветка задачи и базовая ветка слиты в тестовую без конфликтов', 'machine', check='deploy_test', heavy=True),
+                 item('do-verify-test', 'CI на тестовой ветке зелёный', 'machine', check='ci_test', heavy=True),
+                 item('do-env-test', 'Тестовое окружение развёрнуто и отвечает (если у проекта есть развёртывание)', 'machine', check='env_test', heavy=True)],
              'deploy_main': [
                  item('dm-notes', 'Release notes: что вошло, как откатить', 'artifact', art=1),
                  item('dm-merge-main', 'Тестовая ветка слита в main без конфликтов', 'machine', check='deploy_main', heavy=True),
-                 item('dm-verify-main', 'Проверки проекта на main зелёные', 'machine', check='verify_main', heavy=True),
+                 item('dm-verify-main', 'CI на main зелёный; при красном — слияние откачено автоматически', 'machine', check='ci_main', heavy=True),
+                 item('dm-env-main', 'Рабочее окружение развёрнуто и отвечает (если у проекта есть развёртывание)', 'machine', check='env_main', heavy=True),
+                 item('dm-tag', 'Тег релиза в main', 'machine', check='release_tag', heavy=True),
                  item('dm-push', 'Отправка в удалённый репозиторий — решение владельца', 'evidence', allow_na=True)]}),
 
     'teamlead': dict(
@@ -261,9 +267,9 @@ DOR = {
                     item('dor-tasks', 'Задачи разработки с критериями приёмки есть (dev-tasks.md)', 'machine', check='artifact', art='dev-tasks.md')],
     'review': [item('dor-dev', 'Разработка сдана по DoD: код, тесты, MR', 'machine', check='stage:development'),
                item('dor-mr', 'Описание изменений MR.md в ветке', 'machine', check='artifact', art='MR.md')],
-    'testing': [item('dor-review', 'Ревью сдано: approve и ветка слита в базовую', 'machine', check='stage:review')],
-    'deploy_test': [item('dor-qa', 'Тестирование сдано, есть QA Sign-off', 'machine', check='stage:testing')],
-    'deploy_main': [item('dor-test', 'Деплой в тест сдан, проверки на тестовой ветке зелёные', 'machine', check='stage:deploy_test'),
+    'deploy_test': [item('dor-review', 'Ревью сдано: approve, CI ветки зелёный, ветка слита в базовую', 'machine', check='stage:review')],
+    'testing': [item('dor-deployed', 'Работа развёрнута в тестовой ветке, CI там зелёный', 'machine', check='stage:deploy_test')],
+    'deploy_main': [item('dor-qa', 'Тестирование сдано: QA Sign-off, открытых дефектов нет', 'machine', check='stage:testing'),
                     item('dor-gate-release', 'Ворота тимлида «тест → main» пройдены', 'machine', check='gate:release'),
                     item('dor-owner', 'Владелец одобрил релиз в main', 'machine', check='owner_release')],
 }
@@ -435,6 +441,10 @@ def machine(it, role, ctx, state, evidence=''):
         if check == 'contains':
             return it['needle'] in text, ('найдено «%s»' % it['needle']) if it['needle'] in text else 'нет «%s»' % it['needle']
         bad = [l.strip() for l in text.splitlines() if OPEN_DEFECT.search(l)]
+        reg = [d['id'] for d in (t.get('pipeline') or {}).get('defects') or []
+               if d.get('status') == 'open' and d.get('severity') in ('critical', 'major')]
+        if reg:
+            bad.append('в реестре открыты: ' + ', '.join(reg))
         return not bad, ('открытые дефекты: ' + '; '.join(bad[:3])) if bad else 'открытых Blocker/Critical/Major нет'
     if check == 'acceptance':
         acc = ctx.handoff.get('acceptance') or t.get('acceptance') or []
@@ -453,7 +463,25 @@ def machine(it, role, ctx, state, evidence=''):
         return ctx.handoff.get('signoff') is True, 'QA Sign-off: %s' % ('да' if ctx.handoff.get('signoff') is True else 'нет')
     if check in ('committed', 'mergeable', 'tests_changed', 'no_secrets'):
         return git_check(check, ctx, evidence)
-    if check.startswith('verify') or check in ('merge_to_base', 'deploy_test', 'deploy_main'):
+    if check == 'ci_config':
+        import ci
+        cfg = ci.config(ctx.project); err = ci.validate(cfg)
+        if err:
+            return False, 'конфигурация CI с ошибкой: ' + err
+        if not cfg['steps']:
+            return False, 'у проекта нет шагов CI: задайте поле ci в projects.json или команду verify'
+        return True, 'CI: %d шагов (%s)' % (len(cfg['steps']), cfg['source'])
+    if check == 'ci_test_green':
+        import ci
+        repo = ctx.repo; test = ctx.branches.get('test')
+        head = _git(['rev-parse', '--short', 'refs/heads/' + test], repo).stdout.strip() if repo and test else ''
+        run = ci.last(project=ctx.t.get('project'), scope='test', branch=test)
+        if not run:
+            return False, 'на тестовой ветке ещё не было прогона CI'
+        ok = run['status'] in ('passed', 'skipped') and (not head or run.get('sha') == head)
+        return ok, ci.summary(run) + ('' if not head or run.get('sha') == head else '; тестовая ветка ушла вперёд (%s) — нужен новый прогон' % head)
+    if check.startswith('verify') or check.startswith('ci_') or check.startswith('env_') or \
+            check in ('merge_to_base', 'deploy_test', 'deploy_main', 'release_tag'):
         if not state.get('heavy'):
             return None, 'проверит сервер в фоне'
         import deploy

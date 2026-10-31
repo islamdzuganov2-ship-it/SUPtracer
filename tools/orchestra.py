@@ -505,10 +505,21 @@ def job(ref, role, stage, run_id):
         entry['result'] = [dict(id=it['id'], ok=ok, detail=d) for it, ok, d in results]
         history(pipe, 'check', role=role, stage=stage, agent=run.get('agent'), model=run.get('model'), run=run_id,
                 accepted=not fails, failed=[f['id'] for f in fails], at=at.isoformat())
+        rolled = next((f for f in fails if f['id'] == 'dm-verify-main' and 'откачено' in (f.get('detail') or '')), None)
         if fails:
             entry['state'] = 'returned'
             text = '; '.join('%s (%s)' % (f['id'], f['detail']) for f in fails)
             journal(s, pipe, ref, 'check_failed', '%s: проверки сервера не прошли — %s' % (P.ROLES[role]['title'], text), role, stage)
+            if rolled:
+                # Красный CI на main: слияние уже откачено, повторный деплой того же кода бессмыслен — задача к разработчику
+                run_ = dict(run, role=role, stage=stage)
+                ids = register_defects(pipe, run_, [dict(title='CI на main упал после релиза: ' + rolled['detail'][:250],
+                                                         severity='critical', level='e2e')], ctx_for(t, pipe), at, required=False)
+                history(pipe, 'return', role=role, stage=stage, to_stage='development', agent=run.get('agent'), model=run.get('model'),
+                        run=run_id, defects=ids, roles=[], reason=rolled['detail'][:500], at=at.isoformat())
+                return_to(s, t, pipe, at, 'development', [], 'CI на main упал, релиз откачен: ' + rolled['detail'][:400], 'CI')
+                w.write_patches(s, {ref: dict(orchestrate(s, t, pipe, at), claimed_by=None)}); w.save('workflow.json', s)
+                return dict(ok=False, failed=fails, returned='development')
             if entry.get('attempts', 0) + 1 >= MAX_ATTEMPTS:
                 escalate(s, t, pipe, at, '%s: DoD не сдан %d раза подряд — %s' % (P.ROLES[role]['title'], MAX_ATTEMPTS, text), role)
             else:
@@ -693,8 +704,10 @@ def op_return(s, req, t, at):
     """Роль возвращает задачу назад: ревьюер и QA — разработчику, разработчик — в анализ…"""
     pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
     role = run['role']; to_stage = req.get('to_stage')
-    if to_stage not in RETURN_TO.get(role, []):
-        raise ValueError('Роль %s возвращает только на: %s' % (P.ROLES[role]['title'], ', '.join(RETURN_TO.get(role, [])) or 'нельзя'))
+    if to_stage not in RETURN_TO.get(role, []) or P.ORDER.index(to_stage) >= P.ORDER.index(run['stage']):
+        allowed = [s for s in RETURN_TO.get(role, []) if P.ORDER.index(s) < P.ORDER.index(run['stage'])]
+        raise ValueError('Роль %s с этапа «%s» возвращает только на: %s' % (
+            P.ROLES[role]['title'], P.STAGE[run['stage']]['title'], ', '.join(allowed) or 'нельзя'))
     reason = (req.get('reason') or '').strip()
     if len(reason) < 30: raise ValueError('reason: что не так и что исправить (не короче 30 символов)')
     _autocommit(s, t, pipe, run, 'возврат: ' + reason)
@@ -807,6 +820,20 @@ def resolver_prompt(t, run, route, worker=None):
     return '\n'.join(lines)
 
 
+def test_env(t):
+    """Где QA тестирует: развёрнутая тестовая ветка, её рабочая копия и последний прогон CI."""
+    try:
+        import ci, deploy
+        p = project_of(t); repo = p.get('inspection_path') or p.get('path')
+        b = P.branches(repo, p)
+        path = deploy.branch_worktree(repo, b['test'], b['main'])
+        run = ci.last(project=t['project'], scope='test', branch=b['test'])
+        return dict(branch=b['test'], path=str(path), ci=ci.summary(run), ci_log=(run or {}).get('log'),
+                    note='Тестируй эту рабочую копию: в ней развёрнута работа задачи. Отчёт и тест-кейсы коммить в ветку задачи.')
+    except Exception as e:   # noqa: BLE001 — паспорт не должен падать из-за окружения
+        return dict(error=str(e)[:200])
+
+
 def role_packet(t, run, agent):
     if run.get('role') == 'resolver':
         return resolver_packet(t, run, agent)
@@ -838,7 +865,9 @@ def role_packet(t, run, agent):
     if role == 'product_owner':
         packet['handoff'] += ' acceptance=[бизнес-критерии] needs={design: bool, marketing: bool, reason}'
     if role == 'reviewer': packet['handoff'] += ' verdict=approve; замечания — op=return to_stage=development [defects=[…]]'
-    if role == 'qa': packet['handoff'] += ' signoff=true; дефекты — op=return to_stage=development defects=[{title, severity, level, test}]'
+    if role == 'qa':
+        packet['handoff'] += ' signoff=true; дефекты — op=return to_stage=development defects=[{title, severity, level, test}]'
+        packet['test_env'] = test_env(t)
     if role == 'developer' and any(d['status'] == 'open' for d in pipe.get('defects') or []):
         packet['handoff'] += (' fixes={"D-n": {"method": "spec_change|code_to_spec|workaround|test_fix", "test_level": "…", "note": "…"}}'
                               ' — по каждому открытому дефекту; способ сервер сверяет с коммитами ветки')

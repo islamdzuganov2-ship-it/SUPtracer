@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from base import DataCase
+import ci
 import pipeline as P
 import workflow as w
 
@@ -130,14 +131,19 @@ class PipelineTests(DataCase):
         self.assertEqual(self.task()['pipeline']['stage'], 'review')
         r = self.do_role('reviewer', 'review', verdict='approve')
         self.assertTrue(r['accepted'], r)
-        self.assertEqual(self.task()['pipeline']['stage'], 'testing')
+        self.assertEqual(self.task()['pipeline']['stage'], 'deploy_test')            # сначала деплой в тест
         self.assertEqual((self.repo/'app.py').read_text(encoding='utf-8'), 'x = 2\n')     # слито в разработку
-        r = self.do_role('qa', 'testing', signoff=True)
-        self.assertTrue(r['accepted'], r)
-        self.assertEqual(self.task()['pipeline']['stage'], 'deploy_test')
+        self.assertEqual(ci.last(ref=self.ref, scope='task')['status'], 'passed')     # CI ветки задачи до слияния
         r = self.do_role('devops', 'deploy_test')
         self.assertTrue(r['accepted'], r)
         self.assertIn('x = 2', git('show', 'test:app.py', cwd=self.repo))          # тестовая ветка
+        self.assertEqual(self.task()['pipeline']['stage'], 'testing')                # потом тестирование
+        self.assertEqual(ci.last(ref=self.ref, scope='test')['status'], 'passed')
+        qa = self.run_of('qa')
+        env = w.action(dict(op='packet', ref=self.ref, run=qa['id']))['test_env']
+        self.assertEqual(env['branch'], 'test'); self.assertIn('пройден', env['ci'])
+        r = self.do_role('qa', 'testing', signoff=True)
+        self.assertTrue(r['accepted'], r)
         gate = self.claim('teamlead', gate='release')
         w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve',
                       notes='QA Sign-off есть, деплой в тест чистый, риски релиза приняты'))
@@ -150,6 +156,8 @@ class PipelineTests(DataCase):
         t = self.task()
         self.assertEqual((t['pipeline']['stage'], t['status']), ('done', 'done'))
         self.assertIn('x = 2', git('show', 'main:app.py', cwd=self.repo))
+        self.assertTrue(git('tag', '--list', 'release/*', cwd=self.repo))            # тег релиза
+        self.assertEqual(ci.last(ref=self.ref, scope='main')['status'], 'passed')
         kinds = [e['kind'] for e in w.state()['teamlead'] if e['ref'] == self.ref]
         for k in ('idea', 'handoff', 'handoff_rejected', 'gate', 'stage_passed', 'approved', 'done'):
             self.assertIn(k, kinds)
@@ -305,7 +313,28 @@ class PipelineTests(DataCase):
         w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve', notes='Анализ согласован, можно разрабатывать'))
         self.do_role('developer', 'development', extra=[('app.py', 'x = 3\n'), ('tests/test_app.py', 'assert True\n')])
         self.do_role('reviewer', 'review', verdict='approve')
+        self.do_role('devops', 'deploy_test')
         self.assertEqual(self.task()['pipeline']['stage'], 'testing')
+
+    def test_red_ci_on_main_rolls_back_release(self):
+        d = w.read('projects.json', {}); p = d['projects']['alpha-api']
+        p['ci'] = dict(steps=[dict(name='Тесты', kind='test', cmd=[sys.executable, '-c', 'print(1)']),
+                              dict(name='Дым на main', kind='e2e', cmd=[sys.executable, '-c', 'raise SystemExit(1)'], on=['main'])])
+        w.save('projects.json', d)
+        self.to_testing()
+        self.do_role('qa', 'testing', signoff=True)
+        gate = self.claim('teamlead', gate='release')
+        w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve',
+                      notes='QA Sign-off есть, деплой в тест чистый, риски релиза приняты'))
+        w.action(dict(op='approve_release', ref=self.ref))
+        self.do_role('devops', 'deploy_main')
+        t = self.task()
+        self.assertEqual(git('show', 'main:app.py', cwd=self.repo), 'x = 1')          # main вернулся к прежнему
+        self.assertEqual(ci.last(ref=self.ref, scope='main')['status'], 'failed')
+        self.assertEqual(t['pipeline']['stage'], 'development')                       # и задача — к разработчику
+        d = t['pipeline']['defects'][-1]
+        self.assertEqual((d['severity'], d['status'], d['found_stage']), ('critical', 'open', 'deploy_main'))
+        self.assertIn('откачено', t['pipeline']['history'][-1]['reason'])
 
     def test_defects_registered_and_fix_method_checked_by_commits(self):
         self.to_testing()
@@ -335,6 +364,7 @@ class PipelineTests(DataCase):
         d = self.task()['pipeline']['defects'][0]
         self.assertEqual((d['status'], d['fix']['method'], d['fix']['files']), ('fixed', 'code_to_spec', ['app.py']))
         self.do_role('reviewer', 'review', verdict='approve')
+        self.do_role('devops', 'deploy_test')
         self.do_role('qa', 'testing', signoff=True)
         self.assertEqual(self.task()['pipeline']['defects'][0]['status'], 'verified')
         hist = self.task()['pipeline']['history']
@@ -377,7 +407,6 @@ class PipelineTests(DataCase):
         w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)))
         self.to_testing()
         self.do_role('qa', 'testing', signoff=True)
-        self.do_role('devops', 'deploy_test')
         gate = self.claim('teamlead', gate='release')
         w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve',
                       notes='QA Sign-off есть, деплой в тест чистый, риски релиза приняты'))

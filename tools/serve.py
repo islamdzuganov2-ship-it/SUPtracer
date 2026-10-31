@@ -429,6 +429,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(404, {"ok": False, "error": "у запуска нет журнала фоновой сессии"})
             return self.send_json(200, {"ok": True, "data": dict(run=rid, alive=launcher.alive(run["launch"].get("pid")),
                                                                  log=launcher.tail(log, 300))})
+        if path == "/api/cilog":
+            import ci
+            from urllib.parse import parse_qs, urlparse
+            rid = (parse_qs(urlparse(self.path).query).get("run") or [""])[0]
+            run = next((r for r in ci.runs(limit=ci.KEEP_RUNS) if r["id"] == rid), None)
+            log = (run or {}).get("log")
+            # Только журналы CI системы: путь из данных, но внутри ops/logs/ci.
+            if not log or os.path.dirname(os.path.abspath(log)) != os.path.abspath(str(ci.logs_dir())):
+                return self.send_json(404, {"ok": False, "error": "у прогона нет журнала CI"})
+            return self.send_json(200, {"ok": True, "data": dict(run=rid, summary=ci.summary(run), log=ci.tail(log, 400))})
         if path == "/api/work":
             import workflow, launcher
             data = workflow.snapshot()

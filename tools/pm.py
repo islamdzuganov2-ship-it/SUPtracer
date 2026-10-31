@@ -448,7 +448,8 @@ COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "c
             "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
             "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
             "connect": cmd_connect, "disconnect": cmd_disconnect, "idea": cmd_idea, "ask": cmd_ask,
-            "skills": lambda args: run("skills.py", *args)}
+            "skills": lambda args: run("skills.py", *args),
+            "ci": lambda args: run("ci.py", *args)}
 
 
 def foreign_copy():

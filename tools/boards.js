@@ -117,6 +117,7 @@
     root.querySelector('#board-autonomy').onchange=e=>{const v=e.target.value;e.target.value=data.settings?.autonomy||'step';autonomyDialog(v);};
     root.querySelectorAll('[data-stop-project]').forEach(el=>el.onclick=async()=>{try{const r=await api({op:'stop_project',project:el.dataset.stopProject});await refresh();message.textContent=`Проект остановлен: ${r.held} ждущих ролей не будут открываться; открытые сессии доработают.`;}catch(e){message.textContent=e.message;}});
     root.querySelectorAll('[data-run-log]').forEach(el=>el.onclick=()=>sessionLog(el.dataset.runLog));
+    root.querySelectorAll('[data-ci-log]').forEach(el=>el.onclick=()=>ciLog(el.dataset.ciLog));
     root.querySelectorAll('[data-role-ai]').forEach(el=>el.onchange=()=>change({op:'settings',changes:{roles:{[el.dataset.roleAi]:el.value||data.settings?.default_executor}}}));
     root.querySelector('#board-plan').textContent='＋ Новая задача';
     BOARD_EXTRAS.decorateToolbar(root,data,project);
@@ -261,6 +262,7 @@
     '#board-autonomy':'Пошаговое — окна, ИИ спрашивает разрешения; полная автономия — одно согласие: фон, без вопросов, релиз в main без отдельного «да»',
     '[data-stop-project]':'Не открывать новые сессии ролей проекта; уже открытые доработают свой шаг',
     '[data-run-log]':'Что делает фоновая сессия: последние строки её журнала',
+    '[data-ci-log]':'Прогон CI: шаги, их итог и журнал',
     '#board-failover':'Если у ИИ исчерпан лимит токенов, его задача сразу переходит к другому ИИ — с точкой остановки, моделью и усилиями под роль и сложность',
     '[data-to-idea]':'Перенести все незакрытые задачи проекта в «Идея»: агенты пройдут их заново по конвейеру; сначала предпросмотр',
     '#board-max-sessions':'Сколько окон ИИ сервер держит открытыми одновременно: автозапуск и «Запустить проект» не превышают это число',
@@ -339,6 +341,12 @@
     try{const r=await fetch('/api/sessionlog?run='+encodeURIComponent(run));const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Журнала нет');
       modal('Журнал сессии '+run+(j.data.alive?' · работает':' · завершена'),`<pre class="board-log">${esc(j.data.log||'пусто')}</pre><p><button id="log-again">Обновить</button></p>`);
       dialog.querySelector('#log-again').onclick=()=>sessionLog(run);
+      const pre=dialog.querySelector('.board-log');pre.scrollTop=pre.scrollHeight;
+    }catch(e){message.textContent=e.message;}
+  }
+  async function ciLog(run){
+    try{const r=await fetch('/api/cilog?run='+encodeURIComponent(run));const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Журнала нет');
+      modal('CI '+run,`<p>${esc(j.data.summary)}</p><pre class="board-log">${esc(j.data.log||'пусто')}</pre>`);
       const pre=dialog.querySelector('.board-log');pre.scrollTop=pre.scrollHeight;
     }catch(e){message.textContent=e.message;}
   }
@@ -471,7 +479,10 @@
     const gate=st?.gate&&roles.every(r=>((p.roles||{})[p.stage+'/'+r]||{}).state==='done')?`<div class="board-role-row">🚦 Ворота тимлида: ${esc((p.gates||{})[st.gate]?.decision||'ждут решения')}</div>`:'';
     const approve=p.stage==='deploy_main'&&(p.gates||{}).release?.decision==='approve'&&!(p.approvals||{}).release?`<button class="board-approve" data-approve="${i}">👤 Одобрить релиз в main</button>`:'';
     const note=t.status_note?`<div class="board-note${t.status==='blocked'?'':' board-note-soft'}">${t.status==='blocked'?'⛔ ':''}${esc(t.status_note)}</div>`:'';
-    return `<div class="board-pipe">${blockLine}${chips}${gate}</div>${note}${approve}`;
+    const CIS={task:'ветка задачи',test:'тест',main:'main'}, CIC={passed:'✅',failed:'❌',running:'⏳',skipped:'➖'};
+    const cis=Object.entries(t.ci||{}).filter(([k])=>CIS[k]);
+    const ciLine=cis.length?`<div class="board-role-row">CI: ${cis.map(([k,r])=>`<button class="board-ci" data-ci-log="${esc(r.id)}" title="${esc(r.note||((r.branch||'')+'@'+(r.sha||'')))}">${CIC[r.status]||'·'} ${esc(CIS[k])}</button>`).join(' ')}</div>`:'';
+    return `<div class="board-pipe">${blockLine}${chips}${gate}${ciLine}</div>${note}${approve}`;
   }
   const kindRu={artifact:'артефакт',evidence:'доказательство',machine:'сервер',gate:'ворота'};
   function stageInfo(id){

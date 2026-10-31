@@ -294,6 +294,12 @@ def snapshot():
         priority = {'🔴': 0, '🟡': 1, '🟢': 2}.get(t.get('priority'), 1)
         t['rank'] = [0 if t['project'] in s['focus'] else 1, priority, {'S':1,'M':3,'L':8,'XL':20}.get(t.get('size'), 3), t['ref']]
     tasks.sort(key=lambda t:t['rank'])
+    import ci
+    cilast = {}
+    for r in ci.runs(limit=ci.KEEP_RUNS):
+        if r.get('ref'): cilast.setdefault(r['ref'], {})[r['scope']] = {k: r.get(k) for k in ('id', 'status', 'branch', 'sha', 'finished', 'note')}
+    for t in tasks:
+        if t.get('pipeline'): t['ci'] = cilast.get(t['ref']) or {}
     roots=[{k:r.get(k) for k in ('id','title','project')} for r in read('memory/index.json',{}).get('records',[])
            if r.get('kind')=='запрос' and r.get('status')=='активна']
     import pipeline as P

@@ -178,6 +178,8 @@ def resume_session(run, nudge=False):
     if not route.get("model"):
         route = workflow.recommendation(t, agent=agent)
     prompt = NUDGE if nudge else workflow.resume_prompt(t, run)
+    if run.get("budget_alert"):
+        prompt = BUDGET_NOTE + "\n\n" + prompt
     if not session:
         prompt += "\n\n" + (orchestra.role_prompt(t, run, route, run.get("worker") or workflow.worker_id(run, agent))
                              if run.get("role") else workflow.action(dict(op="prompt", ref=run["ref"]))["prompt"]
@@ -198,6 +200,7 @@ def dispatcher(interval=15):
             orchestra.tick()          # задачи, ждавшие DoR (например, одобрения владельца)
             limits_once()             # пауза по лимиту токенов и возобновление с места остановки
             watch_once()              # сессия закончилась без сдачи этапа — продолжить или эскалировать
+            budget_once()             # запуск потратил 150% ориентира — отметка и колокольчик
             notify_once()             # новое в колокольчике — системное уведомление владельцу
             dispatch_once()
         except Exception as e:   # noqa: BLE001 — сервер досок не должен падать из-за автозапуска
@@ -230,6 +233,8 @@ def session_active(run, seconds=180):
         return False
 
 
+BUDGET_NOTE = ("Запуск уже потратил больше 150% ориентира бюджета роли. Не начинай новых исследований и не перечитывай "
+               "документы: доведи до handoff то, что есть, или эскалируй (op=escalate), если упёрся.")
 NUDGE = ("Ты закончил ответ, но этап не сдан: сервер не получил ни handoff, ни return, ни escalate, ни pause. "
          "Владелец не ответит — работа автономная. Продолжи с места остановки: tt_work op=packet (с run), доделай "
          "работу по DoD и сдай её вызовом tt_work. Если без решения владельца дальше нельзя — op=escalate с вариантами.")
@@ -252,6 +257,25 @@ def toast(title, text):
         return True
     except OSError:
         return False
+
+
+def budget_once():
+    """Сторож бюджета (Б7): открытые сессии раз в 5 минут сверяются с ориентиром стоимости запуска."""
+    import workflow, limits, orchestra
+    alerted = []
+    for r in workflow.state()["runs"]:
+        if r.get("status") not in ("queued", "running") or not r.get("launch") or r.get("budget_alert"):
+            continue
+        if time.time() - _auto_attempts.get("budget:" + r["id"], 0) < 300:
+            continue
+        _auto_attempts["budget:" + r["id"]] = time.time()
+        budget = ((r.get("packet") or {}).get("route") or {}).get("budget_usd")
+        if not budget:
+            continue
+        _tok, usd = limits.session_cost(r)
+        if usd >= budget * orchestra.BUDGET_ALERT and workflow.mark_budget(r["ref"], r["id"], usd, budget):
+            alerted.append(r["id"])
+    return alerted
 
 
 def notify_once():

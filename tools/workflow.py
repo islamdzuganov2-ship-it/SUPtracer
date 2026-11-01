@@ -800,7 +800,7 @@ def start_run(s, t, run, req, at):
         import orchestra
         pipe=orchestra.materialize(s, t)
         if pipe: t=dict(t, pipeline=pipe); extra_patch['pipeline']=pipe
-        p=orchestra.role_packet(t, run, agent)
+        p=orchestra.role_packet(t, run, agent, toc=False)   # под блокировкой: без чтения артефактов из git
     elif run.get('failover') and run.get('packet'):
         p=dict(packet(t['ref'], agent=agent), route=run['packet']['route'])   # маршрут передачи, а не назначенного ИИ
     else:
@@ -862,6 +862,18 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
     if (run.get('failover') or {}).get('handover'): lines.append(run['failover']['handover'])
     lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
+
+def mark_budget(ref, run_id, usd, budget):
+    """Сторож бюджета: запуск потратил больше 150% ориентира — отметка, журнал тимлида, колокольчик (Б7)."""
+    with locked():
+        s=state()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
+        if not run or run.get('budget_alert'): return False
+        run['budget_alert']=dict(at=now().isoformat(), usd=round(usd,2), budget=budget)
+        s.setdefault('teamlead',[]).append(dict(at=now().isoformat(), ref=ref, kind='budget', role=run.get('role'),
+            text='Запуск %s потратил $%.2f — больше 150%% ориентира $%.2f: проверьте, не ходит ли он по кругу' % (run_id, usd, budget)))
+        save('workflow.json',s)
+        return True
 
 def mark_launch_error(ref, run_id, message):
     """Автозапуск не удался (нет CLI, папки, лимит): причина на карточке, без повторов каждую минуту."""
@@ -1044,6 +1056,11 @@ def notifications(s, tasks):
                 out.append(dict(id='r:'+t['ref'], kind='release', ref=t['ref'], title=t['title'],
                                 text='Ворота тимлида «тест → main» пройдены — нужен ваш «да» на релиз в main', at=pipe['gates']['release'].get('at')))
     for r in s.get('runs') or []:
+        b=r.get('budget_alert')
+        if b and r.get('status') in ('queued','running'):
+            out.append(dict(id='b:'+r['id'], kind='budget', ref=r['ref'], title=byref.get(r['ref'],{}).get('title',''),
+                            text='Запуск %s (%s) потратил $%.2f при ориентире $%.2f — сессии напомнено завершить этап'
+                                 % (r['id'], r.get('role') or 'исполнитель', b['usd'], b['budget']), run=r['id'], at=b['at']))
         if r.get('status') in ('queued','running') and r.get('launch_error') and not r.get('paused'):
             out.append(dict(id='l:'+r['id'], kind='launch', ref=r['ref'], title=byref.get(r['ref'],{}).get('title',''),
                             text=r['launch_error'], run=r['id'], at=r.get('launch_error_at')))
@@ -1310,6 +1327,10 @@ def action(req):
             if not run: raise ValueError('Укажите run: паспорт задачи конвейера — это паспорт роли (%s)' % ', '.join(r['id']+' '+r['role'] for r in runs) or 'нет активных запусков')
             return orchestra.role_packet(t, run, run.get('agent') or agent or settings()['default_executor'])
         return packet(t['ref'], agent=agent)
+    if op=='doc':
+        # Раздел документа ветки задачи: оглавление или один раздел — вместо чтения файла целиком.
+        import orchestra
+        return orchestra.op_doc(None, req, task_for(req.get('ref','')), now())
     if op=='prompt':
         # Задание для ждущего запуска — повторно, если владелец закрыл окно после «Запустить».
         t=task_for(req.get('ref',''))

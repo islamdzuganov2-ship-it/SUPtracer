@@ -182,6 +182,62 @@ def match_codex(index, cwd, since, window=timedelta(minutes=10)):
     return hits[0][1] if hits else None
 
 
+def session_cost(run):
+    """(токены, $) сессии запуска по её журналу — для сторожа бюджета. Нет журнала — (0, 0.0)."""
+    sid, path = session_of(run)
+    if not path:
+        return 0, 0.0
+    agent = (run.get('launch') or {}).get('agent') or run.get('agent')
+    try:
+        fh = open(path, encoding='utf-8', errors='replace')
+    except OSError:
+        return 0, 0.0
+    tokens, usd = 0, 0.0
+    with fh:
+        if agent == 'codex':
+            from codex_usage import COUNTERS
+            from pricing import openai_cost_usd
+            top = [0] * len(COUNTERS)
+            for line in fh:
+                if '"token_count"' not in line and '"token_usage_record"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                p = row.get('payload') or {}
+                tot = p.get('thread_token_usage') or ((p.get('info') or {}).get('total_token_usage') if isinstance(p.get('info'), dict) else None)
+                if isinstance(tot, dict):
+                    top = [max(a, int(tot.get(k) or 0)) for a, k in zip(top, COUNTERS)]
+            inp, cached, cw, out = top[0], min(top[1], top[0]), top[2], top[3]
+            model = ((run.get('packet') or {}).get('route') or {}).get('model') or run.get('model') or ''
+            usd = openai_cost_usd(model, max(0, inp - cached - cw), out, cached, cw) or 0.0
+            return inp + out, round(usd, 4)
+        from pricing import cost_usd
+        seen = set()
+        for line in fh:
+            if '"assistant"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            msg = row.get('message') or {}
+            u = msg.get('usage') if isinstance(msg, dict) else None
+            rid = row.get('requestId') or msg.get('id')
+            if row.get('type') != 'assistant' or not isinstance(u, dict) or not rid or rid in seen:
+                continue
+            seen.add(rid)
+            cc = u.get('cache_creation') or {}
+            cw5, cw1 = int(cc.get('ephemeral_5m_input_tokens') or 0), int(cc.get('ephemeral_1h_input_tokens') or 0)
+            if not cw5 + cw1:
+                cw5 = int(u.get('cache_creation_input_tokens') or 0)
+            i, o, cr = int(u.get('input_tokens') or 0), int(u.get('output_tokens') or 0), int(u.get('cache_read_input_tokens') or 0)
+            tokens += i + o + cw5 + cw1 + cr
+            usd += cost_usd(msg.get('model') or '', i, o, cw5, cw1, cr) or 0.0
+    return tokens, round(usd, 4)
+
+
 def session_of(run):
     """Идентификатор и журнал сессии, открытой сервером для запуска."""
     launch = run.get('launch') or {}

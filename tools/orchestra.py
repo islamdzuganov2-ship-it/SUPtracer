@@ -168,7 +168,17 @@ def role_route(t, role, agent, gate=None):
     return dict(model=model, provider=agent, effort=effort, reason=reason, source='role', role=role,
                 complexity=dict(score=cx_['score'], tier=level), context_budget=2000,
                 total_token_budget=w.budget_for(model, effort), max_attempts=2, provisional=False,
-                policy_version=w.POLICY['version'])
+                budget_usd=budget_usd(tier, effort), policy_version=w.POLICY['version'])
+
+
+# Ориентир стоимости запуска роли (эквивалент API, $) по классу модели; усилия — множителем.
+# По разбору недели 24–31.10: медиана запуска старшего класса ≈ $5, среднего ≈ $2.
+RUN_BUDGET_USD = {1: 1.0, 2: 2.5, 3: 6.0}
+BUDGET_ALERT = 1.5      # сторож бюджета: напоминание, когда запуск потратил 150% ориентира (Б7)
+
+
+def budget_usd(tier, effort):
+    return round(RUN_BUDGET_USD[tier] * w.EFFORT_COST.get(effort, 1.0), 2)
 
 
 def ensure_worktree(t, pipe):
@@ -880,18 +890,67 @@ def test_env(t):
         return dict(error=str(e)[:200])
 
 
-def role_packet(t, run, agent):
+READ_RULE = ('Читай точечно: сначала оглавление документа (upstream — разделы и размер каждого), затем нужные разделы — '
+             'tt_work op=doc ref=<задача> path=<путь> section=<заголовок>. Документ целиком — только свой или короткий; '
+             'уже прочитанное не перечитывай. Каждое лишнее чтение оплачивается на каждом следующем шаге сессии.')
+
+
+def upstream_digest(t, pipe, stage, toc=True, ctx=None):
+    """Артефакты предыдущих ролей: путь, размер и оглавление — чтобы читать разделами, а не целиком (Б1)."""
+    ctx = ctx or ctx_for(t, pipe); out = []
+    have = None
+    if toc and ctx.repo and ctx.branch:
+        # Один список файлов ветки вместо git show на каждый ещё не созданный артефакт.
+        ls = P._git(['ls-tree', '-r', '--name-only', ctx.branch, P.art_path(t['id'], P.ART).rstrip('/') + '/'], ctx.repo)
+        have = set(ls.stdout.splitlines()) if ls.returncode == 0 else None
+    for st in P.ORDER[:P.ORDER.index(stage) + 1 if stage in P.ORDER else 0]:
+        for r in P.stage_roles(st, pipe.get('needs')):
+            for a in P.ROLES[r]['artifacts']:
+                path = P.art_path(t['id'], a['path'])
+                e = dict(role=P.ROLES[r]['title'], path=path, optional=bool(a.get('optional')))
+                text = None if a.get('dir') or not toc or (have is not None and path not in have) else ctx.artifact(a)
+                if text is not None:
+                    e.update(tokens=len(text) // 4, sections=[h for h in P.headings_raw(text)][:30])
+                elif toc and not a.get('dir'):
+                    e['missing'] = True
+                out.append(e)
+    return out
+
+
+def op_doc(s, req, t, at):
+    """Раздел документа ветки задачи: оглавление или текст одного раздела (Б1)."""
+    pipe = t.get('pipeline') or {}
+    path = str(req.get('path') or '').replace('\\', '/').lstrip('/')
+    if not path or '..' in path.split('/'):
+        raise ValueError('path: путь документа в рабочей копии задачи, например docs/tasks/<id>/SRS.md')
+    text = ctx_for(t, pipe).read(path)
+    if text is None:
+        raise ValueError('Нет файла %s в ветке задачи' % path)
+    secs = P.sections(text)
+    want = str(req.get('section') or '').strip().lower()
+    if not want:
+        return dict(path=path, tokens=len(text) // 4, sections=[dict(title=h, tokens=len(b) // 4) for h, b in secs],
+                    hint='section=<заголовок или его часть> — текст раздела')
+    hit = [(h, b) for h, b in secs if want in h.lower()]
+    if not hit:
+        raise ValueError('Раздела «%s» нет. Есть: %s' % (want, '; '.join(h for h, _ in secs)[:600]))
+    h, body = hit[0]
+    limit = 24000
+    return dict(path=path, section=h, text=body[:limit], truncated=len(body) > limit, more=[x for x, _ in hit[1:]])
+
+
+def role_packet(t, run, agent, toc=True):
+    """Паспорт роли. toc=False — без оглавления артефактов (git), для claim под блокировкой."""
     if run.get('role') == 'resolver':
         return resolver_packet(t, run, agent)
     pipe = t['pipeline']; role, stage = run['role'], run['stage']; spec = P.ROLES[role]
     route = role_route(t, role, agent)
+    if role == 'product_owner':
+        route['research'] = 'веб-поиск — только для продуктовой задачи; техническая: needs.research=false, po-market — «неприменимо»'
     wt = pipe.get('worktree') or {}
     entry = pipe['roles'].get(key(stage, role)) or {}
-    arts = []
-    for st in P.ORDER[:P.ORDER.index(stage) + 1 if stage in P.ORDER else 0]:
-        for r in P.stage_roles(st, pipe.get('needs')):
-            for a in P.ROLES[r]['artifacts']:
-                arts.append(dict(role=P.ROLES[r]['title'], path=P.art_path(t['id'], a['path']), optional=bool(a.get('optional'))))
+    ctx = ctx_for(t, pipe)
+    arts = upstream_digest(t, pipe, stage, toc, ctx)
     dod = [] if role == 'teamlead' else P.role_dod(role, stage)
     packet = dict(ref=t['ref'], title=t['title'], why=t.get('why'), root=t.get('root'), acceptance=t.get('acceptance'),
                   role=dict(id=role, title=spec['title'], skill='tt-' + role.replace('_', '-'), mission=spec['mission']),
@@ -900,16 +959,17 @@ def role_packet(t, run, agent):
                   workspace=dict(path=wt.get('path'), branch=wt.get('branch'), base=wt.get('base'),
                                  note='Работай только в этой рабочей копии; коммить свои файлы в ветку задачи.'),
                   artifacts=[dict(path=P.art_path(t['id'], a['path']), sections=a['sections'], min_bytes=a['min_bytes'],
-                                  optional=bool(a.get('optional'))) for a in spec['artifacts']],
+                                  optional=bool(a.get('optional'))) for a in [P.effective(x, ctx) for x in spec['artifacts']]],
                   dod=[dict(id=i['id'], text=i['text'], kind=i['kind'], allow_na=bool(i.get('allow_na'))) for i in dod],
-                  upstream=arts, needs=pipe.get('needs'), feedback=entry.get('feedback'),
+                  upstream=arts, read_rule=READ_RULE, needs=pipe.get('needs'), feedback=entry.get('feedback'),
                   resume=((run.get('pauses') or [{}])[-1].get('checkpoint') or None),
                   defects=[{k: d.get(k) for k in ('id', 'title', 'severity', 'level', 'test', 'found_by', 'status')}
                            for d in pipe.get('defects') or [] if d['status'] in ('open', 'fixed')],
                   pause='tt_work op=pause ref=%s run=%s worker=<ты> checkpoint=… — при исчерпании лимита токенов' % (t['ref'], run['id']),
                   handoff='tt_work op=handoff ref=%s run=%s worker=<ты> summary=… items={id: {status: done|na, evidence}}' % (t['ref'], run['id']))
     if role == 'product_owner':
-        packet['handoff'] += ' acceptance=[бизнес-критерии] needs={design: bool, marketing: bool, reason}'
+        packet['handoff'] += (' acceptance=[бизнес-критерии] needs={design: bool (только если меняется интерфейс), marketing: bool,'
+                              ' research: bool (false — техническая задача, без веб-поиска), reason}')
     if role == 'reviewer': packet['handoff'] += ' verdict=approve; замечания — op=return to_stage=development [defects=[…]]'
     if role == 'product_owner':
         packet['handoff'] += (' contract_group=<имя группы, если задача делит API или модель данных с другими задачами проекта:'

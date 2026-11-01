@@ -17,7 +17,7 @@ def git(*args, cwd):
 def doc_text(spec, role):
     """Документ, проходящий проверку раздела, размера и машинных пунктов роли."""
     body = ['# %s' % spec['path'].split('/')[-1]]
-    for sec in spec['sections'] or ['Содержание']:
+    for sec in (spec['sections'] + spec.get('market', [])) or ['Содержание']:
         body += ['', '## %s' % sec, 'Подробное описание раздела «%s» для задачи. ' % sec * 3]
     if role == 'product_owner':
         body += ['', '## Источники'] + ['- https://example.org/source-%d' % i for i in range(3)]
@@ -83,7 +83,7 @@ class PipelineTests(DataCase):
     def items(self, role, stage):
         out = {}
         for it in P.role_dod(role, stage):
-            out[it['id']] = dict(status='na', evidence='Неприменимо для этой задачи: нет такого контура') if it.get('allow_na') \
+            out[it['id']] = dict(status='na', evidence='Неприменимо для этой задачи: нет такого контура') if it.get('allow_na') and not it.get('na_when') \
                 else dict(status='done', evidence='Сделано и проверено: подробности в артефактах задачи')
         return out
 
@@ -290,7 +290,7 @@ class PipelineTests(DataCase):
             w.action(dict(op='idea', project='alpha-api', title='Идея', text='коротко'))
         self.ref = self.idea()
         po = self.run_of('product_owner')
-        self.assertEqual(w.model_entry(po['packet']['route']['model'])['tier'], 3)       # PO — старший класс
+        self.assertEqual(w.model_entry(po['packet']['route']['model'])['tier'], 2)       # PO средней задачи — Sonnet (Б2)
 
     def test_spec_consistency(self):
         for role, spec in P.ROLES.items():
@@ -317,6 +317,41 @@ class PipelineTests(DataCase):
         self.do_role('reviewer', 'review', verdict='approve')
         self.do_role('devops', 'deploy_test')
         self.assertEqual(self.task()['pipeline']['stage'], 'testing')
+
+    def test_technical_task_skips_market_research_and_doc_reads_sections(self):
+        self.ref = self.idea()
+        run = self.claim('product_owner')
+        spec = P.ROLES['product_owner']['artifacts'][0]
+        rel = P.art_path(self.task()['id'], spec['path'])
+        wt = Path(self.task()['pipeline']['worktree']['path'])
+        lean = dict(spec, market=[])                                   # BRD технической задачи: без разделов о рынке
+        (wt / rel).parent.mkdir(parents=True, exist_ok=True); (wt / rel).write_text(doc_text(lean, 'designer'), encoding='utf-8')
+        git('add', '-A', cwd=wt); git('commit', '-q', '-m', 'BRD', cwd=wt)
+        items = self.items('product_owner', 'idea')
+        items['po-market'] = dict(status='na', evidence='Техническая задача: рынок не исследуется')
+        acc = ['Первый критерий приёмки', 'Второй критерий приёмки']
+        send = lambda **kw: w.action(dict(op='handoff', ref=self.ref, run=run, worker='w-' + run, items=items,
+                                          summary='Работа роли выполнена по DoD, артефакты в ветке', acceptance=acc, **kw))
+        r = send(needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
+        self.assertFalse(r['accepted'])                                # продуктовой по умолчанию рынок нужен
+        self.assertEqual({f['id'] for f in r['failed']}, {'po-brd', 'po-market'})
+        r = send(contract_group='Экспорт',
+                 needs=dict(design=False, marketing=False, research=False, reason='Техническая задача: рефакторинг выгрузки'))
+        self.assertTrue(r['accepted'], r)
+        self.assertEqual(self.task()['pipeline']['contract_group'], 'экспорт')
+        toc = w.action(dict(op='doc', ref=self.ref, path=rel))
+        self.assertIn('Риск', [x['title'] for x in toc['sections']])
+        sec = w.action(dict(op='doc', ref=self.ref, path=rel, section='риск'))
+        self.assertTrue(sec['text'].startswith('## Риск'))
+        self.assertNotIn('## Проблема', sec['text'])
+        with self.assertRaisesRegex(ValueError, 'Есть:'):
+            w.action(dict(op='doc', ref=self.ref, path=rel, section='нет такого'))
+        with self.assertRaisesRegex(ValueError, 'path'):
+            w.action(dict(op='doc', ref=self.ref, path='../secret.txt'))
+        sa = self.run_of('system_analyst')
+        up = w.action(dict(op='packet', ref=self.ref, run=sa['id']))['upstream']
+        brd = next(u for u in up if u['path'] == rel)
+        self.assertIn('Риск', brd['sections']); self.assertGreater(brd['tokens'], 100)
 
     def test_red_ci_on_main_rolls_back_release(self):
         d = w.read('projects.json', {}); p = d['projects']['alpha-api']
@@ -433,7 +468,12 @@ class PipelineTests(DataCase):
         self.ref = self.idea()
         s = w.state(); t = self.task()
         po = orchestra.role_route(t, 'product_owner', orchestra.role_agent(s, t, 'product_owner'))
-        self.assertEqual((po['provider'], w.model_entry(po['model'])['tier'], po['source']), ('claude', 3, 'role'))
+        self.assertEqual((po['provider'], w.model_entry(po['model'])['tier'], po['source']), ('claude', 2, 'role'))
+        hard = dict(t, size='XL', risk='high', work_type='architecture')
+        for role in ('product_owner', 'solution_architect', 'teamlead', 'resolver'):          # старший класс — только сложным
+            r = orchestra.role_route(hard, role, 'claude')
+            self.assertEqual((w.model_entry(r['model'])['tier'], r['effort']), (3, 'xhigh'), role)
+        self.assertGreater(orchestra.role_route(hard, 'product_owner', 'claude')['budget_usd'], po['budget_usd'])
         self.assertIn('Product Owner', po['reason'])
         dev = orchestra.role_route(t, 'developer', orchestra.role_agent(s, t, 'developer'))
         self.assertEqual(dev['provider'], 'codex')

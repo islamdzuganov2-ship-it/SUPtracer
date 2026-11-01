@@ -55,19 +55,22 @@ def doc(path, sections=(), min_bytes=400, **kw):
 
 ROLES = {
     'product_owner': dict(
-        title='Product Owner', stage='idea', min_tier=3,
+        title='Product Owner', stage='idea', min_tier=2,
         mission='Из идеи сделать максимально развёрнутое бизнес-требование с чётко сформулированными ожидаемыми '
                 'результатами — после анализа мировых практик, конкурентов на рынке и возможных максимальных эффектов.',
         scope=['Понять идею и исходный запрос владельца; уточнить проблему и пользователя.',
-               'Найти мировые практики и не меньше трёх конкурентов или аналогов (веб-поиск), с источниками.',
+               'Продуктовая задача (новая ценность для пользователя): мировые практики и не меньше трёх конкурентов '
+               'или аналогов (веб-поиск), с источниками. Техническая (рефакторинг, инфраструктура, долг, исправление) — '
+               'без веб-поиска: needs.research=false, разделы о рынке не нужны.',
                'Оценить максимальные эффекты фичи: для пользователя, бизнеса, проекта.',
                'Сформулировать ожидаемые результаты измеримо: метрики и целевые значения.',
                'Зафиксировать границы (что входит и что нет), риски и допущения.',
-               'Решить, нужны ли дизайн и маркетинг; задать бизнес-критерии приёмки.'],
-        artifacts=[doc(ART + '/BRD.md', ['Проблема', 'Пользовател', 'Мировые практики', 'Конкурент', 'Эффект',
-                                         'Ожидаемые результаты', 'Метрик', 'Границ', 'Риск', 'Источник'], 1500)],
+               'Решить, нужны ли дизайн (только если меняется интерфейс) и маркетинг; задать бизнес-критерии приёмки.'],
+        artifacts=[doc(ART + '/BRD.md', ['Проблема', 'Пользовател', 'Эффект', 'Ожидаемые результаты', 'Метрик', 'Границ', 'Риск'],
+                       800, market=['Мировые практики', 'Конкурент', 'Источник'], market_bytes=1500)],
         dod=[item('po-brd', 'BRD.md написан по шаблону: все обязательные разделы заполнены', 'artifact', art=0),
-             item('po-market', 'Мировые практики и не меньше трёх конкурентов с источниками (ссылки в BRD)', 'machine', check='links', art=0, min=3),
+             item('po-market', 'Мировые практики и не меньше трёх конкурентов с источниками (ссылки в BRD) — для продуктовой задачы',
+                  'machine', check='links', art=0, min=3, allow_na=True, na_when='no_research'),
              item('po-results', 'Ожидаемые результаты измеримы: метрики с целевыми значениями', 'evidence'),
              item('po-effects', 'Оценены максимальные эффекты фичи и её ценность', 'evidence'),
              item('po-acceptance', 'Бизнес-критерии приёмки записаны в задачу (не меньше двух)', 'machine', check='acceptance'),
@@ -99,7 +102,7 @@ ROLES = {
              item('sa-decomp', 'Задачи для разработки с понятными критериями приёмки (dev-tasks.md)', 'artifact', art=5)]),
 
     'solution_architect': dict(
-        title='Solution-архитектор', stage='analysis', min_tier=3,
+        title='Solution-архитектор', stage='analysis', min_tier=2,
         mission='Спроектировать целевую архитектуру решения (HLD), зафиксировать решения (ADR) и риски.',
         scope=['НФТ из BRD: отказоустойчивость, безопасность, масштабируемость; аудит текущего состояния (As-Is).',
                'Архитектура на уровне контейнеров и компонентов, паттерны интеграции, топология развёртывания.',
@@ -127,7 +130,9 @@ ROLES = {
                'User Flow и CJM; информационная архитектура.',
                'Wireframes и детальные макеты (описание или HTML-прототип), адаптив: desktop и mobile.',
                'Все состояния: ошибки, пустые экраны, загрузка, hover/focus/active.',
-               'Компоненты UI-кита и гайдлайны; спецификация передачи в разработку.'],
+               'Компоненты UI-кита и гайдлайны; спецификация передачи в разработку.',
+               'Скриншоты — только когда без них не обойтись: не больше трёх за запуск, уменьшенные (до 1280 px по ширине), '
+               'уже просмотренный не открывать снова.'],
         artifacts=[doc(ART + '/design/user-flow.md', ['Сценари'], 300),
                    doc(ART + '/design/ui-spec.md', ['Экран', 'Состояни', 'Адаптив', 'Компонент'], 800),
                    doc(ART + '/design/handoff.md', ['Валидаци', 'Поведени'], 300),
@@ -246,7 +251,7 @@ ROLES = {
         artifacts=[],     # решение ворот — в журнале тимлида и в задаче, отдельный файл не нужен
         dod=[]),
     'resolver': dict(
-        title='Решала (проблемы и эскалации)', stage=None, min_tier=3,
+        title='Решала (проблемы и эскалации)', stage=None, min_tier=2,
         mission='Разбирать проблемы и ограничения агентов: найти пути решения, выбрать лучший и вернуть работу в ход; '
                 'владельца звать только когда без него решить нельзя.',
         scope=['Эскалации агентов: блокер, ограничение, нет доступа, противоречие в требованиях, конфликт ролей.',
@@ -283,29 +288,30 @@ DOR = {
 # Ревьюер — всегда другой ИИ, чем разработчик: перекрёстная проверка. Явное закрепление роли
 # владельцем (настройки ролей) сильнее таблицы. Основание — сильные стороны моделей в каталоге
 # (workflow.MODELS); это начальные эвристики, их уточняют метрики качества ролей и ИИ.
+# Решение владельца 31.10.2026 (разбор недели, Б2 и В1–В7): старший класс и xhigh — только для сложных задач.
 ROUTING = {
-    'product_owner': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'high', 'xhigh'),
-                          why='исследование рынка и длинный связный BRD с источниками — сильная сторона Claude Opus'),
+    'product_owner': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('medium', 'high', 'xhigh'),
+                          why='связный BRD — Claude Sonnet; Opus — для сложных продуктовых задач; Codex — запасной'),
     'system_analyst': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('medium', 'high', 'xhigh'),
                            why='формализация требований, API и модели данных без двояких трактовок'),
-    'solution_architect': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'high', 'xhigh'),
-                               why='архитектура и ADR — задача старшего класса при любой сложности'),
+    'solution_architect': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('medium', 'high', 'xhigh'),
+                               why='HLD и ADR по готовому ТЗ — Sonnet; Opus — для сложной архитектуры'),
     'designer': dict(prefer=('claude', 'codex'), tier=(2, 2, 2), effort=('medium', 'medium', 'high'),
                      why='сценарии, состояния экранов и спецификация интерфейса — средний класс достаточен'),
     'marketer': dict(prefer=('claude', 'codex'), tier=(2, 2, 2), effort=('medium', 'medium', 'high'),
                      why='аудитория, позиционирование и тексты — средний класс достаточен'),
-    'developer': dict(prefer=('codex', 'claude'), tier=(1, 2, 3), effort=('medium', 'medium', 'high'),
+    'developer': dict(prefer=('codex', 'claude'), tier=(2, 2, 3), effort=('medium', 'medium', 'high'),
                       why='код и тесты в нескольких файлах — сильная сторона GPT Sol/Astra; Claude — запасной'),
-    'reviewer': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('high', 'high', 'xhigh'), cross='developer',
-                     why='перекрёстная проверка: другой ИИ, чем разработчик, видит его слепые зоны'),
+    'reviewer': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('medium', 'high', 'xhigh'), cross='developer',
+                     why='перекрёстная проверка по диффу ветки: другой ИИ, чем разработчик, видит его слепые зоны'),
     'qa': dict(prefer=('codex', 'claude'), tier=(2, 2, 2), effort=('medium', 'high', 'high'),
-               why='тест-кейсы, прогоны и регресс — исполнительская работа среднего класса'),
+               why='тест-кейсы из RTM, прогоны и регресс на тестовой ветке — исполнительская работа среднего класса'),
     'devops': dict(prefer=('codex', 'claude'), tier=(1, 2, 2), effort=('medium', 'medium', 'medium'),
                    why='runbook и заметки к релизу; слияния и проверки делает сервер'),
-    'teamlead': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'high', 'xhigh'),
-                     why='ворота: согласованность всех артефактов — старший класс'),
-    'resolver': dict(prefer=('claude', 'codex'), tier=(3, 3, 3), effort=('high', 'xhigh', 'xhigh'), cross='escalator',
-                     why='разбор проблем — старший класс; другой ИИ, чем агент с проблемой, — свежий взгляд'),
+    'teamlead': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('medium', 'high', 'xhigh'),
+                     why='ворота по сводке сервера (номера требований, ссылки, изменения) — Sonnet; Opus — для сложных'),
+    'resolver': dict(prefer=('claude', 'codex'), tier=(2, 2, 3), effort=('high', 'high', 'xhigh'), cross='escalator',
+                     why='механические проблемы закрывают рецепты сервера; Решале — содержательные; другой ИИ — свежий взгляд'),
 }
 
 
@@ -355,6 +361,33 @@ def headings(text):
     return [l.strip('# ').lower() for l in (text or '').splitlines() if l.lstrip().startswith('#')]
 
 
+def _heads(lines):
+    """(номер строки, уровень, заголовок) вне блоков кода."""
+    out, fence = [], False
+    for i, l in enumerate(lines):
+        if l.lstrip().startswith('```'):
+            fence = not fence; continue
+        m = None if fence else re.match(r'(#{1,4})\s', l)
+        if m:
+            out.append((i, len(m.group(1)), l.lstrip('#').strip()))
+    return out
+
+
+def headings_raw(text):
+    """Заголовки Markdown как написаны (для оглавления в паспорте)."""
+    return [h for _, _, h in _heads(text.splitlines())]
+
+
+def sections(text):
+    """[(заголовок, текст раздела с подразделами)] — для чтения документа по разделам."""
+    lines = text.splitlines(); out = []
+    heads = _heads(lines)
+    for n, (i, lvl, h) in enumerate(heads):
+        end = next((j for j, l2, _ in heads[n + 1:] if l2 <= lvl), len(lines))
+        out.append((h, '\n'.join(lines[i:end])))
+    return out
+
+
 def check_document(text, spec):
     """Причина отказа или None."""
     if text is None:
@@ -386,6 +419,9 @@ class Context:
     def artifact(self, spec):
         return read_artifact(self.repo, self.branch, art_path(self.t['id'], spec['path']))
 
+    def read(self, path):
+        return read_artifact(self.repo, self.branch, path)
+
 
 def branches(repo, project):
     """Ветки проекта: базовая (куда сливается задача), тестовая и основная."""
@@ -407,6 +443,19 @@ def _role_art(role, idx):
     return ROLES[role]['artifacts'][idx]
 
 
+def research(ctx):
+    """Нужно ли задаче исследование рынка: PO решает needs.research; по умолчанию — да (продуктовая задача)."""
+    needs = ctx.handoff.get('needs') or (ctx.t.get('pipeline') or {}).get('needs') or {}
+    return needs.get('research', True) is not False
+
+
+def effective(spec, ctx):
+    """Требования к документу с учётом задачи: разделы о рынке и объём — только при исследовании."""
+    if not spec.get('market') or not research(ctx):
+        return spec
+    return dict(spec, sections=spec['sections'] + spec['market'], min_bytes=spec.get('market_bytes', spec['min_bytes']))
+
+
 def check_item(it, role, ctx, state):
     """(ok, detail). Тяжёлые проверки (тесты, слияния) — только в фоновом задании."""
     entry = (ctx.handoff.get('items') or {}).get(it['id']) or {}
@@ -414,6 +463,8 @@ def check_item(it, role, ctx, state):
     if status == 'na':
         if not it.get('allow_na'):
             return False, 'пункт нельзя пометить «неприменимо»'
+        if it.get('na_when') == 'no_research' and research(ctx):
+            return False, 'продуктовой задаче исследование рынка нужно; техническая — needs.research=false с причиной'
         if len(evidence) < MIN_NA_REASON:
             return False, 'для «неприменимо» нужна причина (не короче %d символов)' % MIN_NA_REASON
         return True, 'неприменимо: ' + evidence
@@ -423,7 +474,7 @@ def check_item(it, role, ctx, state):
             return False, 'нужно доказательство: что сделано и где (не короче %d символов)' % MIN_EVIDENCE
         return True, evidence
     if kind == 'artifact':
-        spec = _role_art(role, it['art'])
+        spec = effective(_role_art(role, it['art']), ctx)
         reason = check_document(ctx.artifact(spec), spec)
         return (reason is None), (reason or 'есть: ' + art_path(ctx.t['id'], spec['path']))
     if kind == 'machine':
@@ -461,9 +512,10 @@ def machine(it, role, ctx, state, evidence=''):
     if check == 'needs':
         needs = ctx.handoff.get('needs') or (t.get('pipeline') or {}).get('needs')
         ok = isinstance(needs, dict) and type(needs.get('design')) == bool and type(needs.get('marketing')) == bool \
-            and len(str(needs.get('reason') or '')) >= MIN_NA_REASON
-        return ok, 'needs: design/marketing — да или нет, с причиной' if not ok else \
-            'дизайн: %s, маркетинг: %s' % ('да' if needs['design'] else 'нет', 'да' if needs['marketing'] else 'нет')
+            and needs.get('research', True) in (True, False) and len(str(needs.get('reason') or '')) >= MIN_NA_REASON
+        return ok, 'needs: design/marketing (и research для технической задачи) — да или нет, с причиной' if not ok else \
+            'дизайн: %s, маркетинг: %s, исследование рынка: %s' % ('да' if needs['design'] else 'нет', 'да' if needs['marketing'] else 'нет',
+                                                              'да' if research(ctx) else 'нет')
     if check == 'verdict':
         v = ctx.handoff.get('verdict')
         return v == 'approve', 'вердикт: %s' % (v or 'не указан')

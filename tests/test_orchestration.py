@@ -70,7 +70,7 @@ class BudgetWatchTests(DataCase):
             model='claude-opus-5-5', usage=dict(input_tokens=1000, output_tokens=200000, cache_read_input_tokens=0))))
         (home / 'projects' / 'p' / 'S1.jsonl').write_text('\n'.join([row('a'), row('a'), row('b')]) + '\n', encoding='utf-8')
         run = dict(id='RUN-1', ref='alpha-api/AL-01', status='running', role='developer', agent='claude',
-                   launch=dict(agent='claude', session='S1', pid=1), packet=dict(route=dict(budget_usd=2.0)))
+                   launch=dict(agent='claude', session='S1', pid=1), packet=dict(route=dict(budget_tokens=200000)))
         with mock.patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(home)}):
             tok, usd = limits.session_cost(run)
             self.assertEqual(tok, 402000)                                    # дубли requestId не считаются
@@ -82,7 +82,7 @@ class BudgetWatchTests(DataCase):
             self.assertEqual(serve.budget_once(), ['RUN-1'])
             self.assertEqual(serve.budget_once(), [])                       # одна отметка на запуск
         b = w.state()['runs'][0]['budget_alert']
-        self.assertEqual((b['usd'], b['budget']), (want, 2.0))
+        self.assertEqual((b['tokens'], b['budget']), (402000, 200000))         # мерило — токены, не доллары
         self.assertTrue(any(n['kind'] == 'budget' for n in w.notifications(w.state(), [])))
         self.assertTrue(any(e['kind'] == 'budget' for e in w.state()['teamlead']))
 

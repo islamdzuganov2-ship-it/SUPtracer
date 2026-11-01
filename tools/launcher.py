@@ -67,26 +67,77 @@ ROOT = Path(__file__).resolve().parents[1]
 LOGS = ROOT / 'ops' / 'logs' / 'sessions'
 
 
+LEAN_TOOLS = 'Bash,Read,Edit,Write,Glob,Grep'
+WEB_TOOLS = 'WebSearch,WebFetch'
+WEB_ROLES = ('product_owner', 'marketer', 'resolver')
+
+
+def _user_auto_mode():
+    """Правила автоматического режима из пользовательских настроек Claude: лёгкая сессия их сама не читает."""
+    try:
+        with open(os.path.expanduser('~/.claude/settings.json'), encoding='utf-8') as fh:
+            return json.load(fh).get('autoMode')
+    except (OSError, ValueError):
+        return None
+
+
+def lean(provider, role, research=True, own=()):
+    """Лёгкий старт сессии роли конвейера (Л1). Замер: сессия Claude начиналась с 43–46 тыс. токенов
+    до первого действия — плагины, чужие MCP-серверы, сотня скиллов, полный список инструментов
+    TaskTreker; всё это едет в каждом ходе. Роли нужны файлы, Bash, tt_work и свой скилл.
+
+    Возвращает (аргументы командной строки, переменные окружения). TASKTREKER_LEAN=0 — обычный старт."""
+    if os.environ.get('TASKTREKER_LEAN') == '0':
+        return [], {}
+    env = {'TASKTREKER_OWN': ','.join(own)}
+    if provider == 'codex':
+        return ['-c', 'mcp_servers.tasktreker.env.TASKTREKER_MCP_ROLE="1"'], env
+    if provider != 'claude':
+        return [], {}
+    import skills
+    tools_dir = Path(__file__).resolve().parent
+    LOGS.mkdir(parents=True, exist_ok=True)
+
+    def hook(script):
+        return dict(type='command', command='py', args=['-3', (tools_dir / script).as_posix()], timeout=20)
+    mcp = LOGS / 'lean-mcp.json'
+    mcp.write_text(json.dumps({'mcpServers': {'tasktreker': dict(type='stdio', command='py',
+                   args=['-3', (tools_dir / 'mcp_server.py').as_posix()], env={'TASKTREKER_MCP_ROLE': '1'})}}), encoding='utf-8')
+    conf = dict(hooks=dict(PreToolUse=[dict(matcher='Read', hooks=[hook('read_guard.py')])],
+                           SessionStart=[dict(matcher='compact', hooks=[hook('read_guard.py')])]))
+    auto = _user_auto_mode()
+    if auto:
+        conf['autoMode'] = auto
+    settings = LOGS / 'lean-settings.json'
+    settings.write_text(json.dumps(conf, ensure_ascii=False), encoding='utf-8')
+    skill = LOGS / ('skill-%s.md' % role)
+    skill.write_text(skills.render(role), encoding='utf-8')
+    tools = LEAN_TOOLS + (',' + WEB_TOOLS if role in WEB_ROLES and research else '')
+    return ['--strict-mcp-config', '--mcp-config', str(mcp), '--setting-sources', 'project,local', '--settings', str(settings),
+            '--tools', tools, '--append-system-prompt-file', str(skill), '--exclude-dynamic-system-prompt-sections'], env
+
+
 def git_common_dir(cwd):
     """Каталог .git основного репозитория: рабочая копия задачи коммитит туда — песочнице Codex он нужен на запись."""
     r = _git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd) if cwd else None
     return r.stdout.strip() if r is not None and r.returncode == 0 and r.stdout.strip() else None
 
 
-def headless_command(provider, exe, model, effort, prompt, cwd, session=None, resume=False):
-    """Сессия без окна для полной автономии: работает до сдачи этапа и завершается."""
+def headless_command(provider, exe, model, effort, prompt, cwd, session=None, resume=False, extra=()):
+    """Сессия без окна для полной автономии: работает до сдачи этапа и завершается.
+    extra — аргументы лёгкого старта (lean); у Claude они до --model: --tools и --mcp-config принимают несколько значений."""
     if provider == 'claude':
         head = ['--resume', session] if resume else (['--session-id', session] if session else [])
-        return [exe, '-p', *head, '--permission-mode', 'auto', '--model', model, '--effort', effort, prompt]
+        return [exe, '-p', *head, '--permission-mode', 'auto', *extra, '--model', model, '--effort', effort, prompt]
     if provider == 'codex':
         gitdir = git_common_dir(cwd)
         effort_cfg = ['-c', 'model_reasoning_effort="%s"' % effort]
         if resume:   # exec resume не принимает флаги песочницы — те же правила через -c
             roots = ['-c', 'sandbox_workspace_write.writable_roots=%s' % json.dumps([gitdir] if gitdir else [])]
-            return [exe, 'exec', 'resume', session, '-m', model, *effort_cfg, '-c', 'sandbox_mode="workspace-write"',
+            return [exe, 'exec', 'resume', session, '-m', model, *effort_cfg, *extra, '-c', 'sandbox_mode="workspace-write"',
                     *roots, '--skip-git-repo-check', prompt]
         # --approve-for-me сам включает песочницу workspace-write; вместе с -s Codex его не принимает.
-        return [exe, 'exec', '-m', model, *effort_cfg, '-C', cwd, '--approve-for-me',
+        return [exe, 'exec', '-m', model, *effort_cfg, *extra, '-C', cwd, '--approve-for-me',
                 *(['--add-dir', gitdir] if gitdir else []), '--skip-git-repo-check', prompt]
     raise ValueError('Неизвестный ИИ: ' + str(provider))
 
@@ -156,7 +207,7 @@ def tail(path, lines=200):
     return '\n'.join(text.splitlines()[-lines:])
 
 
-def command(provider, exe, model, effort, prompt, cwd, edits=False, session=None, resume=False):
+def command(provider, exe, model, effort, prompt, cwd, edits=False, session=None, resume=False, extra=()):
     """edits=True — сессия роли конвейера: правка файлов в рабочей копии задачи без вопросов
     (Claude: acceptEdits; Codex: песочница workspace-write), команды — по подтверждению.
 
@@ -165,9 +216,9 @@ def command(provider, exe, model, effort, prompt, cwd, edits=False, session=None
     (claude --resume, codex resume) — с местом остановки и всей перепиской."""
     if provider == 'claude':
         head = ['--resume', session] if resume else (['--session-id', session] if session else [])
-        return [exe, *head, '--model', model, '--effort', effort, *(['--permission-mode', 'acceptEdits'] if edits else []), prompt]
+        return [exe, *head, *extra, '--model', model, '--effort', effort, *(['--permission-mode', 'acceptEdits'] if edits else []), prompt]
     if provider == 'codex':
-        return [exe, *(['resume', session] if resume else []), '-m', model, '-c', 'model_reasoning_effort="%s"' % effort, '-C', cwd,
+        return [exe, *(['resume', session] if resume else []), '-m', model, '-c', 'model_reasoning_effort="%s"' % effort, *extra, '-C', cwd,
                 *(['-s', 'workspace-write', '-a', 'on-request'] if edits else []), prompt]
     raise ValueError('Неизвестный ИИ: ' + str(provider))
 
@@ -217,7 +268,7 @@ def open_window(cmd, cwd, env_extra=None):
     return proc.pid
 
 
-def launch(provider, model, effort, prompt, cwd, env_extra=None, edits=False, resume=None, headless=False, run_id=None):
+def launch(provider, model, effort, prompt, cwd, env_extra=None, edits=False, resume=None, headless=False, run_id=None, extra=()):
     """Открыть сессию. resume — идентификатор сессии, которую продолжить (пауза по лимиту, перезапуск).
     headless — полная автономия: без окна, с журналом. Новой сессии Claude сервер сам назначает
     идентификатор; Codex назначает свой — его находит limits.codex_session по папке и времени запуска."""
@@ -228,12 +279,13 @@ def launch(provider, model, effort, prompt, cwd, env_extra=None, edits=False, re
         raise ValueError('Рабочая папка проекта не найдена: %s' % (cwd or 'не указана'))
     session = resume or (str(uuid.uuid4()) if provider == 'claude' else None)
     if headless:
-        cmd = headless_command(provider, exe, model, effort, prompt, cwd, session=session, resume=bool(resume))
+        cmd = headless_command(provider, exe, model, effort, prompt, cwd, session=session, resume=bool(resume), extra=extra)
         log = LOGS / ('%s.log' % (run_id or session or 'session'))
         pid = open_background(cmd, cwd, log, env_extra)
-        return dict(pid=pid, exe=exe, cwd=cwd, session=session, resumed=bool(resume), headless=True, log=str(log))
-    cmd = command(provider, exe, model, effort, prompt, cwd, edits, session=session, resume=bool(resume))
-    return dict(pid=open_window(cmd, cwd, env_extra), exe=exe, cwd=cwd, session=session, resumed=bool(resume), headless=False)
+        return dict(pid=pid, exe=exe, cwd=cwd, session=session, resumed=bool(resume), headless=True, log=str(log), lean=bool(extra))
+    cmd = command(provider, exe, model, effort, prompt, cwd, edits, session=session, resume=bool(resume), extra=extra)
+    return dict(pid=open_window(cmd, cwd, env_extra), exe=exe, cwd=cwd, session=session, resumed=bool(resume), headless=False,
+                lean=bool(extra))
 
 
 def _codex_home():

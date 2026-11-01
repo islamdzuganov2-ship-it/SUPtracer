@@ -393,6 +393,82 @@ def sections(text):
     return out
 
 
+def tokens(text):
+    """Оценка токенов текста: латиница ~4 символа на токен, кириллица и прочее ~2.5 (Л2)."""
+    if not text:
+        return 0
+    latin = len(text.encode('ascii', 'ignore'))
+    return int(latin / 4 + (len(text) - latin) / 2.5) + 1
+
+
+def _code_key(c):
+    p, num = c.split('-', 1)
+    return p, [int(x) for x in num.split('.')]
+
+
+def code_span(cs):
+    """Коды сжатой строкой: FR-1–4, FR-7, NFR-1–2."""
+    out, by = [], {}
+    for c in sorted(cs, key=_code_key):
+        p, num = c.split('-', 1)
+        by.setdefault(p, []).append(num)
+    for p, nums in by.items():
+        run = []
+        for x in nums + [None]:
+            if x is not None and x.isdigit() and run and run[-1].isdigit() and int(x) == int(run[-1]) + 1:
+                run.append(x); continue
+            if run:
+                out.append('%s-%s' % (p, run[0] if len(run) == 1 else '%s–%s' % (run[0], run[-1])))
+            run = [x] if x is not None else []
+    return ', '.join(out)
+
+
+def doc_index(text):
+    """Указатель документа для ИИ (Л2): номер раздела, уровень, заголовок, вес с подразделами в токенах,
+    строки (для Read offset/limit) и коды требований, впервые названные в разделе. По указателю агент
+    берёт один раздел, а не документ целиком."""
+    lines = (text or '').splitlines(); heads = _heads(lines); seen = set(); out = []
+    for n, (i, lvl, h) in enumerate(heads):
+        end = next((j for j, l2, _ in heads[n + 1:] if l2 <= lvl), len(lines))
+        own_end = heads[n + 1][0] if n + 1 < len(heads) else len(lines)
+        new = codes('\n'.join(lines[i:own_end])) - seen
+        seen |= new
+        out.append(dict(n=n + 1, level=lvl, title=h, tokens=tokens('\n'.join(lines[i:end])), lines=[i + 1, end],
+                        own_end=own_end, codes=sorted(new, key=_code_key)))
+    return out
+
+
+def index_lines(idx, limit=40):
+    """Указатель строками — компактно для паспорта и отказа на чтение целиком."""
+    rows = ['%s%d %s · ~%dт · стр. %d–%d%s' % ('  ' * (e['level'] - 1), e['n'], e['title'][:80], e['tokens'], e['lines'][0],
+                                             e['lines'][1], ' · ' + code_span(e['codes']) if e['codes'] else '') for e in idx[:limit]]
+    if len(idx) > limit:
+        rows.append('… ещё %d разделов: tt_work op=doc без section' % (len(idx) - limit))
+    return rows
+
+
+def section_by(text, want):
+    """Раздел по номеру указателя («3»), коду требования («FR-3») или части заголовка.
+    Код — раздел, где он впервые назван (без подразделов); номер и заголовок — с подразделами."""
+    lines = (text or '').splitlines(); idx = doc_index(text); want = str(want or '').strip()
+    if not idx:
+        return None, []
+    pick = None
+    if want.isdigit():
+        pick = next((e for e in idx if e['n'] == int(want)), None)
+    elif CODE.fullmatch(want.upper()):
+        code = want.upper()
+        e = next((e for e in idx if code in e['codes']), None)
+        if e:
+            return dict(e, lines=[e['lines'][0], e['own_end']]), '\n'.join(lines[e['lines'][0] - 1:e['own_end']])
+    else:
+        hit = [e for e in idx if want.lower() in e['title'].lower()]
+        pick = hit[0] if hit else None
+    if not pick:
+        return None, [e['title'] for e in idx]
+    return pick, '\n'.join(lines[pick['lines'][0] - 1:pick['lines'][1]])
+
+
 def check_document(text, spec):
     """Причина отказа или None."""
     if text is None:

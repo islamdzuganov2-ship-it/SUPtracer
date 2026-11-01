@@ -870,15 +870,18 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
     lines.append('Задачу веди только через MCP-инструмент tt_work. Если его нет — команды системы: py "%s" work …; pm.py из рабочей копии задачи не используй: там может быть старый код.' % (ROOT / 'tools' / 'pm.py'))
     return '\n'.join(lines)
 
-def mark_budget(ref, run_id, usd, budget):
-    """Сторож бюджета: запуск потратил больше 150% ориентира — отметка, журнал тимлида, колокольчик (Б7)."""
+def mega(n):
+    return '%.1f млн' % (n / 1e6) if n >= 1e6 else '%d тыс.' % round(n / 1e3)
+
+def mark_budget(ref, run_id, tokens, budget):
+    """Сторож бюджета: запуск обработал больше 150% ориентира токенов — отметка, журнал тимлида, колокольчик (Б7, Л4)."""
     with locked():
         s=state()
         run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
         if not run or run.get('budget_alert'): return False
-        run['budget_alert']=dict(at=now().isoformat(), usd=round(usd,2), budget=budget)
+        run['budget_alert']=dict(at=now().isoformat(), tokens=int(tokens), budget=budget)
         s.setdefault('teamlead',[]).append(dict(at=now().isoformat(), ref=ref, kind='budget', role=run.get('role'),
-            text='Запуск %s потратил $%.2f — больше 150%% ориентира $%.2f: проверьте, не ходит ли он по кругу' % (run_id, usd, budget)))
+            text='Запуск %s обработал %s токенов — больше 150%% ориентира %s: проверьте, не ходит ли он по кругу' % (run_id, mega(tokens), mega(budget))))
         save('workflow.json',s)
         return True
 
@@ -1066,8 +1069,8 @@ def notifications(s, tasks):
         b=r.get('budget_alert')
         if b and r.get('status') in ('queued','running'):
             out.append(dict(id='b:'+r['id'], kind='budget', ref=r['ref'], title=byref.get(r['ref'],{}).get('title',''),
-                            text='Запуск %s (%s) потратил $%.2f при ориентире $%.2f — сессии напомнено завершить этап'
-                                 % (r['id'], r.get('role') or 'исполнитель', b['usd'], b['budget']), run=r['id'], at=b['at']))
+                            text='Запуск %s (%s) обработал %s токенов при ориентире %s — сессии напомнено завершить этап'
+                                 % (r['id'], r.get('role') or 'исполнитель', mega(b.get('tokens') or 0), mega(b['budget'])), run=r['id'], at=b['at']))
         if r.get('status') in ('queued','running') and r.get('launch_error') and not r.get('paused'):
             out.append(dict(id='l:'+r['id'], kind='launch', ref=r['ref'], title=byref.get(r['ref'],{}).get('title',''),
                             text=r['launch_error'], run=r['id'], at=r.get('launch_error_at')))

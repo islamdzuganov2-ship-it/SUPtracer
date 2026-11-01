@@ -429,6 +429,7 @@ py tools/pm.py status <проект>  # подробно по проекту
 py tools/pm.py comments         # список комментариев
 py tools/pm.py comment <проект> "текст" --kind техдолг
 py tools/pm.py check            # гейт перед слиянием в тестирование и main
+py tools/pm.py tokens [проект]  # токены сессий ролей: старт, пик, ходы, всего — по ролям
 py tools/pm.py snapshot         # снимок для трендов
 py tools/pm.py open             # открыть дашборд файлом
 py tools/pm.py serve            # дашборд с работающей кнопкой «Обновить данные»

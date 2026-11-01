@@ -169,17 +169,18 @@ def role_route(t, role, agent, gate=None):
     return dict(model=model, provider=agent, effort=effort, reason=reason, source='role', role=role,
                 complexity=dict(score=cx_['score'], tier=level), context_budget=2000,
                 total_token_budget=w.budget_for(model, effort), max_attempts=2, provisional=False,
-                budget_usd=budget_usd(tier, effort), policy_version=w.POLICY['version'])
+                budget_tokens=budget_tokens(tier, effort), policy_version=w.POLICY['version'])
 
 
-# Ориентир стоимости запуска роли (эквивалент API, $) по классу модели; усилия — множителем.
-# По разбору недели 24–31.10: медиана запуска старшего класса ≈ $5, среднего ≈ $2.
-RUN_BUDGET_USD = {1: 1.0, 2: 2.5, 3: 6.0}
-BUDGET_ALERT = 1.5      # сторож бюджета: напоминание, когда запуск потратил 150% ориентира (Б7)
+# Ориентир объёма запуска роли в токенах (вход, выход, запись и чтение кеша — всё, что обработала модель)
+# по классу модели; усилия — множителем. Мерило — количество токенов, а не деньги (Л4).
+# Замер 92 сессий Claude до лёгкого старта: тимлид ≈1.3 млн, PO ≈2.0 млн, аналитик и архитектор ≈5–6 млн.
+RUN_BUDGET_TOKENS = {1: 1_000_000, 2: 2_500_000, 3: 5_000_000}
+BUDGET_ALERT = 1.5      # сторож бюджета: напоминание, когда запуск обработал 150% ориентира (Б7)
 
 
-def budget_usd(tier, effort):
-    return round(RUN_BUDGET_USD[tier] * w.EFFORT_COST.get(effort, 1.0), 2)
+def budget_tokens(tier, effort):
+    return int(round(RUN_BUDGET_TOKENS[tier] * w.EFFORT_COST.get(effort, 1.0), -4))
 
 
 def ensure_worktree(t, pipe):
@@ -983,7 +984,7 @@ def resolver_prompt(t, run, route, worker=None):
     wt = (t.get('pipeline') or {}).get('worktree') or {}
     lines = ['Ты — Решала в TaskTreker: разбираешь проблему %s по задаче %s «%s».' % (prob.get('id', '?'), t['ref'], t['title']),
              'Проблема (%s, роль %s): %s' % ('агент' if prob.get('source') == 'agent' else 'сервер', prob.get('role') or '—', prob.get('reason', '')),
-             'Следуй скиллу tt-resolver (/tt-resolver). Модель: %s, усилия: %s.' % (route['model'], route['effort']),
+             'Следуй скиллу tt-resolver — он уже в системном промпте сессии (если нет — /tt-resolver). Модель: %s, усилия: %s.' % (route['model'], route['effort']),
              'Рабочая копия задачи: %s.' % (wt.get('path') or 'нет — смотри репозиторий проекта'),
              '1) tt_work op=claim ref=%s run=%s model=%s worker=%s' % (t['ref'], run['id'], route['model'], worker or '<id этой сессии>'),
              '2) tt_work op=packet ref=%s run=%s — проблема, журнал, последние запуски.' % (t['ref'], run['id']),
@@ -1009,9 +1010,10 @@ def test_env(t):
         return dict(error=str(e)[:200])
 
 
-READ_RULE = ('Читай точечно: сначала оглавление документа (upstream — разделы и размер каждого), затем нужные разделы — '
-             'tt_work op=doc ref=<задача> path=<путь> section=<заголовок>. Документ целиком — только свой или короткий; '
-             'уже прочитанное не перечитывай. Каждое лишнее чтение оплачивается на каждом следующем шаге сессии.')
+READ_RULE = ('Читай по указателю: upstream и project_docs несут разделы, вес в токенах, строки и коды требований. '
+             'Нужный раздел — tt_work op=doc ref=<задача> path=<путь> section=<номер> или code=<FR-3>, либо Read с offset/limit '
+             'по строкам из указателя. Документ целиком — только свой или короче 2 тыс. токенов; прочитанное не перечитывай: '
+             'всё прочитанное едет в каждом следующем ходе сессии.')
 
 
 def upstream_digest(t, pipe, stage, toc=True, ctx=None):
@@ -1029,11 +1031,26 @@ def upstream_digest(t, pipe, stage, toc=True, ctx=None):
                 e = dict(role=P.ROLES[r]['title'], path=path, optional=bool(a.get('optional')))
                 text = None if a.get('dir') or not toc or (have is not None and path not in have) else ctx.artifact(a)
                 if text is not None:
-                    e.update(tokens=len(text) // 4, sections=[h for h in P.headings_raw(text)][:30])
+                    e.update(tokens=P.tokens(text), index=P.index_lines(P.doc_index(text), 30))
                 elif toc and not a.get('dir'):
                     e['missing'] = True
                 out.append(e)
     return out
+
+
+def project_docs(ctx, limit=12):
+    """Крупные документы проекта в ветке задачи (ТЗ, спецификация): путь и вес по размеру файла, без чтения.
+    Читаются указателем op=doc — их целиком перечитывали десятки раз за неделю (Л2)."""
+    if not (ctx.repo and ctx.branch):
+        return []
+    ls = P._git(['ls-tree', '-l', ctx.branch, 'docs/'], ctx.repo)
+    out = []
+    for line in ls.stdout.splitlines() if ls.returncode == 0 else []:
+        meta, _, path = line.partition('\t')
+        parts = meta.split()
+        if len(parts) == 4 and parts[1] == 'blob' and path.endswith('.md') and parts[3].isdigit() and int(parts[3]) >= 4000:
+            out.append((int(parts[3]), path))
+    return ['%s ~%dт' % (path, size / 4.5) for size, path in sorted(out, reverse=True)[:limit]]
 
 
 def op_doc(s, req, t, at):
@@ -1045,17 +1062,16 @@ def op_doc(s, req, t, at):
     text = ctx_for(t, pipe).read(path)
     if text is None:
         raise ValueError('Нет файла %s в ветке задачи' % path)
-    secs = P.sections(text)
-    want = str(req.get('section') or '').strip().lower()
+    want = str(req.get('code') or req.get('section') or '').strip()
     if not want:
-        return dict(path=path, tokens=len(text) // 4, sections=[dict(title=h, tokens=len(b) // 4) for h, b in secs],
-                    hint='section=<заголовок или его часть> — текст раздела')
-    hit = [(h, b) for h, b in secs if want in h.lower()]
-    if not hit:
-        raise ValueError('Раздела «%s» нет. Есть: %s' % (want, '; '.join(h for h, _ in secs)[:600]))
-    h, body = hit[0]
+        return dict(path=path, tokens=P.tokens(text), index=P.index_lines(P.doc_index(text), 80),
+                    hint='section=<номер из указателя или часть заголовка> или code=<FR-3> — один раздел')
+    entry, body = P.section_by(text, want)
+    if entry is None:
+        raise ValueError('Раздела «%s» нет. Есть: %s' % (want, '; '.join(body)[:600]))
     limit = 24000
-    return dict(path=path, section=h, text=body[:limit], truncated=len(body) > limit, more=[x for x, _ in hit[1:]])
+    return dict(path=path, section='%d %s' % (entry['n'], entry['title']), lines=entry['lines'], tokens=P.tokens(body),
+                text=body[:limit], truncated=len(body) > limit)
 
 
 def role_packet(t, run, agent, toc=True):
@@ -1080,7 +1096,7 @@ def role_packet(t, run, agent, toc=True):
                   artifacts=[dict(path=P.art_path(t['id'], a['path']), sections=a['sections'], min_bytes=a['min_bytes'],
                                   optional=bool(a.get('optional'))) for a in [P.effective(x, ctx) for x in spec['artifacts']]],
                   dod=[dict(id=i['id'], text=i['text'], kind=i['kind'], allow_na=bool(i.get('allow_na'))) for i in dod],
-                  upstream=arts, read_rule=READ_RULE, needs=pipe.get('needs'), feedback=entry.get('feedback'),
+                  upstream=arts, project_docs=project_docs(ctx) if toc else None, read_rule=READ_RULE, needs=pipe.get('needs'), feedback=entry.get('feedback'),
                   resume=((run.get('pauses') or [{}])[-1].get('checkpoint') or None),
                   defects=[{k: d.get(k) for k in ('id', 'title', 'severity', 'level', 'test', 'found_by', 'status')}
                            for d in pipe.get('defects') or [] if d['status'] in ('open', 'fixed')],
@@ -1125,13 +1141,14 @@ def role_prompt(t, run, route, worker=None):
     skill = 'tt-' + role.replace('_', '-')
     lines = ['Ты — %s в TaskTreker. Задача %s «%s», этап «%s».' % (spec['title'], t['ref'], t['title'],
              P.STAGE[run['stage']]['title'] if run.get('stage') in P.STAGE else run.get('stage')),
-             'Следуй скиллу %s (/%s): там твой скоуп, DoR, DoD и артефакты — ровно то, что проверяет сервер.' % (skill, skill),
+             'Следуй скиллу %s — он уже в системном промпте сессии (если нет — /%s): там твой скоуп, DoR, DoD и артефакты — '
+             'ровно то, что проверяет сервер.' % (skill, skill),
              'Рабочая копия: %s, ветка %s. Коммить только свои файлы; ветку не сливай — слияния делает сервер.' % (wt.get('path') or '—', wt.get('branch') or '—'),
              'Модель: %s, усилия: %s.' % (route['model'], route['effort'])]
     if run.get('gate'):
         lines.append('Это ворота тимлида: %s.' % run['gate'])
     lines += ['1) tt_work op=claim ref=%s run=%s model=%s worker=%s' % (t['ref'], run['id'], route['model'], worker or '<id этой сессии>'),
-              '2) tt_work op=packet ref=%s run=%s — паспорт роли: DoD, артефакты, предыдущие артефакты, замечания.' % (t['ref'], run['id']),
+              '2) tt_work op=packet ref=%s run=%s — паспорт роли (один раз): DoD, артефакты, указатели документов, замечания.' % (t['ref'], run['id']),
               '3) Сделай работу, закоммить артефакты, затем %s — это уведомление тимлиду. Не принятая передача вернёт список несделанных пунктов.'
               % ('op=gate' if role == 'teamlead' else 'op=handoff'),
               COMMIT_RULE,

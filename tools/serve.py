@@ -237,16 +237,30 @@ def dispatcher(interval=15):
 def open_session(agent, route, prompt, cwd, run, edits=False, resume=None):
     """Сессия ИИ в режиме согласия владельца: пошаговое — окно, полная автономия — фон без окна."""
     import workflow, launcher
+    extra, env = lean_args(agent, run)
     return launcher.launch(agent, route["model"], route["effort"], prompt, cwd, edits=edits, resume=resume,
-                           headless=workflow.autonomous(), run_id=run["id"],
-                           env_extra={"TASKTREKER_DATA": workflow.data_dir().as_posix(),
-                                      "TASKTREKER_SYSTEM": os.path.dirname(os.path.abspath(workflow.__file__))})
+                           headless=workflow.autonomous(), run_id=run["id"], extra=extra,
+                           env_extra=dict(env, TASKTREKER_DATA=workflow.data_dir().as_posix(),
+                                          TASKTREKER_SYSTEM=os.path.dirname(os.path.abspath(workflow.__file__))))
+
+
+def lean_args(agent, run):
+    """Лёгкий старт для сессии роли конвейера (Л1): свои артефакты роли — сторожу чтений, веб — только при исследовании."""
+    if not run.get("role"):
+        return [], {}
+    import workflow, launcher
+    import pipeline as P
+    t = workflow.task_for(run["ref"]) or {}
+    pipe = t.get("pipeline") or {}
+    own = [P.art_path(t["id"], a["path"]) for a in P.ROLES[run["role"]]["artifacts"]] if t.get("id") else []
+    research = (pipe.get("needs") or {}).get("research", True) is not False
+    return launcher.lean(agent, run["role"], research=research, own=own)
 
 
 def launch_info(opened, cwd, agent, **extra):
     return dict(extra, pid=opened["pid"], cli=os.path.basename(opened["exe"]), session=opened.get("session"),
                 cwd=cwd, agent=agent, headless=opened.get("headless", False), log=opened.get("log"),
-                **({"resumed": True} if opened.get("resumed") else {}))
+                **({"resumed": True} if opened.get("resumed") else {}), **({"lean": True} if opened.get("lean") else {}))
 
 
 def session_active(run, seconds=180):
@@ -260,7 +274,7 @@ def session_active(run, seconds=180):
         return False
 
 
-BUDGET_NOTE = ("Запуск уже потратил больше 150% ориентира бюджета роли. Не начинай новых исследований и не перечитывай "
+BUDGET_NOTE = ("Запуск уже обработал больше 150% ориентира токенов роли. Не начинай новых исследований и не перечитывай "
                "документы: доведи до handoff то, что есть, или эскалируй (op=escalate), если упёрся.")
 NUDGE = ("Ты закончил ответ, но этап не сдан: сервер не получил ни handoff, ни return, ни escalate, ни pause. "
          "Владелец не ответит — работа автономная. Продолжи с места остановки: tt_work op=packet (с run), доделай "
@@ -287,7 +301,7 @@ def toast(title, text):
 
 
 def budget_once():
-    """Сторож бюджета (Б7): открытые сессии раз в 5 минут сверяются с ориентиром стоимости запуска."""
+    """Сторож бюджета (Б7, Л4): открытые сессии раз в 5 минут сверяются с ориентиром объёма запуска в токенах."""
     import workflow, limits, orchestra
     alerted = []
     for r in workflow.state()["runs"]:
@@ -296,11 +310,11 @@ def budget_once():
         if time.time() - _auto_attempts.get("budget:" + r["id"], 0) < 300:
             continue
         _auto_attempts["budget:" + r["id"]] = time.time()
-        budget = ((r.get("packet") or {}).get("route") or {}).get("budget_usd")
+        budget = ((r.get("packet") or {}).get("route") or {}).get("budget_tokens")
         if not budget:
             continue
-        _tok, usd = limits.session_cost(r)
-        if usd >= budget * orchestra.BUDGET_ALERT and workflow.mark_budget(r["ref"], r["id"], usd, budget):
+        tokens, _usd = limits.session_cost(r)
+        if tokens >= budget * orchestra.BUDGET_ALERT and workflow.mark_budget(r["ref"], r["id"], tokens, budget):
             alerted.append(r["id"])
     return alerted
 

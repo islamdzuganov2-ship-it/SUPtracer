@@ -324,8 +324,35 @@ TOOLS.append({"name": "tt_work", "title": "Планирование и испо�
         "instructions": STR, "problem": STR, "options": {"type":"array", "items":{"type":"object"}}, "sessions": {"type":"integer"},
         "defects": {"type":"array", "items":{"type":"object"}}, "fixes": {"type":"object"},
         "tasks": {"type":"array", "items":{"type":"object"}},
-        "projects": {"type":"array", "items":STR}, "changes":{"type":"object"}}, ["op"]),
+        "projects": {"type":"array", "items":STR}, "changes":{"type":"object"},
+        "path": STR, "section": STR, "code": STR, "recipe": {"type":"object"}, "contract_group": STR,
+        "priority": STR, "offset": {"type":"integer"}, "limit": {"type":"integer"}}, ["op"]),
     "annotations": dict(WRITE, idempotentHint=False, title="Планирование и исполнение")})
+# Сессия роли конвейера (Л1): в списке только tt_work и tt_recall с короткими описаниями.
+# Полный список с инструкциями — ~5 тыс. токенов в начале каждого хода сессии роли, а ей нужен один инструмент.
+ROLE_WORK = ("Конвейер TaskTreker для роли. claim (ref, run, worker, model); packet (ref, run) — паспорт роли, запрашивай один раз; "
+             "doc (ref, path) — указатель документа: разделы, вес, коды требований; doc (ref, path, section|code) — один раздел; "
+             "heartbeat; handoff (ref, run, worker, summary, items {id: {status: done|na, evidence}}); return (to_stage, defects); "
+             "escalate (reason, tried, need); pause (checkpoint); gate — тимлид; resolve — Решала. Аргументы — в задании и паспорте.")
+ROLE_INSTRUCTIONS = ("TaskTreker: ты в сессии роли конвейера. Работай через tt_work по заданию; документы читай указателем и разделами (op=doc), "
+                     "прочитанное не перечитывай; этап сдавай op=handoff.")
+
+
+def role_mode():
+    return os.environ.get("TASKTREKER_MCP_ROLE") == "1"
+
+
+def listed_tools():
+    if not role_mode():
+        return TOOLS
+    keep = {t["name"]: t for t in TOOLS if t["name"] in ("tt_work", "tt_recall")}
+    return [dict(keep["tt_work"], description=ROLE_WORK), keep["tt_recall"]]
+
+
+def instructions():
+    return ROLE_INSTRUCTIONS if role_mode() else INSTRUCTIONS
+
+
 OWNER_SETTINGS = {'autonomy', 'consent', 'max_sessions', 'auto_merge', 'failover', 'roles', 'sessions_per_ai', 'wip_analysis'}
 
 
@@ -421,12 +448,12 @@ class Server:
             if method == "server/discover":
                 self.era(params)         # проверит версию, если клиент её прислал
                 return _result(rid, {"supportedVersions": SUPPORTED, "capabilities": self.capabilities(),
-                                     "instructions": INSTRUCTIONS}, modern=True, cacheable=True)
+                                     "instructions": instructions()}, modern=True, cacheable=True)
             modern, _ = self.era(params)
             if method == "ping":
                 return _result(rid, {}, modern)
             if method == "tools/list":
-                return _result(rid, {"tools": TOOLS}, modern, cacheable=True)
+                return _result(rid, {"tools": listed_tools()}, modern, cacheable=True)
             if method == "tools/call":
                 name = params.get("name")
                 # По обработчикам, а не по TOOL_NAMES: tt_work добавляется к TOOLS позже, чем считался TOOL_NAMES.
@@ -445,7 +472,7 @@ class Server:
         # Наследные правила: поддерживаем версию клиента — отвечаем ей же, иначе своей последней.
         self.legacy_version = want if want in LEGACY_VERSIONS else LEGACY_VERSIONS[0]
         return {"protocolVersion": self.legacy_version, "capabilities": self.capabilities(),
-                "serverInfo": SERVER_INFO, "instructions": INSTRUCTIONS}
+                "serverInfo": SERVER_INFO, "instructions": instructions()}
 
 
 def _result(rid, result, modern, cacheable=False):

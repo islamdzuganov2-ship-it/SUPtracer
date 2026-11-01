@@ -359,9 +359,11 @@ class PipelineTests(DataCase):
         self.assertTrue(r['accepted'], r)
         self.assertEqual(self.task()['pipeline']['contract_group'], 'экспорт')
         toc = w.action(dict(op='doc', ref=self.ref, path=rel))
-        self.assertIn('Риск', [x['title'] for x in toc['sections']])
+        self.assertTrue(any(' Риск' in line and 'стр.' in line for line in toc['index']), toc)
         sec = w.action(dict(op='doc', ref=self.ref, path=rel, section='риск'))
         self.assertTrue(sec['text'].startswith('## Риск'))
+        num = next(line.split()[0] for line in toc['index'] if ' Риск' in line)
+        self.assertEqual(w.action(dict(op='doc', ref=self.ref, path=rel, section=num))['text'], sec['text'])   # по номеру указателя
         self.assertNotIn('## Проблема', sec['text'])
         with self.assertRaisesRegex(ValueError, 'Есть:'):
             w.action(dict(op='doc', ref=self.ref, path=rel, section='нет такого'))
@@ -370,7 +372,7 @@ class PipelineTests(DataCase):
         sa = self.run_of('system_analyst')
         up = w.action(dict(op='packet', ref=self.ref, run=sa['id']))['upstream']
         brd = next(u for u in up if u['path'] == rel)
-        self.assertIn('Риск', brd['sections']); self.assertGreater(brd['tokens'], 100)
+        self.assertTrue(any(' Риск' in line for line in brd['index'])); self.assertGreater(brd['tokens'], 100)
 
     # --- рецепты Решалы (TT-88)
 
@@ -557,7 +559,7 @@ class PipelineTests(DataCase):
         for role in ('product_owner', 'solution_architect', 'teamlead', 'resolver'):          # старший класс — только сложным
             r = orchestra.role_route(hard, role, 'claude')
             self.assertEqual((w.model_entry(r['model'])['tier'], r['effort']), (3, 'xhigh'), role)
-        self.assertGreater(orchestra.role_route(hard, 'product_owner', 'claude')['budget_usd'], po['budget_usd'])
+        self.assertGreater(orchestra.role_route(hard, 'product_owner', 'claude')['budget_tokens'], po['budget_tokens'])
         self.assertIn('Product Owner', po['reason'])
         dev = orchestra.role_route(t, 'developer', orchestra.role_agent(s, t, 'developer'))
         self.assertEqual(dev['provider'], 'codex')

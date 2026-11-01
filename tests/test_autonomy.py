@@ -87,7 +87,7 @@ class AutonomyTests(DataCase):
     def test_step_mode_only_marks_closed_window(self):
         self.launched()
         with mock.patch.object(launcher, 'alive', return_value=False), mock.patch.object(serve, 'open_session') as op:
-            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[]))
+            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[], relayed=[]))
         op.assert_not_called()
         self.assertIn('закрыто', w.state()['runs'][0]['launch_error'])
         self.assertEqual(w.open_sessions(w.state()['runs']), 0)           # закрытое окно место не занимает

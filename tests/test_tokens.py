@@ -55,13 +55,16 @@ class ReadGuardTests(unittest.TestCase):
                                       tool_input=dict(file_path=str(path), **extra)))
 
     def test_repeat_full_read_of_unchanged_file_is_denied(self):
-        f = Path(self.tmp) / 'a.py'; f.write_text('print(1)\n', encoding='utf-8')
+        small = Path(self.tmp) / 'b.py'; small.write_text('print(1)\n', encoding='utf-8')
+        self.assertIsNone(self.read(small)); self.assertIsNone(self.read(small))   # мелкий повтор дешевле отказа
+        body = 'x = 1\n' * 2000
+        f = Path(self.tmp) / 'a.py'; f.write_text(body + 'print(1)\n', encoding='utf-8')
         self.assertIsNone(self.read(f))
         out = self.read(f)
         self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('уже прочитан', out['hookSpecificOutput']['permissionDecisionReason'])
         self.assertIsNone(self.read(f, offset=1, limit=5))           # фрагмент — можно
-        time.sleep(0.01); f.write_text('print(2)\n', encoding='utf-8')
+        time.sleep(0.01); f.write_text(body + 'print(2)\n', encoding='utf-8')
         self.assertIsNone(self.read(f))                              # файл изменился — можно
         st = read_guard.load('S1'); self.assertEqual(st['denied'], 1); self.assertGreater(st['saved_tokens'], 0)
 

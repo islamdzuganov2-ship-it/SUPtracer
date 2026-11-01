@@ -19,7 +19,7 @@ def iso(dt):
 
 class LimitTests(DataCase):
     def setUp(self):
-        super().setUp(); self.projects()
+        DataCase.setUp(self); self.projects()   # общий с RelayTests
         (Path(self.data)/'memory').mkdir(exist_ok=True)
         w.save('memory/index.json', {'records': [{'id': 'request', 'project': 'alpha-api'}]})
         self.home = Path(self.tmp)/'home'
@@ -33,7 +33,7 @@ class LimitTests(DataCase):
         w.action(dict(op='settings', changes=dict(failover=False)))
 
     def tearDown(self):
-        self.env.stop(); super().tearDown()
+        self.env.stop(); DataCase.tearDown(self)
 
     def claude_log(self, sid, rows):
         path = self.home/'claude'/'projects'/'C--work'/(sid + '.jsonl')
@@ -232,5 +232,97 @@ class LimitTests(DataCase):
         path = self.claude_log('sess-1', [dict(type='user', timestamp=iso(datetime.now(timezone.utc)))])
         s = w.state(); s['runs'][0]['launch']['pid'] = 999999; s['runs'][0]['launch']['at'] = s['runs'][0]['launched_at'] = '2026-01-01T00:00:00+00:00'; w.save('workflow.json', s)
         with mock.patch.object(launcher, 'alive', return_value=False), mock.patch.object(serve, 'open_session') as op:
-            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[]))           # журнал свежий — сессия жива
+            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[], relayed=[]))   # журнал свежий — сессия жива
         op.assert_not_called()
+
+
+class RelayTests(DataCase):
+    """Эстафета (TT-91): контекст сессии роли перерос потолок — свежая сессия с точки остановки."""
+    claude_log = LimitTests.claude_log
+    launched_run = LimitTests.launched_run
+    tearDown = LimitTests.tearDown
+
+    def setUp(self):
+        LimitTests.setUp(self)
+        serve._auto_attempts.clear()            # отметки «уже пробовали» живут в модуле между тестами
+
+    def usage_row(self, ctx, text='Сделан раздел FR, дальше API'):
+        return dict(type='assistant', requestId='r%d' % ctx, timestamp=iso(datetime.now(timezone.utc)),
+                    message=dict(model='claude-opus-5-5', content=[dict(type='text', text=text)],
+                                 usage=dict(input_tokens=1, cache_creation_input_tokens=100, cache_read_input_tokens=ctx, output_tokens=5)))
+
+    def test_agent_relay_opens_fresh_session_with_checkpoint(self):
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
+        r = w.action(dict(op='pause', reason='context', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                          checkpoint='SRS: разделы 1–4 готовы, осталось API; читать docs/tasks/AL-03/BRD.md раздел 3'))
+        self.assertTrue(r['relay']['relay']); self.assertIsNone(r['relay']['session'])
+        self.assertEqual([x['id'] for x in w.resume_due()], ['RUN-1'])                  # сразу, без ожидания
+        with mock.patch.object(launcher, 'launch', return_value=dict(pid=9, exe='claude.exe', session='sess-2')) as launch,              mock.patch.object(limits, 'detect', return_value=None):
+            self.assertEqual(serve.limits_once()['resumed'], ['RUN-1'])
+        self.assertIsNone(launch.call_args.kwargs['resume'])                            # новая сессия, не --resume
+        prompt = launch.call_args.args[3]
+        self.assertIn('Эстафета', prompt); self.assertIn('BRD.md раздел 3', prompt); self.assertIn('claim не нужен', prompt)
+        run = w.state()['runs'][0]
+        self.assertTrue(run['pauses'][-1]['relay']); self.assertEqual(w.relays(run), 1)
+        self.assertIn('Эстафета', w.task_for(self.ref)['status_note'])
+
+    def test_relays_are_limited_per_run(self):
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
+        s = w.state(); s['runs'][0]['pauses'] = [dict(relay=True)] * w.MAX_RELAYS; w.save('workflow.json', s)
+        with self.assertRaisesRegex(ValueError, 'Эстафет'):
+            w.action(dict(op='pause', reason='context', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                          checkpoint='Сделано много, осталось немного, следующий шаг — тест'))
+        with self.assertRaisesRegex(ValueError, 'reason'):
+            w.action(dict(op='pause', reason='устал', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                          checkpoint='Сделано много, осталось немного, следующий шаг — тест'))
+
+    def test_server_relays_ended_session_above_ceiling(self):
+        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)))
+        self.launched_run()
+        path = self.claude_log('sess-1', [self.usage_row(20000), self.usage_row(120000, 'Готовы FR-1…FR-9, осталось API')])
+        os.utime(path, (1, 1))                                                          # журнал давно не пишется
+        s = w.state(); r0 = s['runs'][0]
+        r0.update(role='system_analyst', stage='analysis'); r0['launch'].update(pid=999999, at='2026-01-01T00:00:00+00:00')
+        r0['launched_at'] = '2026-01-01T00:00:00+00:00'; w.save('workflow.json', s)
+        with mock.patch.object(launcher, 'alive', return_value=False), mock.patch.object(serve, 'open_session') as op:
+            self.assertEqual(serve.watch_once()['relayed'], ['RUN-1'])
+        op.assert_not_called()
+        pz = w.state()['runs'][0]['paused']
+        self.assertEqual((pz['by'], pz['relay']), ('server', True)); self.assertIn('осталось API', pz['checkpoint'])
+        w.action(dict(op='settings', changes=dict(context_ceiling=0)))                  # выключено — эстафет нет
+        self.assertFalse(serve.relay_due(dict(w.state()['runs'][0], paused=None)))
+
+    def test_ceiling_setting_is_validated(self):
+        w.action(dict(op='settings', changes=dict(context_ceiling=120000)))
+        self.assertEqual(w.settings()['context_ceiling'], 120000)
+        with self.assertRaises(ValueError):
+            w.action(dict(op='settings', changes=dict(context_ceiling=1000)))
+
+    def test_hook_reminds_once_per_level(self):
+        import read_guard
+        path = self.claude_log('sess-h', [self.usage_row(95000)])
+        env = {'TASKTREKER_CEILING': '90000', 'TASKTREKER_READS': str(Path(self.tmp) / 'reads'),
+               'TASKTREKER_RELAY': 'tt_work op=pause reason=context ref=a run=b worker=c checkpoint="…"'}
+        hit = lambda: read_guard.decide(dict(hook_event_name='PostToolUse', session_id='H', transcript_path=str(path)))
+        with mock.patch.dict(os.environ, env):
+            note = hit()['hookSpecificOutput']
+            self.assertEqual(note['hookEventName'], 'PostToolUse')
+            self.assertIn('95 тыс', note['additionalContext']); self.assertIn('reason=context ref=a', note['additionalContext'])
+            self.assertIsNone(hit())                                                    # второй раз — молчит
+            self.claude_log('sess-h', [self.usage_row(130000)])
+            self.assertIsNotNone(hit())                                                 # 130% — напоминает снова
+        self.assertIsNone(hit())                                                        # без потолка — молчит
+
+    def test_profile_sums_sessions_of_a_run(self):
+        import tokens
+        self.launched_run()
+        self.claude_log('sess-1', [self.usage_row(15000), self.usage_row(95000)])
+        self.claude_log('sess-2', [self.usage_row(16000)])
+        s = w.state(); r0 = s['runs'][0]
+        r0['launches'] = [dict(agent='claude', session='sess-1', at=r0['launched_at']), dict(agent='claude', session='sess-2')]
+        r0['launch']['session'] = 'sess-2'; w.save('workflow.json', s)
+        p = tokens.profile(w.state()['runs'][0])
+        self.assertEqual((p['sessions'], p['turns'], p['start'], p['peak']), (2, 3, 15101, 95101))
+

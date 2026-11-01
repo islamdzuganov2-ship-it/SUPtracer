@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 BIG_TOKENS = 2000          # документ крупнее — только по указателю, если он не свой
+REPEAT_BYTES = 8000        # повтор мелкого файла дешевле лишнего хода с отказом: отказ — только крупным
 TEXT = {'.md', '.txt', '.py', '.dart', '.js', '.ts', '.tsx', '.json', '.yaml', '.yml', '.toml', '.ps1', '.sql', '.html', '.css'}
 
 
@@ -59,8 +60,33 @@ def deny(reason):
     return dict(hookSpecificOutput=dict(hookEventName='PreToolUse', permissionDecision='deny', permissionDecisionReason=reason))
 
 
+def ceiling_note(data):
+    """PostToolUse (TT-91): контекст сессии перерос потолок — один раз (и повторно на 130%) сказать роли
+    сдать точку остановки для эстафеты. Контекст — из хвоста журнала сессии, без чтения всего файла."""
+    ceiling = int(os.environ.get('TASKTREKER_CEILING') or 0)
+    path = data.get('transcript_path')
+    if not ceiling or not path or not os.path.isfile(path):
+        return None
+    import tokens
+    ctx = tokens._last_usage_claude(path)
+    session = data.get('session_id'); st = load(session); warned = st.get('ceiling_warned', 0)
+    level = 2 if ctx >= ceiling * 1.3 else 1 if ctx >= ceiling else 0
+    if level <= warned:
+        return None
+    st['ceiling_warned'] = level
+    save(session, st)
+    cmd = os.environ.get('TASKTREKER_RELAY') or 'tt_work op=pause reason=context checkpoint="…"'
+    return dict(hookSpecificOutput=dict(hookEventName='PostToolUse', additionalContext=(
+        'Контекст этой сессии — %d тыс. токенов, потолок %d тыс.: каждый следующий ход перечитывает его целиком. '
+        'Если этап почти сдан — сдай handoff. Иначе доведи текущий шаг, закоммить и вызови %s '
+        '(checkpoint: что сделано, что осталось, следующий шаг, нужные пути и разделы), затем остановись — '
+        'сервер откроет свежую сессию этой роли с твоей точкой остановки.' % (ctx // 1000, ceiling // 1000, cmd))))
+
+
 def decide(data):
     """Ответ хука (dict) или None — чтение разрешено."""
+    if data.get('hook_event_name') == 'PostToolUse':
+        return ceiling_note(data)
     if data.get('hook_event_name') == 'SessionStart':
         if data.get('source') == 'compact':
             st = load(data.get('session_id')); st['files'] = {}
@@ -80,8 +106,8 @@ def decide(data):
     info = p.stat(); sig = [info.st_mtime_ns, info.st_size]
     session = data.get('session_id'); st = load(session)
     key = os.path.normcase(str(p.resolve()))
-    if st['files'].get(key) == sig:
-        st['denied'] += 1; st['saved_tokens'] += info.st_size // 4
+    if st['files'].get(key) == sig and info.st_size >= REPEAT_BYTES:
+        st['denied'] += 1; st['saved_tokens'] += info.st_size * 10 // 25   # ~2.5 байта на токен (TT-93)
         save(session, st)
         return deny('Файл %s уже прочитан в этой сессии и с тех пор не менялся: его текст есть в контексте выше. '
                     'Нужен фрагмент — Read с offset/limit.' % p.name)

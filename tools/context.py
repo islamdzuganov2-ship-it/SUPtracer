@@ -60,6 +60,20 @@ def money(n):
     return "$" + fmt(round(n or 0))
 
 
+def tok(n):
+    """Токены коротко: 445 млн, 1.04 млрд, 12 тыс. — счёт в токенах, а не в долларах (TT-94)."""
+    n = int(n or 0)
+    for div, unit in ((1e9, "млрд"), (1e6, "млн"), (1e3, "тыс.")):
+        if n >= div:
+            v = n / div
+            return ("%.2f" % v if v < 10 else "%.0f" % v).rstrip("0").rstrip(".") + " " + unit
+    return str(n)
+
+
+def spent_tokens(u):
+    return (u or {}).get("billable") or sum((u or {}).get(k, 0) for k in ("input", "output", "cache_write", "cache_read"))
+
+
 def usage_for(key, projects, usage):
     path = (projects[key].get("path") or "").lower().replace("\\", "/").rstrip("/")
     base = os.path.basename(path)
@@ -181,8 +195,8 @@ def _project_block(k, P, U, R, E, full):
         ("  цель: %s | готовность не оценена" % p.get('goal','')) if p.get('readiness',{}).get('assessed') is False else "  цель: %s | готовность ф%s%% э%s%% д%s%% т%s%% иб%s%%" % (
             p.get("goal", ""), rd.get("functional", "—"), rd.get("production", "—"),
             rd.get("docs", "—"), rd.get("tests", "—"), rd.get("security", "—")),
-        "  потрачено %s · осталось %s на %d задач%s%s" % (
-            money(u.get("usd", 0)), money(e.get("remaining_usd", 0)), len(open_items),
+        "  потрачено %s токенов · осталось ~%s на %d задач%s%s" % (
+            tok(spent_tokens(u)), tok(e.get("remaining_tokens", 0)), len(open_items),
             (" · коммитов %s" % g.get('project_commits', g["commits"])) if g.get("commits") is not None else "",
             " (оценка старше бэклога — refresh)" if stale else ""),
     ]
@@ -208,9 +222,9 @@ def _one_line(k, P, U, E):
     p, e = P[k], E.get(k, {})
     rd = p.get("readiness") or {}
     left = [b for b in e.get("items", []) if not b.get("closed")]
-    return "  %s [%s] ф%s%% иб%s%% · осталось %s, задач %d" % (
+    return "  %s [%s] ф%s%% иб%s%% · осталось ~%s токенов, задач %d" % (
         p.get("name", k)[:28], k, rd.get("functional", "—"), rd.get("security", "—"),
-        money(e.get("remaining_usd", 0)), len(left))
+        tok(e.get("remaining_tokens", 0)), len(left))
 
 
 
@@ -291,8 +305,6 @@ def build(budget=4000, project=None, with_memory=True, focus=None, hook=False):
     put("Перед реализацией: tt_work queue → plan/next → take (agent — свой ИИ); чужую метку claimed_by не трогать, heartbeat пока работаешь, finish только с проверками. CLI: pm.py work next --agent claude.")
     for line in _queued(focus):
         put(line)
-    if any(u.get("cost_complete") is False for u in U.values()):
-        put("Стоимость части расхода неизвестна: суммы в $ показывают только оценённую часть, не полную цену.")
     put("")
 
     al = alerts(P, U, R, E, C, IN, keys, focus)
@@ -314,13 +326,13 @@ def build(budget=4000, project=None, with_memory=True, focus=None, hook=False):
                 if not put(_one_line(k, P, U, E)):
                     break
     else:
-        spent = sum((usage_for(k, P, U) or {}).get("usd", 0) for k in keys)
-        rem = sum(E.get(k, {}).get("remaining_usd", 0) for k in keys)
+        spent = sum(spent_tokens(usage_for(k, P, U)) for k in keys)
+        rem = sum(E.get(k, {}).get("remaining_tokens", 0) for k in keys)
         st = T.get("stats") or {}
-        put("ПОРТФЕЛЬ: проектов %d · потрачено %s · осталось %s · дерево работ %d узлов, глубина %d" % (
-            len(keys), money(spent), money(rem), st.get("nodes", 0), st.get("depth", 0)))
+        put("ПОРТФЕЛЬ: проектов %d · потрачено %s токенов · осталось ~%s · дерево работ %d узлов, глубина %d" % (
+            len(keys), tok(spent), tok(rem), st.get("nodes", 0), st.get("depth", 0)))
         order = sorted(keys, key=lambda k: (P[k].get("tier", 9),
-                                            -((usage_for(k, P, U) or {}).get("usd", 0))))
+                                            -spent_tokens(usage_for(k, P, U))))
         for k in order:
             put("")
             for ln in _project_block(k, P, U, R, E, full=False):
@@ -356,6 +368,8 @@ def build_json(project=None):
         "projects": {k: {
             "name": P[k].get("name"), "status": P[k].get("status"), "goal": P[k].get("goal"),
             "readiness": P[k].get("readiness", {}),
+            "spent_tokens": spent_tokens(usage_for(k, P, U)),
+            "remaining_tokens": E.get(k, {}).get("remaining_tokens", 0),
             "spent_usd": (usage_for(k, P, U) or {}).get("usd", 0),
             "remaining_usd": E.get(k, {}).get("remaining_usd", 0),
             "backlog": [{"id": b.get("id"), "title": b.get("title"), "size": b.get("size"),

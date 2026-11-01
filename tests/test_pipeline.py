@@ -165,6 +165,24 @@ class PipelineTests(DataCase):
         for k in ('idea', 'handoff', 'handoff_rejected', 'gate', 'stage_passed', 'approved', 'done'):
             self.assertIn(k, kinds)
 
+    def test_task_index_committed_and_used_by_packet(self):
+        self.ref = self.idea()
+        r = self.do_role('product_owner', 'idea', acceptance=['CSV содержит все проекты', 'Файл открывается в Excel'],
+                                     needs=dict(design=False, marketing=False, reason='Только серверная выгрузка без интерфейса')); self.assertTrue(r['accepted'], r)
+        self.assertTrue(self.do_role('system_analyst', 'analysis')['accepted'])
+        t = self.task(); wt = t['pipeline']['worktree']; rel = P.index_path(t['id'])
+        text = git('show', '%s:%s' % (wt['branch'], rel), cwd=self.repo)
+        self.assertIn('## Реестр требований', text)
+        self.assertRegex(text, r'\| BR-1 \| .*BR-1.* \| BRD\.md §\d+, стр\. \d+ \|')
+        self.assertRegex(text, r'\| SR-1 \| .* \| SRS\.md §\d+')
+        self.assertIn('### %s' % P.art_path(t['id'], P.ROLES['system_analyst']['artifacts'][0]['path']), text)
+        self.assertEqual(git('status', '--porcelain', cwd=wt['path']).strip(), '')           # закоммичен
+        packet = w.action(dict(op='packet', ref=self.ref, run=self.run_of('solution_architect')['id']))
+        self.assertEqual(packet['task_index'], rel)
+        self.assertTrue(all('index' not in u for u in packet['upstream']))                          # указатель — в INDEX.md
+        sec = w.action(dict(op='doc', ref=self.ref, code='SR-1'))                                   # код без пути
+        self.assertTrue(sec['path'].endswith('SRS.md')); self.assertIn('SR-1', sec['text'])
+
     def test_reviewer_returns_to_developer_with_review(self):
         self.ref = self.idea()
         self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
@@ -370,9 +388,11 @@ class PipelineTests(DataCase):
         with self.assertRaisesRegex(ValueError, 'path'):
             w.action(dict(op='doc', ref=self.ref, path='../secret.txt'))
         sa = self.run_of('system_analyst')
-        up = w.action(dict(op='packet', ref=self.ref, run=sa['id']))['upstream']
-        brd = next(u for u in up if u['path'] == rel)
-        self.assertTrue(any(' Риск' in line for line in brd['index'])); self.assertGreater(brd['tokens'], 100)
+        pk = w.action(dict(op='packet', ref=self.ref, run=sa['id']))
+        brd = next(u for u in pk['upstream'] if u['path'] == rel)
+        self.assertNotIn('index', brd); self.assertGreater(brd['tokens'], 100)      # указатель — в INDEX.md, не в паспорте
+        index = (Path(self.task()['pipeline']['worktree']['path']) / pk['task_index']).read_text(encoding='utf-8')
+        self.assertIn(rel, index); self.assertIn(' Риск', index)
 
     # --- рецепты Решалы (TT-88)
 
@@ -594,5 +614,5 @@ class PipelineTests(DataCase):
                          needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
         self.assertTrue(r['accepted'], r)
         self.assertEqual(git('status', '--porcelain', cwd=wt), '')
-        self.assertIn('Автокоммит сервера', git('log', '-1', '--format=%B', cwd=wt))
+        self.assertIn('Автокоммит сервера', git('log', '-2', '--format=%B', cwd=wt))   # последним — INDEX.md
         self.assertTrue(any(e['kind'] == 'autocommit' for e in self.task()['pipeline']['journal']))

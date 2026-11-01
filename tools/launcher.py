@@ -104,6 +104,7 @@ def lean(provider, role, research=True, own=()):
     mcp.write_text(json.dumps({'mcpServers': {'tasktreker': dict(type='stdio', command='py',
                    args=['-3', (tools_dir / 'mcp_server.py').as_posix()], env={'TASKTREKER_MCP_ROLE': '1'})}}), encoding='utf-8')
     conf = dict(hooks=dict(PreToolUse=[dict(matcher='Read', hooks=[hook('read_guard.py')])],
+                           PostToolUse=[dict(matcher='*', hooks=[hook('read_guard.py')])],
                            SessionStart=[dict(matcher='compact', hooks=[hook('read_guard.py')])]))
     auto = _user_auto_mode()
     if auto:

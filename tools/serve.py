@@ -171,6 +171,8 @@ def resume_session(run, nudge=False):
     session = (run.get("paused") or {}).get("session") or launch.get("session")
     if not session and agent == "codex":
         session = limits.session_of(run)[0]
+    if (run.get("paused") or {}).get("relay"):
+        session = None                 # эстафета: новая сессия, а не продолжение разросшейся
     route = (run.get("packet") or {}).get("route") or {}
     if run.get("role"):
         import orchestra
@@ -245,7 +247,8 @@ def open_session(agent, route, prompt, cwd, run, edits=False, resume=None):
 
 
 def lean_args(agent, run):
-    """Лёгкий старт для сессии роли конвейера (Л1): свои артефакты роли — сторожу чтений, веб — только при исследовании."""
+    """Лёгкий старт для сессии роли конвейера (Л1): свои артефакты роли — сторожу чтений, веб — только при исследовании,
+    потолок контекста и команда эстафеты — хуку сессии (TT-91)."""
     if not run.get("role"):
         return [], {}
     import workflow, launcher
@@ -254,7 +257,12 @@ def lean_args(agent, run):
     pipe = t.get("pipeline") or {}
     own = [P.art_path(t["id"], a["path"]) for a in P.ROLES[run["role"]]["artifacts"]] if t.get("id") else []
     research = (pipe.get("needs") or {}).get("research", True) is not False
-    return launcher.lean(agent, run["role"], research=research, own=own)
+    extra, env = launcher.lean(agent, run["role"], research=research, own=own)
+    if extra or env:
+        env = dict(env, TASKTREKER_CEILING=str(workflow.settings().get("context_ceiling", workflow.CONTEXT_CEILING)),
+                   TASKTREKER_RELAY='tt_work op=pause reason=context ref=%s run=%s worker=%s checkpoint="…"'
+                   % (run["ref"], run["id"], run.get("worker") or workflow.worker_id(run, agent)))
+    return extra, env
 
 
 def launch_info(opened, cwd, agent, **extra):
@@ -340,7 +348,7 @@ def watch_once():
     Полная автономия: та же сессия продолжается с напоминанием (до двух раз), дальше — эскалация
     тимлиду. Пошаговое согласие: окно закрыл владелец — только отметка на карточке."""
     import workflow, launcher
-    nudged, lost = [], []
+    nudged, lost, relayed = [], [], []
     full = workflow.autonomous()
     for r in workflow.state()["runs"]:
         launch = r.get("launch") or {}
@@ -355,6 +363,8 @@ def watch_once():
             if not r.get("launch_error"):
                 workflow.mark_launch_error(r["ref"], r["id"], "Окно сессии закрыто, этап не сдан — откройте сессию снова")
             continue
+        if relay_due(r):
+            relayed.append(r["id"]); continue        # свежую сессию откроет limits_once на этом же проходе
         if r.get("nudges", 0) >= MAX_NUDGES:
             workflow.session_lost(r["ref"], r["id"], "сессия %d раза заканчивалась без сдачи этапа" % (MAX_NUDGES + 1))
             lost.append(r["id"]); continue
@@ -363,7 +373,23 @@ def watch_once():
             nudged.append(r["id"])
         except Exception as e:   # noqa: BLE001
             workflow.mark_launch_error(r["ref"], r["id"], "Продолжение сессии: %s" % e)
-    return dict(nudged=nudged, lost=lost)
+    return dict(nudged=nudged, lost=lost, relayed=relayed)
+
+
+def relay_due(run):
+    """Сессия роли закончилась без сдачи, а её контекст выше потолка: вместо продолжения той же сессии —
+    эстафета с точкой остановки, собранной сервером по последним репликам (TT-91)."""
+    import workflow, tokens
+    ceiling = workflow.settings().get("context_ceiling", workflow.CONTEXT_CEILING)
+    if not run.get("role") or not ceiling:
+        return False
+    ctx = tokens.context_now(run)
+    if ctx < ceiling:
+        return False
+    words = tokens.last_words(run)
+    checkpoint = ("Точку остановки собрал сервер: прежняя сессия закончилась без сдачи этапа при контексте %d тыс. токенов. "
+                  "Сверься с git log ветки задачи и паспортом. Последнее, что писала сессия: %s" % (ctx // 1000, words or "—"))
+    return workflow.relay(run["ref"], run["id"], checkpoint, "server") is not None
 
 
 def launch_role(t, run, req):

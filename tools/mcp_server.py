@@ -333,7 +333,7 @@ TOOLS.append({"name": "tt_work", "title": "Планирование и испо�
 ROLE_WORK = ("Конвейер TaskTreker для роли. claim (ref, run, worker, model); packet (ref, run) — паспорт роли, запрашивай один раз; "
              "doc (ref, path) — указатель документа: разделы, вес, коды требований; doc (ref, path, section|code) — один раздел; "
              "heartbeat; handoff (ref, run, worker, summary, items {id: {status: done|na, evidence}}); return (to_stage, defects); "
-             "escalate (reason, tried, need); pause (checkpoint); gate — тимлид; resolve — Решала. Аргументы — в задании и паспорте.")
+             "escalate (reason, tried, need); pause (checkpoint; reason=context — эстафета: свежая сессия с точки остановки); gate — тимлид; resolve — Решала. Аргументы — в задании и паспорте.")
 ROLE_INSTRUCTIONS = ("TaskTreker: ты в сессии роли конвейера. Работай через tt_work по заданию; документы читай указателем и разделами (op=doc), "
                      "прочитанное не перечитывай; этап сдавай op=handoff.")
 

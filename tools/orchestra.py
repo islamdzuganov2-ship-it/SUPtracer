@@ -228,6 +228,33 @@ def _autocommit(s, t, pipe, run, label):
     return sha
 
 
+def write_index(s, t, pipe, run):
+    """Указатель задачи в ветку (TT-92): после принятой сдачи этапа идеи или анализа сервер собирает
+    docs/tasks/<id>/INDEX.md из закоммиченных артефактов и коммитит только его."""
+    wt = (pipe.get('worktree') or {}).get('path')
+    if not wt or not os.path.isdir(wt):
+        return None
+    text = P.task_index(ctx_for(t, pipe))
+    rel = P.index_path(t['id'])
+    f = os.path.join(wt, rel)
+    try:
+        with open(f, encoding='utf-8') as fh:
+            if fh.read() == text:
+                return None
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    with open(f, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(text)
+    P._git(['add', '--', rel], wt)
+    c = P._git(['-c', 'user.name=TaskTreker', '-c', 'user.email=tasktreker@localhost', 'commit', '-q', '-m',
+                'INDEX.md: указатель задачи %s (сервер TaskTreker)' % t['id'], '--', rel], wt)
+    if c.returncode == 0:
+        journal(s, pipe, t['ref'], 'index', 'Сервер обновил указатель задачи %s' % rel, run.get('role'), run.get('stage'))
+        return rel
+    return None
+
+
 def materialize(s, t):
     """Рабочая копия задачи — в момент, когда роль её берёт. Возвращает правку pipeline или None."""
     pipe = t.get('pipeline')
@@ -574,6 +601,8 @@ def op_handoff(s, req, t, at):
         elif role == 'qa' and handoff.get('signoff') and d['status'] == 'fixed':
             d.update(status='verified', verified_at=at.isoformat(), verified_by=run.get('agent'))
     heavy = P.pending_heavy(results)
+    if stage in ('idea', 'analysis'):
+        write_index(s, dict(t, **patch), pipe, run)
     run.update(status='done', finished_at=at.isoformat(), evidence=req['summary'].strip(), tokens=req.get('tokens'),
                handoff=handoff)
     entry.update(state='checking' if heavy else 'done', handoff=handoff, at=at.isoformat(), feedback=None)
@@ -1010,12 +1039,6 @@ def test_env(t):
         return dict(error=str(e)[:200])
 
 
-READ_RULE = ('Читай по указателю: upstream и project_docs несут разделы, вес в токенах, строки и коды требований. '
-             'Нужный раздел — tt_work op=doc ref=<задача> path=<путь> section=<номер> или code=<FR-3>, либо Read с offset/limit '
-             'по строкам из указателя. Документ целиком — только свой или короче 2 тыс. токенов; прочитанное не перечитывай: '
-             'всё прочитанное едет в каждом следующем ходе сессии.')
-
-
 def upstream_digest(t, pipe, stage, toc=True, ctx=None):
     """Артефакты предыдущих ролей: путь, размер и оглавление — чтобы читать разделами, а не целиком (Б1)."""
     ctx = ctx or ctx_for(t, pipe); out = []
@@ -1024,6 +1047,7 @@ def upstream_digest(t, pipe, stage, toc=True, ctx=None):
         # Один список файлов ветки вместо git show на каждый ещё не созданный артефакт.
         ls = P._git(['ls-tree', '-r', '--name-only', ctx.branch, P.art_path(t['id'], P.ART).rstrip('/') + '/'], ctx.repo)
         have = set(ls.stdout.splitlines()) if ls.returncode == 0 else None
+    ctx.task_index = P.index_path(t['id']) if have and P.index_path(t['id']) in have else None
     for st in P.ORDER[:P.ORDER.index(stage) + 1 if stage in P.ORDER else 0]:
         for r in P.stage_roles(st, pipe.get('needs')):
             for a in P.ROLES[r]['artifacts']:
@@ -1031,7 +1055,9 @@ def upstream_digest(t, pipe, stage, toc=True, ctx=None):
                 e = dict(role=P.ROLES[r]['title'], path=path, optional=bool(a.get('optional')))
                 text = None if a.get('dir') or not toc or (have is not None and path not in have) else ctx.artifact(a)
                 if text is not None:
-                    e.update(tokens=P.tokens(text), index=P.index_lines(P.doc_index(text), 30))
+                    e['tokens'] = P.tokens(text)
+                    if not ctx.task_index:                  # есть INDEX.md — указатель там, не дублируем в паспорте
+                        e['index'] = P.index_lines(P.doc_index(text), 15, max_level=2)
                 elif toc and not a.get('dir'):
                     e['missing'] = True
                 out.append(e)
@@ -1057,6 +1083,8 @@ def op_doc(s, req, t, at):
     """Раздел документа ветки задачи: оглавление или текст одного раздела (Б1)."""
     pipe = t.get('pipeline') or {}
     path = str(req.get('path') or '').replace('\\', '/').lstrip('/')
+    if not path and req.get('code') and P.CODE.fullmatch(str(req['code']).strip().upper()):
+        path = P.source_path(t['id'], str(req['code']).strip().upper())   # код без пути — в своём документе
     if not path or '..' in path.split('/'):
         raise ValueError('path: путь документа в рабочей копии задачи, например docs/tasks/<id>/SRS.md')
     text = ctx_for(t, pipe).read(path)
@@ -1096,7 +1124,8 @@ def role_packet(t, run, agent, toc=True):
                   artifacts=[dict(path=P.art_path(t['id'], a['path']), sections=a['sections'], min_bytes=a['min_bytes'],
                                   optional=bool(a.get('optional'))) for a in [P.effective(x, ctx) for x in spec['artifacts']]],
                   dod=[dict(id=i['id'], text=i['text'], kind=i['kind'], allow_na=bool(i.get('allow_na'))) for i in dod],
-                  upstream=arts, project_docs=project_docs(ctx) if toc else None, read_rule=READ_RULE, needs=pipe.get('needs'), feedback=entry.get('feedback'),
+                  upstream=arts, task_index=getattr(ctx, 'task_index', None), project_docs=project_docs(ctx) if toc else None,
+                  needs=pipe.get('needs'), feedback=entry.get('feedback'),
                   resume=((run.get('pauses') or [{}])[-1].get('checkpoint') or None),
                   defects=[{k: d.get(k) for k in ('id', 'title', 'severity', 'level', 'test', 'found_by', 'status')}
                            for d in pipe.get('defects') or [] if d['status'] in ('open', 'fixed')],
@@ -1134,6 +1163,18 @@ def role_packet(t, run, agent, toc=True):
     return packet
 
 
+def read_rule(t, route):
+    """Правило чтения в задании роли (TT-94): одно для Claude и Codex. У Codex нет сторожа чтений и напоминания
+    о потолке контекста — правило в самом задании, дальше эстафету по потолку делает сервер."""
+    rule = ('Документы задачи: сначала %s/INDEX.md (если есть) — указатель документов и реестр требований '
+            'с местом определения; дальше читай только нужный раздел (Read с offset/limit или tt_work op=doc section=|code=), '
+            'не целиком и не повторно.' % P.art_path(t['id'], P.ART).rstrip('/'))
+    if (route.get('provider') or route.get('agent')) == 'codex':
+        rule += (' Контекст сессии перечитывается каждым ходом: вырос за ~%d тыс. токенов, а этап не сдан — закоммить и '
+                 'tt_work op=pause reason=context checkpoint=… — сервер откроет свежую сессию.' % (w.settings()['context_ceiling'] // 1000))
+    return rule
+
+
 def role_prompt(t, run, route, worker=None):
     if run.get('role') == 'resolver':
         return resolver_prompt(t, run, route, worker)
@@ -1152,6 +1193,7 @@ def role_prompt(t, run, route, worker=None):
               '3) Сделай работу, закоммить артефакты, затем %s — это уведомление тимлиду. Не принятая передача вернёт список несделанных пунктов.'
               % ('op=gate' if role == 'teamlead' else 'op=handoff'),
               COMMIT_RULE,
+              read_rule(t, route),
               'Проблема, ограничение, нет доступа, противоречие — не жди и не спрашивай владельца: tt_work op=escalate ref=%s run=%s '
               'reason=… tried=… need=… — её разберёт агент «Решала».' % (t['ref'], run['id']),
               w.LIMIT_RULE % (t['ref'], run['id'], worker or '<id этой сессии>'),

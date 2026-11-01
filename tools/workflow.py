@@ -116,6 +116,11 @@ REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна дора�
 MAX_SESSIONS = 4   # окон ИИ, которые сервер досок держит открытыми одновременно
 SESSIONS_PER_AI = 2   # и не больше стольких на каждый ИИ (А7)
 WIP_ANALYSIS = 6   # задач проекта в анализе одновременно; пока лимит занят, PO новые идеи не разбирает (А2)
+# Эстафета (TT-91): контекст сессии роли перерос потолок — свежая сессия с точки остановки. Каждый ход
+# заново читает весь контекст, поэтому сессия на 150 тыс. токенов платит за каждый шаг вдесятеро больше
+# свежей (старт ~15 тыс.). 0 — эстафета выключена.
+CONTEXT_CEILING = 90_000
+MAX_RELAYS = 4     # эстафет на запуск — дальше сессия работает как есть: значит, этап не дробится
 # Режим согласия владельца: step — окна и вопросы на каждом шаге; full — одно согласие на всё:
 # сессии без окон, без вопросов, релиз в main без отдельного «да». В удалённый репозиторий — никогда.
 AUTONOMY = ('step', 'full')
@@ -133,7 +138,8 @@ def settings(s=None):
     return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
                      reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={},
                      max_sessions=MAX_SESSIONS, autonomy='step', failover=True,
-                     sessions_per_ai={p: SESSIONS_PER_AI for p in PROVIDERS}, wip_analysis=WIP_ANALYSIS),
+                     sessions_per_ai={p: SESSIONS_PER_AI for p in PROVIDERS}, wip_analysis=WIP_ANALYSIS,
+                     context_ceiling=CONTEXT_CEILING),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -930,6 +936,35 @@ def pause_patch(s, t, run, event, at, by, checkpoint=None):
         patch['pipeline']=pipe
     return patch
 
+def relays(run):
+    return len([p for p in (run.get('pauses') or []) + [run.get('paused') or {}] if p.get('relay')])
+
+def relay_patch(s, t, run, at, by, checkpoint):
+    """Эстафета (TT-91): пауза с возобновлением сразу и без сессии — сервер откроет новую сессию роли
+    (не --resume) с точкой остановки. Запуск и метка остаются за исполнителем."""
+    run['paused']=dict(reason='context', relay=True, relay_no=relays(run)+1, by=by, at=at.isoformat(),
+                       resume_at=at.isoformat(timespec='seconds'), checkpoint=(checkpoint or '')[:3000], session=None,
+                       old_session=(run.get('launch') or {}).get('session'))
+    patch=dict(status_note='↻ Эстафета: контекст сессии перерос потолок — свежая сессия с точки остановки')
+    if t.get('pipeline'):
+        import orchestra, copy
+        pipe=copy.deepcopy(t['pipeline'])
+        orchestra.journal(s, pipe, t['ref'], 'relay', '%s: эстафета №%d (%s) — свежая сессия; точка остановки: %s' % (
+            run.get('role') or run['id'], run['paused']['relay_no'], 'агент' if by=='agent' else 'сервер по журналу сессии',
+            (checkpoint or '')[:200]), run.get('role'), run.get('stage'))
+        patch['pipeline']=pipe
+    return patch
+
+def relay(ref, run_id, checkpoint, by='server'):
+    """Эстафета по решению сервера: сессия закончилась, а её контекст выше потолка — продолжать её дороже,
+    чем начать свежую. Возвращает паузу или None (не тот запуск, уже на паузе, эстафеты исчерпаны)."""
+    with locked():
+        s=state(); at=now()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status'] in ('queued','running')),None)
+        if not run or run.get('paused') or relays(run)>=MAX_RELAYS: return None
+        write_patches(s, {ref: relay_patch(s, task_for(ref), run, at, by, checkpoint)})
+        save('workflow.json',s); return run['paused']
+
 def note_limit(s, agent, until, at, kind='', ref=None):
     """У ИИ исчерпан лимит токенов до until: новые запуски и передачи его обходят."""
     lim=s.setdefault('provider_limits',{})
@@ -1114,7 +1149,8 @@ def mark_resumed(ref, run_id, info, by='server'):
         if not run: return None
         done=dict(run.pop('paused'), resumed_at=at.isoformat(), resumed_by=by, resumed_session=bool((info or {}).get('resumed')))
         run['pauses']=(run.get('pauses') or [])[-9:]+[done]
-        patch=dict(status_note='Возобновлено после лимита токенов: %s' % (run.get('role') or run.get('phase') or 'исполнение'))
+        patch=dict(status_note='%s: %s' % ('Эстафета — свежая сессия' if done.get('relay') else 'Возобновлено после лимита токенов',
+                                           run.get('role') or run.get('phase') or 'исполнение'))
         if run['status']=='running':
             until=(at+timedelta(minutes=settings(s)['lease_minutes'])).isoformat()
             run.update(lease_until=until, heartbeat_at=at.isoformat())
@@ -1125,8 +1161,9 @@ def mark_resumed(ref, run_id, info, by='server'):
         if t.get('pipeline'):
             import orchestra, copy
             pipe=copy.deepcopy(t['pipeline'])
-            orchestra.journal(s, pipe, ref, 'resumed', '%s: работа возобновлена после лимита токенов (%s)' % (
-                run.get('role') or run['id'], 'та же сессия' if (info or {}).get('resumed') else 'новая сессия' if info else by),
+            orchestra.journal(s, pipe, ref, 'resumed', '%s: работа возобновлена %s (%s)' % (
+                run.get('role') or run['id'], 'эстафетой' if done.get('relay') else 'после лимита токенов',
+                'та же сессия' if (info or {}).get('resumed') else 'новая сессия' if info else by),
                 run.get('role'), run.get('stage'))
             patch['pipeline']=pipe
         write_patches(s, {ref: patch}); save('workflow.json',s)
@@ -1141,7 +1178,9 @@ LIMIT_RULE=('Лимит токенов: если пришло предупреж
 def resume_prompt(t, run):
     """Первая реплика после паузы: та же сессия продолжает, новая — получает точку остановки."""
     pz=run.get('paused') or {}; worker=run.get('worker') or worker_id(run, run.get('agent') or 'claude')
-    lines=['Лимит токенов восстановлен — продолжай задачу TaskTreker %s с места остановки.' % t['ref']]
+    lines=['Эстафета: прежняя сессия этой роли переросла потолок контекста, это новая сессия с пустым контекстом. '
+           'Продолжай задачу TaskTreker %s с точки остановки; читай только нужное — по указателям паспорта.' % t['ref']
+           if pz.get('relay') else 'Лимит токенов восстановлен — продолжай задачу TaskTreker %s с места остановки.' % t['ref']]
     if pz.get('checkpoint'): lines.append('Точка остановки: %s' % pz['checkpoint'])
     if run['status']=='running':
         lines.append('Запуск %s уже твой (worker %s): claim не нужен. Сначала tt_work op=heartbeat ref=%s run=%s worker=%s, '
@@ -1401,7 +1440,7 @@ def action(req):
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent','failover','sessions_per_ai','wip_analysis'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, sessions_per_ai, wip_analysis, autonomy')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent','failover','sessions_per_ai','wip_analysis','context_ceiling'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, sessions_per_ai, wip_analysis, context_ceiling, autonomy')
             if 'autonomy' in changes:
                 if changes['autonomy'] not in AUTONOMY: raise ValueError('autonomy: full (полная автономия) или step (пошаговое согласие)')
                 if changes['autonomy']=='full' and changes.pop('consent',None) is not True:
@@ -1416,6 +1455,8 @@ def action(req):
                 changes['sessions_per_ai']=dict(settings(s).get('sessions_per_ai') or {}, **v)
             if 'wip_analysis' in changes and (type(changes['wip_analysis'])!=int or not 1<=changes['wip_analysis']<=50):
                 raise ValueError('wip_analysis: от 1 до 50 задач в анализе на проект')
+            if 'context_ceiling' in changes and (type(changes['context_ceiling'])!=int or not (changes['context_ceiling']==0 or 40_000<=changes['context_ceiling']<=400_000)):
+                raise ValueError('context_ceiling: 0 (выключено) или от 40 000 до 400 000 токенов')
             if 'reviewer' in changes and changes['reviewer'] not in ('same','other',*PROVIDERS): raise ValueError('Ревьюер: same, other или ИИ')
             if 'roles' in changes:
                 import pipeline as P
@@ -1578,19 +1619,28 @@ def action(req):
                     if run['status']!='running': raise ValueError('Пауза — для выполняемого запуска')
                     if req.get('worker')!=run.get('worker'): raise ValueError('Ставит паузу принявший исполнитель')
                     if run.get('paused'): raise ValueError('Запуск уже на паузе до %s' % run['paused']['resume_at'])
-                    if req.get('reason','limit')!='limit': raise ValueError('reason: limit — пауза только по лимиту токенов')
+                    reason=req.get('reason') or 'limit'
+                    if reason not in ('limit','context'): raise ValueError('reason: limit — лимит токенов, context — потолок контекста (эстафета)')
                     cp=(req.get('checkpoint') or '').strip()
                     if len(cp)<20: raise ValueError('checkpoint: что сделано, что осталось и следующий шаг (не короче 20 символов)')
                     resets=req.get('resets_at')
                     if resets is not None and parse_time(str(resets).replace('Z','+00:00')) is None: raise ValueError('resets_at: время ISO 8601')
-                    if t.get('pipeline'):
-                        import orchestra
-                        orchestra.autocommit(t['pipeline'], run, 'WIP перед паузой по лимиту: '+cp)
-                    patch.update(pause_patch(s, t, run, dict(resets_at=resets, session=(run.get('launch') or {}).get('session')), at, 'agent', cp))
-                    extra=dict(paused=run['paused'])
-                    moved=failover(s, dict(t, **{k:v for k,v in patch.items() if k=='pipeline'}), run, at)
-                    if moved:
-                        patch.update(moved.pop('patch')); extra=dict(handed_to=moved)
+                    if reason=='context':
+                        if relays(run)>=MAX_RELAYS: raise ValueError('Эстафет в запуске уже %d — продолжай в этой сессии и сдай этап' % MAX_RELAYS)
+                        if t.get('pipeline'):
+                            import orchestra
+                            orchestra.autocommit(t['pipeline'], run, 'WIP перед эстафетой: '+cp)
+                        patch.update(relay_patch(s, t, run, at, 'agent', cp))
+                        extra=dict(relay=run['paused'], next='Остановись: сервер откроет свежую сессию этой роли с твоей точкой остановки.')
+                    else:
+                        if t.get('pipeline'):
+                            import orchestra
+                            orchestra.autocommit(t['pipeline'], run, 'WIP перед паузой по лимиту: '+cp)
+                        patch.update(pause_patch(s, t, run, dict(resets_at=resets, session=(run.get('launch') or {}).get('session')), at, 'agent', cp))
+                        extra=dict(paused=run['paused'])
+                        moved=failover(s, dict(t, **{k:v for k,v in patch.items() if k=='pipeline'}), run, at)
+                        if moved:
+                            patch.update(moved.pop('patch')); extra=dict(handed_to=moved)
                 elif op=='review':
                     import autocheck
                     if run['status']!='running' or run.get('phase')!='review': raise ValueError('Заключение принимает только выполняемый запуск ревью')

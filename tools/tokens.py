@@ -71,23 +71,108 @@ def _codex(path):
     if not ctx or not top:
         return None
     inp, cached, out = int(top.get('input_tokens') or 0), int(top.get('cached_input_tokens') or 0), int(top.get('output_tokens') or 0)
-    return dict(start=ctx[0], peak=max(ctx), turns=len(ctx), input=inp - cached, cache_write=0, cache_read=cached, output=out,
-                total=inp + out, full_reads=0, repeat_reads=0)
+    return dict(start=ctx[0], peak=max(ctx), last=ctx[-1], turns=len(ctx), input=inp - cached, cache_write=0, cache_read=cached,
+                output=out, total=inp + out, full_reads=0, repeat_reads=0)
+
+
+def _sessions(run):
+    """Сессии запуска по порядку: после эстафеты или паузы в новой сессии их несколько."""
+    out, seen = [], set()
+    for entry in list(run.get('launches') or []) + [run.get('launch') or {}]:
+        probe = dict(run, launch=dict(run.get('launch') or {}, **entry), launched_at=entry.get('at') or run.get('launched_at'))
+        try:
+            sid, path = limits.session_of(probe)
+        except (OSError, ValueError):
+            continue
+        if path and str(path) not in seen:
+            seen.add(str(path)); out.append((sid, path))
+    return out
 
 
 def profile(run):
-    """Профиль токенов запуска или None — журнала нет."""
-    try:
-        sid, path = limits.session_of(run)
-    except (OSError, ValueError):
-        return None
-    if not path:
-        return None
+    """Профиль токенов запуска по всем его сессиям или None — журнала нет.
+    Старт — первой сессии, пик — наибольший, остальное — сумма; sessions — сколько сессий (эстафеты видны)."""
     agent = (run.get('launch') or {}).get('agent') or run.get('agent')
-    p = (_codex if agent == 'codex' else _claude)(path)
-    if p:
+    total = None
+    for sid, path in _sessions(run):
+        p = (_codex if agent == 'codex' else _claude)(path)
+        if not p:
+            continue
         p['saved'] = int(read_guard.load(sid).get('saved_tokens') or 0) if sid else 0
-    return p
+        if total is None:
+            total = dict(p, sessions=1)
+            continue
+        for k in FIELDS:
+            if k == 'peak':
+                total[k] = max(total[k], p[k])
+            elif k != 'start':
+                total[k] += p[k]
+        total['sessions'] += 1
+    return total
+
+
+def _last_usage_claude(path, tail=400_000):
+    """Контекст последнего хода Claude — по хвосту журнала, без чтения всего файла."""
+    with open(path, 'rb') as fh:
+        fh.seek(0, 2); size = fh.tell(); fh.seek(max(0, size - tail))
+        lines = fh.read().decode('utf-8', 'replace').splitlines()
+    for line in reversed(lines):
+        if '"usage"' not in line:
+            continue
+        try:
+            u = (json.loads(line).get('message') or {}).get('usage')
+        except ValueError:
+            continue
+        if isinstance(u, dict):
+            return int(u.get('input_tokens') or 0) + int(u.get('cache_creation_input_tokens') or 0) + int(u.get('cache_read_input_tokens') or 0)
+    return 0
+
+
+def context_now(run):
+    """Контекст последнего хода текущей сессии запуска: столько модель читает на каждом следующем шаге."""
+    try:
+        _sid, path = limits.session_of(run)
+    except (OSError, ValueError):
+        return 0
+    if not path:
+        return 0
+    if ((run.get('launch') or {}).get('agent') or run.get('agent')) == 'codex':
+        p = _codex(path)
+        return 0 if not p else p['last']
+    return _last_usage_claude(path)
+
+
+def last_words(run, limit=1500):
+    """Последние реплики модели в текущей сессии — сырьё для точки остановки, собранной сервером."""
+    try:
+        _sid, path = limits.session_of(run)
+    except (OSError, ValueError):
+        return ''
+    if not path:
+        return ''
+    texts = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            if '"text"' not in line and '"agent_message"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            msg = row.get('message') or {}
+            if row.get('type') == 'assistant' and isinstance(msg.get('content'), list):
+                texts += [b.get('text') for b in msg['content'] if b.get('type') == 'text' and b.get('text')]
+            pay = row.get('payload') or {}
+            if pay.get('type') == 'agent_message' and pay.get('message'):
+                texts.append(pay['message'])
+    out = []
+    for t in reversed(texts):
+        if t in out:
+            continue                 # журнал Claude пишет ответ дважды
+        out.insert(0, t)
+        if sum(len(x) for x in out) >= limit:
+            break
+    return ' … '.join(out)[-limit:]
 
 
 def collect(project=None, role=None, since=None):
@@ -102,7 +187,7 @@ def collect(project=None, role=None, since=None):
         p = profile(r)
         if p:
             rows.append(dict(p, role=r.get('role') or 'исполнитель', agent=(r['launch'].get('agent') or '?'),
-                             lean=bool(r['launch'].get('lean')), run=r['id'], ref=r['ref']))
+                             lean=bool(r['launch'].get('lean')), relays=w.relays(r), run=r['id'], ref=r['ref']))
     return rows
 
 
@@ -113,7 +198,8 @@ def summary(rows):
     out = []
     for (role, agent, start), xs in sorted(groups.items()):
         n = len(xs)
-        out.append(dict(role=role, agent=agent, start_mode=start, runs=n, **{k: int(sum(x[k] for x in xs) / n) for k in FIELDS}))
+        out.append(dict(role=role, agent=agent, start_mode=start, runs=n, relays=sum(x.get('relays', 0) for x in xs),
+                        **{k: int(sum(x[k] for x in xs) / n) for k in FIELDS}))
     return out
 
 
@@ -123,12 +209,12 @@ def fmt(n):
 
 def report(rows):
     lines = ['Токены сессий ролей — среднее на запуск (всё = вход + запись кеша + чтение кеша + выход)', '',
-             '%-20s %-6s %-8s %4s %10s %10s %6s %11s %11s %11s %6s %8s' % (
-                 'роль', 'ИИ', 'старт', 'N', 'контекст', 'пик', 'ходов', 'чтение кеша', 'выход', 'всего', 'повт.', 'сберёг')]
+             '%-20s %-6s %-8s %4s %10s %10s %6s %11s %11s %11s %6s %8s %6s' % (
+                 'роль', 'ИИ', 'старт', 'N', 'контекст', 'пик', 'ходов', 'чтение кеша', 'выход', 'всего', 'повт.', 'сберёг', 'эстаф.')]
     for g in summary(rows):
-        lines.append('%-20s %-6s %-8s %4d %10s %10s %6d %11s %11s %11s %6d %8s' % (
+        lines.append('%-20s %-6s %-8s %4d %10s %10s %6d %11s %11s %11s %6d %8s %6d' % (
             g['role'][:20], g['agent'], g['start_mode'], g['runs'], fmt(g['start']), fmt(g['peak']), g['turns'],
-            fmt(g['cache_read']), fmt(g['output']), fmt(g['total']), g['repeat_reads'], fmt(g['saved'])))
+            fmt(g['cache_read']), fmt(g['output']), fmt(g['total']), g['repeat_reads'], fmt(g['saved']), g['relays']))
     if rows:
         tot = sum(x['total'] for x in rows); cr = sum(x['cache_read'] for x in rows)
         lines += ['', 'Запусков %d, всего %s токенов; из них чтение кеша %d%% — это контекст, перечитанный в каждом ходе.'

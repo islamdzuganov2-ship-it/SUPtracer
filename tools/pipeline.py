@@ -394,16 +394,24 @@ def sections(text):
 
 
 def tokens(text):
-    """Оценка токенов текста: латиница ~4 символа на токен, кириллица и прочее ~2.5 (Л2)."""
+    """Оценка токенов текста: ASCII ~2.55 символа на токен, кириллица и прочее ~2.2.
+    Калибровка TT-93 по точному счёту Claude (разница входа с документом в системном промпте и без):
+    BRD, SRS, КОНВЕЙЕР.md и Python-модуль — ошибка в пределах ±9% (прежние 4 и 2.5 занижали на 10–34%)."""
     if not text:
         return 0
     latin = len(text.encode('ascii', 'ignore'))
-    return int(latin / 4 + (len(text) - latin) / 2.5) + 1
+    return int(latin / 2.55 + (len(text) - latin) / 2.2) + 1
 
 
 def _code_key(c):
     p, num = c.split('-', 1)
-    return p, [int(x) for x in num.split('.')]
+    return p, [(0, int(x), '') if x.isdigit() else (1, 0, x) for x in re.split(r'[.-]', num)]
+
+
+def _next_code(a, b):
+    """b следует за a: та же группа, номер на единицу больше (ACC-01 → ACC-02, 3 → 4)."""
+    ga, _, na = a.rpartition('-'); gb, _, nb = b.rpartition('-')
+    return ga == gb and na.isdigit() and nb.isdigit() and int(nb) == int(na) + 1
 
 
 def code_span(cs):
@@ -415,10 +423,10 @@ def code_span(cs):
     for p, nums in by.items():
         run = []
         for x in nums + [None]:
-            if x is not None and x.isdigit() and run and run[-1].isdigit() and int(x) == int(run[-1]) + 1:
+            if x is not None and run and _next_code(run[-1], x):
                 run.append(x); continue
             if run:
-                out.append('%s-%s' % (p, run[0] if len(run) == 1 else '%s–%s' % (run[0], run[-1])))
+                out.append('%s-%s' % (p, run[0] if len(run) == 1 else '%s–%s' % (run[0], run[-1].rpartition('-')[2])))
             run = [x] if x is not None else []
     return ', '.join(out)
 
@@ -438,8 +446,10 @@ def doc_index(text):
     return out
 
 
-def index_lines(idx, limit=40):
-    """Указатель строками — компактно для паспорта и отказа на чтение целиком."""
+def index_lines(idx, limit=40, max_level=4):
+    """Указатель строками — компактно для паспорта и отказа на чтение целиком. max_level — глубина заголовков:
+    в паспорте без INDEX.md — только верхние уровни, полный указатель — op=doc без section."""
+    idx = [e for e in idx if e['level'] <= max_level]
     rows = ['%s%d %s · ~%dт · стр. %d–%d%s' % ('  ' * (e['level'] - 1), e['n'], e['title'][:80], e['tokens'], e['lines'][0],
                                              e['lines'][1], ' · ' + code_span(e['codes']) if e['codes'] else '') for e in idx[:limit]]
     if len(idx) > limit:
@@ -571,7 +581,9 @@ def check_item(it, role, ctx, state):
 
 # Коды требований и решений: где каждый вид определяется (Б6). FR/NFR/SR/UC/US — в SRS, BR — в BRD,
 # API — в api.md (или SRS), ADR — в файлах adr/, TC — в тест-кейсах QA.
-CODE = re.compile(r'\b(FR|NFR|SR|BR|UC|US|API|ADR|TC)-(\d+(?:\.\d+)?)\b')
+# Коды требований: простые (FR-3, FR-2.1) и составные с группой (FR-POL-04, NFR-PERF-01) — в EGE составных
+# больше, чем простых, и без них сверка и реестр видели меньше трети требований.
+CODE = re.compile(r'\b(FR|NFR|SR|BR|UC|US|API|ADR|TC)-((?:[A-Z][A-Z0-9]{1,7}-)*\d+(?:\.\d+)?)\b')
 DEFINED_IN = {'FR': ('system_analyst', 0), 'NFR': ('system_analyst', 0), 'SR': ('system_analyst', 0),
               'UC': ('system_analyst', 0), 'US': ('system_analyst', 0), 'BR': ('product_owner', 0),
               'API': ('system_analyst', 2), 'ADR': ('solution_architect', 1), 'TC': ('qa', 0)}
@@ -581,8 +593,9 @@ def codes(text):
     return {'%s-%s' % m for m in CODE.findall(text or '')}
 
 
-def trace(ctx):
-    """Сверка кодов в артефактах анализа: что определено, на что ссылаются, что не попало в RTM."""
+def analysis_docs(ctx):
+    """Тексты артефактов анализа в ветке задачи: {(роль, номер артефакта): текст}; каталог (adr/) — его файлы
+    подряд. Нет api.md — контракты в SRS."""
     docs = {}
     for role in ('product_owner', 'system_analyst', 'solution_architect', 'designer'):
         for i, a in enumerate(ROLES[role]['artifacts']):
@@ -590,7 +603,91 @@ def trace(ctx):
             if text is not None:
                 docs[(role, i)] = text
     if ('system_analyst', 2) not in docs and ('system_analyst', 0) in docs:
-        docs[('system_analyst', 2)] = docs[('system_analyst', 0)]      # нет api.md — контракты в SRS
+        docs[('system_analyst', 2)] = docs[('system_analyst', 0)]
+    return docs
+
+
+def source_path(task_id, code, docs=None):
+    """Документ, где определяется код (FR — SRS, ADR — HLD…); API без api.md — в SRS."""
+    role, i = DEFINED_IN[code.split('-')[0]]
+    if docs is not None and code.startswith('API-') and (role, i) in docs and docs[(role, i)] is docs.get(('system_analyst', 0)):
+        i = 0
+    return art_path(task_id, ROLES[role]['artifacts'][i]['path'])
+
+
+def _plain(line):
+    """Строка Markdown без разметки: ячейки таблицы через « · », без решёток, звёздочек и обратных кавычек."""
+    l = line.strip()
+    if l.startswith('|'):
+        l = ' · '.join(c.strip() for c in l.strip('|').split('|') if c.strip() and not set(c.strip()) <= set('-: '))
+    return re.sub(r'[#*`>]+', '', l).strip(' -·:\t')
+
+
+def definition(text, code):
+    """Где и как код определён в своём документе: первая строка с кодом, её суть, номер раздела указателя."""
+    lines = text.splitlines(); idx = doc_index(text)
+    for i, line in enumerate(lines):
+        if code not in codes(line):
+            continue
+        gist = _plain(line)
+        if len(gist) < len(code) + 8:            # заголовок «FR-3» без текста — суть в следующей строке
+            nxt = next((x for x in lines[i + 1:i + 4] if x.strip()), '')
+            gist = (gist + ' — ' + _plain(nxt)).strip(' —')
+        sec = next((e for e in reversed(idx) if e['lines'][0] <= i + 1), None)
+        return dict(line=i + 1, section=sec['n'] if sec else None, gist=gist[:160])
+    return None
+
+
+def registry(ctx, docs=None):
+    """Реестр требований задачи (TT-92): код, суть, документ, раздел и строка определения — по артефактам ветки."""
+    docs = analysis_docs(ctx) if docs is None else docs
+    out = []
+    for code in sorted(set().union(*[codes(t) for t in docs.values()] or [set()]), key=_code_key):
+        src = DEFINED_IN[code.split('-')[0]]
+        if src not in docs:
+            continue
+        d = definition(docs[src], code)
+        if d:
+            out.append(dict(code=code, path=source_path(ctx.t['id'], code, docs),
+                            dir=bool(ROLES[src[0]]['artifacts'][src[1]].get('dir')), **d))
+    return out
+
+
+def index_path(task_id):
+    return art_path(task_id, ART) + '/INDEX.md'
+
+
+def task_index(ctx):
+    """Указатель задачи для любого агента — Claude, Codex, человека (TT-92): документы анализа с разделами,
+    весом и строками и реестр требований с сутью и местом определения. Сервер коммитит его в ветку задачи."""
+    docs = analysis_docs(ctx); tid = ctx.t['id']
+    lines = ['# Указатель задачи %s' % tid, '',
+             'Собирает сервер TaskTreker при сдаче этапа — не править. Читай отсюда и бери только нужный раздел: '
+             'Read с offset/limit по строкам или `tt_work op=doc path=… section=<номер>` / `code=<FR-3>`.', '',
+             '## Документы', '']
+    seen = set()
+    for (role, i), text in sorted(docs.items()):
+        path = art_path(tid, ROLES[role]['artifacts'][i]['path'])
+        if path in seen:
+            continue
+        seen.add(path)
+        if ROLES[role]['artifacts'][i].get('dir'):       # строки склеенных файлов каталога ни на что не указывают
+            lines += ['### %s/ · ~%d токенов · каталог: файлы короткие, читай нужный по имени' % (path, tokens(text)), '']
+            continue
+        lines += ['### %s · ~%d токенов' % (path, tokens(text)), ''] + index_lines(doc_index(text), 60) + ['']
+    reg = registry(ctx, docs)
+    if reg:
+        lines += ['## Реестр требований', '', '| Код | Суть | Где |', '|---|---|---|']
+        lines += ['| %s | %s | %s |' % (r['code'], r['gist'].replace('|', '/'),
+                                        r['path'].split('/')[-1] + '/' if r['dir'] else
+                                        '%s §%s, стр. %d' % (r['path'].split('/')[-1], r['section'] or '—', r['line']))
+                  for r in reg]
+    return '\n'.join(lines) + '\n'
+
+
+def trace(ctx):
+    """Сверка кодов в артефактах анализа: что определено, на что ссылаются, что не попало в RTM."""
+    docs = analysis_docs(ctx)
     defined = {}
     for code in set().union(*[codes(t) for t in docs.values()] or [set()]):
         src = DEFINED_IN[code.split('-')[0]]

@@ -98,3 +98,14 @@ class StartProjectTests(DataCase):
         self.assertEqual(sorted(o['agent'] for o in opened), ['claude', 'claude', 'codex'])   # А7: Claude 2, Codex 1
         with self.assertRaisesRegex(ValueError, 'sessions_per_ai'):
             w.action(dict(op='settings', changes=dict(sessions_per_ai=dict(gpt=1))))
+
+    def test_keep_awake_only_while_work_is_pending(self):
+        self.assertFalse(serve.busy_work())
+        self.plan(dict(id='AL-60'))
+        w.action(dict(op='enqueue', ref='alpha-api/AL-60', agent='claude'))
+        s = w.state(); s['runs'][0]['auto_launch'] = True; w.save('workflow.json', s)
+        self.assertTrue(serve.busy_work())                                  # запуск ждёт открытия
+        w.action(dict(op='settings', changes=dict(auto_pipeline=False)))
+        self.assertFalse(serve.busy_work())                                 # автозапуск выключен — спать можно
+        with mock.patch.object(serve.os, 'name', 'posix'):
+            self.assertFalse(serve.keep_awake(True))                        # не Windows — ничего не делает

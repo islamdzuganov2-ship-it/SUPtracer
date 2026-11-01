@@ -192,9 +192,36 @@ def resume_session(run, nudge=False):
     return workflow.mark_resumed(run["ref"], run["id"], info)
 
 
+ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+
+
+def busy_work():
+    """Есть ли работа, ради которой компьютеру нельзя засыпать: открытые сессии или запуски к открытию."""
+    import workflow
+    s = workflow.state(); conf = workflow.settings(s)
+    if workflow.open_sessions(s["runs"]):
+        return True
+    return conf.get("auto_pipeline", True) and any(
+        r.get("status") == "queued" and r.get("auto_launch") and not r.get("launched_at") for r in s["runs"])
+
+
+def keep_awake(on):
+    """Windows: не засыпать, пока идёт работа (А4). Экран может гаснуть — держится только система.
+    Флаг действует для потока диспетчера, поэтому вызывается из него на каждом проходе."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0)
+    return bool(ctypes.windll.kernel32.SetThreadExecutionState(flags))
+
+
 def dispatcher(interval=15):
     while True:
         time.sleep(interval)
+        try:
+            keep_awake(busy_work())   # 35 часов простоя за неделю — из-за сна компьютера при живой очереди
+        except Exception as e:   # noqa: BLE001
+            sys.stderr.write("бодрствование: %s\n" % e)
         try:
             import orchestra
             orchestra.tick()          # задачи, ждавшие DoR (например, одобрения владельца)

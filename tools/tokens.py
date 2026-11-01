@@ -23,7 +23,7 @@ FIELDS = ('start', 'peak', 'turns', 'input', 'cache_write', 'cache_read', 'outpu
 
 
 def _claude(path):
-    seen, turns, ids, reads = set(), [], {}, defaultdict(int)
+    seen, turns, ids, reads, read_at = set(), [], {}, defaultdict(int), []
     full = repeat = 0
     with open(path, encoding='utf-8', errors='replace') as fh:
         for line in fh:
@@ -36,14 +36,15 @@ def _claude(path):
                 continue
             u = msg.get('usage')
             rid = row.get('requestId')
-            if row.get('type') == 'assistant' and isinstance(u, dict) and rid and rid not in seen:
+            if row.get('type') == 'assistant' and isinstance(u, dict) and rid and rid not in seen \
+                    and msg.get('model') != '<synthetic>':          # служебная запись клиента — не ход модели
                 seen.add(rid); turns.append(u)
             for b in msg.get('content') if isinstance(msg.get('content'), list) else []:
                 if b.get('type') == 'tool_use' and b.get('name') == 'Read' and b.get('id') not in ids:
                     ids[b.get('id')] = 1                     # журнал пишет ответ дважды
                     inp = b.get('input') or {}
                     if not (inp.get('offset') or inp.get('limit')):
-                        full += 1; reads[inp.get('file_path')] += 1
+                        full += 1; reads[inp.get('file_path')] += 1; read_at.append(len(turns))
                         repeat += reads[inp.get('file_path')] > 1
     if not turns:
         return None
@@ -51,7 +52,8 @@ def _claude(path):
            for t in turns]
     tot = lambda k: sum(int(t.get(k) or 0) for t in turns)
     p = dict(start=ctx[0], peak=max(ctx), turns=len(turns), input=tot('input_tokens'), cache_write=tot('cache_creation_input_tokens'),
-             cache_read=tot('cache_read_input_tokens'), output=tot('output_tokens'), full_reads=full, repeat_reads=repeat)
+             cache_read=tot('cache_read_input_tokens'), output=tot('output_tokens'), full_reads=full, repeat_reads=repeat,
+             series=ctx, read_at=[max(0, i - 1) for i in read_at])
     p['total'] = p['input'] + p['cache_write'] + p['cache_read'] + p['output']
     return p
 
@@ -72,7 +74,7 @@ def _codex(path):
         return None
     inp, cached, out = int(top.get('input_tokens') or 0), int(top.get('cached_input_tokens') or 0), int(top.get('output_tokens') or 0)
     return dict(start=ctx[0], peak=max(ctx), last=ctx[-1], turns=len(ctx), input=inp - cached, cache_write=0, cache_read=cached,
-                output=out, total=inp + out, full_reads=0, repeat_reads=0)
+                output=out, total=inp + out, full_reads=0, repeat_reads=0, series=ctx, read_at=[])
 
 
 def _sessions(run):
@@ -91,7 +93,9 @@ def _sessions(run):
 
 def profile(run):
     """Профиль токенов запуска по всем его сессиям или None — журнала нет.
-    Старт — первой сессии, пик — наибольший, остальное — сумма; sessions — сколько сессий (эстафеты видны)."""
+    Старт — первой сессии, пик — наибольший, остальное — сумма; sessions — сколько сессий (эстафеты видны).
+    series — контекст каждого хода подряд по сессиям, breaks — номера ходов, с которых началась новая сессия,
+    read_at — ходы с полным чтением файла."""
     agent = (run.get('launch') or {}).get('agent') or run.get('agent')
     total = None
     for sid, path in _sessions(run):
@@ -100,8 +104,11 @@ def profile(run):
             continue
         p['saved'] = int(read_guard.load(sid).get('saved_tokens') or 0) if sid else 0
         if total is None:
-            total = dict(p, sessions=1)
+            total = dict(p, sessions=1, breaks=[])
             continue
+        total['breaks'].append(len(total['series']))
+        total['read_at'] += [len(total['series']) + i for i in p['read_at']]
+        total['series'] = total['series'] + p['series']
         for k in FIELDS:
             if k == 'peak':
                 total[k] = max(total[k], p[k])
@@ -175,7 +182,7 @@ def last_words(run, limit=1500):
     return ' … '.join(out)[-limit:]
 
 
-def collect(project=None, role=None, since=None):
+def collect(project=None, role=None, since=None, series=False):
     rows = []
     for r in w.state().get('runs') or []:
         if not r.get('launch') or (project and not r.get('ref', '').startswith(project + '/')):
@@ -186,6 +193,8 @@ def collect(project=None, role=None, since=None):
             continue
         p = profile(r)
         if p:
+            if not series:
+                p = {k: v for k, v in p.items() if k not in ('series', 'breaks', 'read_at')}
             rows.append(dict(p, role=r.get('role') or 'исполнитель', agent=(r['launch'].get('agent') or '?'),
                              lean=bool(r['launch'].get('lean')), relays=w.relays(r), run=r['id'], ref=r['ref']))
     return rows

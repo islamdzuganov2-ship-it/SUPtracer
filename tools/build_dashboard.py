@@ -295,6 +295,10 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 .tv-note{font-size:12px;color:var(--ink3)}
 #taskview .card-viz{margin-bottom:14px;overflow-x:auto}
 #taskview table.pf td,#taskview table.pf th{font-size:12.5px;vertical-align:top}
+/* ---------- раздел «Токены ролей» (tokview.js) ---------- */
+#tokview .card-viz{margin-bottom:14px;overflow-x:auto}
+#tokview table.pf td,#tokview table.pf th{font-size:12.5px;vertical-align:top}
+#tokview svg{display:block;width:100%;height:auto}
 select.sel{background:var(--panel);border:1px solid var(--line);color:var(--ink2);border-radius:8px;
   padding:7px 9px;font-size:13px;font-family:inherit}
 .rlog{margin:10px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;
@@ -388,6 +392,15 @@ def taskview_snapshot():
         return {"error": str(e)}
 
 
+def tokview_snapshot():
+    """Токены ролей (tokview.py): профили запусков по журналам сессий и сводки по проектам."""
+    try:
+        import tokview
+        return tokview.build()
+    except Exception as e:   # noqa: BLE001 — дашборд собирается и без этого раздела
+        return {"error": str(e)}
+
+
 def main():
     import taskstate
     import workflow
@@ -411,6 +424,7 @@ def main():
         "context": context_stats(),
         "fresh": freshness(),
         "taskview": taskview_snapshot(),
+        "tokview": tokview_snapshot(),
     }
     # HTML закрывает script без учёта регистра, даже внутри JSON-строки.
     blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
@@ -425,6 +439,7 @@ def main():
         + "<script>\n" + read_tool("tree.js") + "\n</script>\n"
         + "<script>\n" + read_tool("projview.js") + "\n</script>\n"
         + "<script>\n" + read_tool("taskview.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("tokview.js") + "\n</script>\n"
         + "<script>\n" + read_tool("app.js") + "\n</script>\n"
         + "<script>\n" + read_tool("board_extras.js") + "\n</script>\n"
         + "<script>\n" + read_tool("boards.js") + "\n</script>\n"

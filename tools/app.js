@@ -116,22 +116,12 @@ function usageOf(key) {
 }
 const keys = Object.keys(P);
 const own = keys.filter(k => P[k].tier < 4);          // свои проекты, без чужих инструментов
-const named = k => P[k].name;
-const byMoney = ks => ks.slice().sort((a, b) => (usageOf(b)?.usd || 0) - (usageOf(a)?.usd || 0));
 
 function color(p) { return p >= 70 ? 'var(--ok)' : p >= 40 ? 'var(--warn)' : 'var(--bad)'; }
 function bar(p) { return `<div class="bar"><i style="width:${Math.max(2, p)}%;background:${color(p)}"></i></div>`; }
 
-/* ======================= шапка и KPI ======================= */
-let spent = 0, spentTok = 0, rem = 0, remTok = 0, disk = 0, loc = 0, tasks = 0, sess = 0, hours = 0;
-keys.forEach(k => {
-  const u = usageOf(k);
-  if (u) { spent += u.usd; spentTok += u.billable; sess += u.sessions; hours += (u.active_hours || 0); }
-  const e = E[k]; if (e) { rem += e.remaining_usd; remTok += e.remaining_tokens; tasks += e.items.filter(x => !x.closed && !['done', 'cancelled', 'dropped'].includes(x.status)).length; }
-  const r = R[k]; if (r && r.exists) { disk += r.disk_bytes || 0; loc += (r.code && r.code.loc_total) || 0; }
-});
-const months = [...new Set(keys.flatMap(k => Object.keys(usageOf(k)?.by_month || {})))]
-  .filter(m => m !== 'unknown').sort();
+/* ======================= шапка ======================= */
+const hours = keys.reduce((sum, k) => sum + (usageOf(k)?.active_hours || 0), 0);
 const calDays = (D.usage.total && D.usage.total.calendar_days) || 0;
 
 document.getElementById('sub').textContent =
@@ -159,15 +149,6 @@ document.getElementById('sub').textContent =
   }).join(' · ');
 })();
 
-document.getElementById('kpis').innerHTML = [
-  ['Потрачено', usageMoney({usd: spent, cost_complete: keys.every(k => usageOf(k)?.cost_complete !== false)}), tok(spentTok) + ' токенов · ' + sess + ' сессий'],
-  ['Осталось', usageMoney({usd: rem, cost_complete: keys.every(k => E[k]?.cost_complete !== false)}), tok(remTok) + ' токенов · ' + tasks + ' задач'],
-  ['Время', Math.round(hours) + ' ч', calDays + ' рабочих дней · ' + (hours / Math.max(1, calDays)).toFixed(1).replace('.', ',') + ' ч в день'],
-  ['В месяц', usageMoney({usd: months.length ? spent / months.length : 0, cost_complete: keys.every(k => usageOf(k)?.cost_complete !== false)}), months.length + ' мес. · средний известный расход'],
-  ['Кода', nf(loc), 'строк в ' + own.length + ' проектах'],
-  ['На диске', (disk / 1e9).toFixed(1).replace('.', ',') + ' ГБ', 'размер каталогов проектов'],
-].map(([l, v, n]) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div><div class="n">${n}</div></div>`).join('');
-
 /* ======================= портфельные сигналы ======================= */
 const LV = {act: 'действовать', watch: 'следить', ok: 'норма'};
 document.getElementById('signals').innerHTML = SIG.map(s => `
@@ -178,9 +159,7 @@ document.getElementById('signals').innerHTML = SIG.map(s => `
     <div class="why">${esc(s.why)}</div>
   </div>`).join('');
 
-/* ======================= диаграммы ======================= */
-// Ширина диаграмм берётся у контейнера, поэтому при изменении размера окна
-// их надо перерисовать — иначе текст поедет вместе с масштабом viewBox.
+/* Измерения готовности — для карточек проектов. */
 const DIMS = [
   {key: 'functional', label: 'Функция'},
   {key: 'production', label: 'Эксплуат.'},
@@ -188,186 +167,6 @@ const DIMS = [
   {key: 'tests', label: 'Тесты'},
   {key: 'security', label: 'Безопасн.'},
 ];
-
-function renderCharts() {
-const readyOrder = own.slice().sort((a, b) =>
-  ((P[b].readiness || {}).functional || 0) - ((P[a].readiness || {}).functional || 0));
-
-VIZ.matrix(document.getElementById('c-ready'), {
-  title: 'Готовность по пяти измерениям',
-  sub: 'Числа и основания — в карточках проектов. Новая ревизия: 25 баллов за подтверждённый контрольный пункт; прежние оценки — экспертные. Это не тестовое покрытие.',
-  rows: readyOrder.map(k => ({label: named(k), key: k})),
-  cols: DIMS,
-  cell: (r, c) => {
-    const rd = P[r.key].readiness || {};
-    const v = rd.assessed === false ? null : rd[c.key];
-    const evidence = rd.review?.dimensions?.[c.key];
-    return {value: v == null ? null : v, text: v == null ? '—' : v + '',
-      tip: `<b>${esc(named(r.key))}</b> · ${c.label}: ${v == null ? '—' : v + '%'}<br>` +
-           `<span style="color:var(--ink3)">${esc(evidence ? `${rd.review.date}: ${evidence.confirmed.length}/4 пунктов. ${evidence.evidence}` : rd.basis || '')}</span>`};
-  },
-  note: 'Разрыв между «Функция» и «Эксплуат.» в одной строке — главное, что здесь стоит искать: система умеет много, но её нельзя включить. Закрывается не функциями, а поставкой.',
-});
-
-const progRows = byMoney(own).filter(k => usageOf(k) || (E[k] || {}).remaining_usd);
-VIZ.hstack(document.getElementById('c-progress'), {
-  title: 'Вложено и осталось, в деньгах',
-  sub: 'Длина всей полосы — полная стоимость проекта до закрытия бэклога. Доля синего — сколько пути пройдено.',
-  rows: progRows.map(k => {
-    const u = usageOf(k), e = E[k] || {};
-    const a = u ? u.usd : 0, b = e.remaining_usd || 0;
-    return {label: named(k), parts: [a, b], right: Math.round(100 * a / Math.max(1, a + b)) + '%'};
-  }),
-  series: [{label: 'вложено'}, {label: 'осталось по бэклогу'}],
-  fmt: money,
-  note: 'Процент справа — доля вложенного от полной стоимости, а не оценка готовности. Там, где он меньше 50%, проект пройден меньше чем наполовину, что бы ни показывала самооценка.',
-});
-
-const costRows = own.map(k => {
-  const e = (Q[k] || {}).economics || {};
-  return {k, v: e.usd_per_readiness_point};
-}).filter(x => x.v != null).sort((a, b) => b.v - a.v);
-VIZ.bars(document.getElementById('c-costpoint'), {
-  title: 'Цена одного пункта готовности',
-  sub: 'Сколько стоил каждый процент функциональной готовности. Сравнимо между проектами любого размера.',
-  rows: costRows.map(x => ({
-    label: named(x.k), value: x.v,
-    tip: `<b>${esc(named(x.k))}</b><br>$${x.v} за пункт готовности<br>` +
-         `<span style="color:var(--ink3)">${money(usageOf(x.k)?.usd)} на ${(P[x.k].readiness || {}).functional}% готовности</span>`,
-  })),
-  fmt: v => '$' + nf(v),
-  note: 'Растущая цена пункта — первый признак, что проект входит в болото: работа идёт, а готовность почти не двигается. Заметно задолго до срыва сроков.',
-});
-
-const hourRows = own.map(k => ({k, v: (usageOf(k) || {}).active_hours || 0}))
-  .filter(x => x.v > 0).sort((a, b) => b.v - a.v);
-VIZ.bars(document.getElementById('c-hours'), {
-  title: 'Затраченное время по проектам',
-  sub: 'Активная работа из журналов сессий: сумма промежутков между ответами, паузы длиннее 15 минут отброшены как перерыв.',
-  rows: hourRows.map(x => {
-    const u = usageOf(x.k);
-    return {label: named(x.k), value: x.v,
-      tip: `<b>${esc(named(x.k))}</b><br>${hrs(x.v)} активной работы<br>` +
-           `${u.calendar_days} календарных дней, ${u.sessions} сессий<br>` +
-           `<span style="color:var(--ink3)">${hrs(u.hours_per_day)} в день, когда работа шла</span>`};
-  }),
-  fmt: hrs,
-  note: 'Это время работы ассистента, а не ваше. Оно занижено там, где вы думали над задачей молча, и завышено там, где сессия висела открытой внутри 15-минутного окна.',
-});
-
-const intRows = own.map(k => {
-  const u = usageOf(k), e = (Q[k] || {}).economics || {};
-  return u && e.usd_per_hour != null ? {k, v: e.usd_per_hour, u} : null;
-}).filter(Boolean).sort((a, b) => b.v - a.v);
-VIZ.bars(document.getElementById('c-intensity'), {
-  title: 'Интенсивность: стоимость часа работы',
-  sub: 'Сколько стоил час активной работы над проектом.',
-  rows: intRows.map(x => ({
-    label: named(x.k), value: x.v,
-    tip: `<b>${esc(named(x.k))}</b><br>$${x.v} за час<br>` +
-         `<span style="color:var(--ink3)">${tok((Q[x.k].economics || {}).tokens_per_hour || 0)} токенов в час</span>`,
-  })),
-  fmt: v => '$' + v.toFixed(0),
-  note: 'Дорогой час — это не плохо само по себе: так выглядит работа с большим контекстом. Плохо, когда дорогой час сочетается с дорогим пунктом готовности — значит платим за объём, а не за продвижение.',
-});
-
-/* --- ТЗ: количество против качества --- */
-const specPts = own.map(k => {
-  const s = (R[k] || {}).spec || {};
-  return s.requirements ? {k, x: s.requirements, y: s.traceability_pct || 0, s} : null;
-}).filter(Boolean);
-if (specPts.length) {
-  VIZ.scatter(document.getElementById('c-spec'), {
-    title: 'Техническое задание: количество требований и их связь с кодом',
-    sub: 'По горизонтали — сколько требований с кодами найдено в документах. По вертикали — какая их доля встречается в коде.',
-    points: specPts.map(p => ({
-      label: named(p.k), x: p.x, y: p.y,
-      tip: `<b>${esc(named(p.k))}</b><br>${p.x} требований в ${(p.s.requirement_families || []).length} схемах нумерации<br>` +
-           `${p.y}% встречается в коде (${p.s.traced_in_code})<br>` +
-           `<span style="color:var(--ink3)">${p.s.doc_files} документов, ${nf(p.s.doc_lines)} строк</span>`,
-    })),
-    xLabel: 'требований в документах', yLabel: 'трассируемость, %',
-    fmtX: v => nf(v), fmtY: v => Math.round(v) + '%',
-    note: 'Правый нижний угол — опасное место: требований написано много, но в коде их нет. Это значит, что по такому ТЗ нельзя принимать работу: непонятно, что реализовано, а что только описано.',
-  });
-} else {
-  document.getElementById('c-spec').closest('.card-viz').remove();
-}
-
-const specIdx = own.map(k => ({k, v: (Q[k] || {}).spec && Q[k].spec.score}))
-  .filter(x => x.v != null).sort((a, b) => b.v - a.v);
-VIZ.bars(document.getElementById('c-specidx'), {
-  title: 'Индекс качества ТЗ',
-  sub: 'Не объём документации, а её формализация и связь с кодом. Наведите курсор — видно, из чего складывается цифра.',
-  rows: specIdx.map(x => ({
-    label: named(x.k), value: x.v,
-    tip: `<b>${esc(named(x.k))}</b> — ${x.v}<br>` + (Q[x.k].spec.components || [])
-      .map(c => `${esc(c.label)}: ${c.score == null ? '—' : Math.round(c.score * 100) + '%'} <span style="color:var(--ink3)">(${esc(c.note)})</span>`)
-      .join('<br>'),
-  })),
-  fmt: v => String(v), max: 100,
-  note: 'Веса: трассируемость 2.5, формализация и дисциплина по 1.5, остальное по 1.0. Компонента без данных выбывает из знаменателя, а не обнуляет индекс.',
-});
-
-const worstSpec = specIdx.length ? Q[specIdx[specIdx.length - 1].k].spec : null;
-renderParts('c-specparts', 'Что роняет индекс ТЗ',
-  'Разбор по компонентам для проекта с самым слабым результатом.',
-  specIdx.length ? named(specIdx[specIdx.length - 1].k) : '', worstSpec);
-
-const engIdx = own.map(k => ({k, v: (Q[k] || {}).engineering && Q[k].engineering.score}))
-  .filter(x => x.v != null).sort((a, b) => b.v - a.v);
-VIZ.bars(document.getElementById('c-eng'), {
-  title: 'Индекс качества проработки',
-  sub: 'То, что отличает продукт от наброска: тесты, версионирование, гигиена поставки, чистота кода.',
-  rows: engIdx.map(x => ({
-    label: named(x.k), value: x.v,
-    tip: `<b>${esc(named(x.k))}</b> — ${x.v}<br>` + (Q[x.k].engineering.components || [])
-      .map(c => `${esc(c.label)}: ${c.score == null ? '—' : Math.round(c.score * 100) + '%'} <span style="color:var(--ink3)">(${esc(c.note)})</span>`)
-      .join('<br>'),
-  })),
-  fmt: v => String(v), max: 100,
-  note: 'Отсутствие git — единственная компонента, которая обнуляется жёстко: работа существует в одном экземпляре, и это не степень качества, а отложенная потеря.',
-});
-
-const worstEng = engIdx.length ? Q[engIdx[engIdx.length - 1].k].engineering : null;
-renderParts('c-engparts', 'Что роняет качество проработки',
-  'Разбор по компонентам для проекта с самым слабым результатом.',
-  engIdx.length ? named(engIdx[engIdx.length - 1].k) : '', worstEng);
-
-function renderParts(id, title, sub, projName, blk) {
-  const host = document.getElementById(id);
-  if (!blk) { host.remove(); return; }
-  host.innerHTML = `<div class="viz-title">${esc(title)}</div>
-    <div class="viz-sub">${esc(sub)} Сейчас это «${esc(projName)}» — ${blk.score}.</div>` +
-    (blk.components || []).map(c => `
-      <div class="qbreak">
-        <span class="qn">${esc(c.label)}</span>
-        <span class="qb"><i style="width:${Math.round((c.score || 0) * 100)}%"></i></span>
-        <span class="qv">${c.score == null ? '—' : Math.round(c.score * 100) + '%'}</span>
-      </div>
-      <div style="font-size:11.5px;color:var(--ink3);margin:-2px 0 8px 0">${esc(c.note)} · вес ${c.weight}</div>`).join('');
-}
-
-/* --- расход по месяцам --- */
-const topSpend = byMoney(keys.filter(k => (usageOf(k)?.usd || 0) > 0));
-const namedS = topSpend.slice(0, 4), restS = topSpend.slice(4);
-const series = namedS.map(k => ({
-  label: named(k), values: months.map(m => (usageOf(k).by_month[m] || {}).usd || 0)}));
-if (restS.length) series.push({
-  label: 'прочее', values: months.map(m => restS.reduce((s, k) => s + ((usageOf(k).by_month[m] || {}).usd || 0), 0))});
-VIZ.stacked(document.getElementById('c-months'), {
-  title: 'Расход по месяцам',
-  sub: 'Реальная история из журналов сессий. Пятый и далее проекты свёрнуты в «прочее» — девятого цвета не бывает.',
-  cats: months, series, fmt: money,
-  note: SN.length >= 2
-    ? `Снимков накоплено ${SN.length}, первый — ${esc(SN[0].date)}. Изменения готовности между снимками видны в карточках проектов.`
-    : `Снимков пока ${SN.length}. Они копятся при каждом обновлении и лягут в основу сравнения «было — стало».`,
-});
-
-}
-renderCharts();
-let rsz;
-addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(renderCharts, 160); });
 
 /* ======================= вкладка «Проекты» ======================= */
 const alerts = [];
@@ -556,15 +355,12 @@ document.getElementById('cards').innerHTML = order.map(k => {
   </div></details>`;
 }).join('');
 
-document.querySelectorAll('table.pf tbody tr').forEach(tr => tr.onclick = () => {
-  const d = document.getElementById('p-' + tr.dataset.k);
-  d.open = true;
-  d.scrollIntoView({behavior: 'smooth', block: 'start'});
-});
-document.querySelectorAll('.related-project').forEach(button => button.onclick = () => {
-  const card = document.getElementById('p-' + button.dataset.project);
-  if (card) {card.open = true; card.scrollIntoView({behavior:'smooth',block:'start'});}
-});
+const openProject = k => {
+  const d = document.getElementById('p-' + k);
+  if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+};
+document.querySelectorAll('table.pf tbody tr').forEach(tr => tr.onclick = () => openProject(tr.dataset.k));
+document.querySelectorAll('.related-project').forEach(button => button.onclick = () => openProject(button.dataset.project));
 
 const CM = D.comments.comments || [];
 document.getElementById('commentsWrap').innerHTML = `<div class="section-h">Комментарии — ${CM.length}</div>` +
@@ -735,8 +531,7 @@ function showTab(which) {
       onProject: k => {
         if (!P[k] && !discoveredKeys.includes(k)) return;
         showTab('proj');
-        const d = document.getElementById('p-' + k);
-        if (d) { d.open = true; d.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+        openProject(k);
       },
       onEmpty: () => {
         document.getElementById('treeWrap').textContent =
@@ -744,6 +539,7 @@ function showTab(which) {
       },
     });
   } else TREEVIEW.close();
+  if (cur === 'dash' && window.PROJVIEW) PROJVIEW.shown();   // графики меряют ширину видимой страницы
   try { history.replaceState(null, '', '#' + cur); } catch (e) {}
 }
 // Тема — до первой вкладки: древо читает её при открытии.

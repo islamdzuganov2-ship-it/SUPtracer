@@ -25,6 +25,7 @@ projects.json станет done. Это единственная запись п
   py tools/obsidian.py push [--dry-run]
   py tools/obsidian.py sync            pull, затем push
 """
+import contextlib
 import json
 import os
 import re
@@ -35,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ingest
 import mdparse as md
 import memory as mem
+import taskstate
 import tree as tree_mod
 
 ROOT =os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -261,20 +263,19 @@ def sync_task_status(c, dry=False):
     при выгрузке (pushed_marks в vault_state.json), вводом не считается. Иначе статус,
     поменянный в системе после выгрузки, откатывался бы к устаревшей отметке на странице —
     так закрытая задача однажды вернулась в работу. И галочка двигает задачу только
-    вперёд: закрытую задачу отметкой в хранилище не переоткрыть."""
+    вперёд: закрытую задачу отметкой в хранилище не переоткрыть.
+
+    Сравнивается с действующим статусом — ручной слой вместе с оперативным (TT-45): задача,
+    которую ведёт исполнитель, на странице «в работе», хотя в projects.json — «к выполнению».
+    Запись — под общей блокировкой задач и атомарно: доска или исполнитель, меняющие задачи
+    в ту же секунду, не потеряют свою правку и не получат половину файла."""
     changes = []
     exp = export_root(c)
     pdir = os.path.join(exp, "Проекты")
-    if not os.path.isdir(pdir):
+    if not os.path.isdir(pdir) or not os.path.exists(os.path.join(DATA, "projects.json")):
         return changes
-    pf = os.path.join(DATA, "projects.json")
-    if not os.path.exists(pf):
-        return changes
-    with open(pf, encoding="utf-8") as f:
-        data = json.load(f)
-    projects = data.get("projects", {})
     pushed = jload(STATE, {}).get("pushed_marks", {})
-    touched = False
+    ticks = {}                                  # проект -> {задача: желаемый статус}
     for fn in sorted(os.listdir(pdir)):
         if not fn.endswith(".md"):
             continue
@@ -285,10 +286,10 @@ def sync_task_status(c, dry=False):
             continue
         fm, body = md.parse_frontmatter(raw)
         key = str(fm.get("project_key") or "")
-        if key not in projects:
+        if not key:
             continue
         written = pushed.get(os.path.relpath(os.path.join(pdir, fn), vault_path(c)).replace("\\", "/"), {})
-        marks = {}
+        marks = ticks.setdefault(key, {})
         for t in md.tasks(body):
             m = re.match(r"^\*\*(.+?)\*\*\s*[—:-]", t["text"]) or \
                 re.match(r"^\*{0,2}([A-ZА-Я]{1,6}-\d+)\*{0,2}\s*[—:-]?\s*", t["text"])
@@ -299,18 +300,27 @@ def sync_task_status(c, dry=False):
             if written.get(tid) == mark:
                 continue                  # отметку поставила система, человек её не трогал
             marks[tid] = "done" if mark == "x" else ("in_progress" if mark == "/" else None)
-        for b in projects[key].get("backlog", []):
-            want = marks.get(b.get("id"))
-            if b.get("status") == "done" and want != "done":
-                continue                  # галочка двигает только вперёд
-            if want and str(b.get("status")).replace("-", "_") != want:   # in-progress — прежнее написание
-                changes.append("%s/%s: %s -> %s" % (key, b["id"], b.get("status", "—"), want))
-                if not dry:
-                    b["status"] = want
-                    touched = True
-    if touched and not dry:
-        with open(pf, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    if not any(ticks.values()):
+        return changes
+    # Сухой прогон только читает. Занято дольше 10 с — ошибка: выгрузка без забора стёрла бы галочки.
+    with contextlib.nullcontext() if dry else taskstate.locked(DATA, wait=10):
+        data = taskstate.read_json(DATA, "projects.json", {})
+        projects = data.get("projects", {})
+        tasks = taskstate.overlay(DATA)
+        touched = False
+        for key, marks in ticks.items():
+            for b in (projects.get(key) or {}).get("backlog", []):
+                want = marks.get(b.get("id"))
+                now = taskstate.merge_task(b, tasks.get("%s/%s" % (key, b.get("id")))).get("status")
+                if now == "done" and want != "done":
+                    continue                  # галочка двигает только вперёд
+                if want and str(now).replace("-", "_") != want:   # in-progress — прежнее написание
+                    changes.append("%s/%s: %s -> %s" % (key, b["id"], now or "—", want))
+                    if not dry:
+                        b["status"] = want    # новее базы оперативного слоя — ввод человека побеждает
+                        touched = True
+        if touched and not dry:
+            taskstate.save_json(DATA, "projects.json", data)
     return changes
 
 
@@ -412,7 +422,7 @@ def cmd_push(args):
     # Галочки, поставленные в хранилище, сначала переносятся в бэклог (ОБС-05):
     # иначе выгрузка без забора стёрла бы их, перерисовав страницы проектов.
     ticks = sync_task_status(c, dry=dry) if c.get("status_sync") else []
-    P = load("projects.json").get("projects", {})
+    P = taskstate.apply(load("projects.json"), DATA).get("projects", {})   # статус — с оперативным слоем
     U = load("usage.json", {"projects": {}}).get("projects", {})
     R = load("repos.json", {"repos": {}}).get("repos", {})
     E = load("estimates.json", {"projects": {}}).get("projects", {})

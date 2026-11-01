@@ -18,6 +18,7 @@ from pricing import cost_usd  # noqa: E402
 from pricing import OPENAI_CHECKED, OPENAI_SOURCE, OPENAI_PRICES  # noqa: E402
 from project_routes import paths as route_paths, resolve_path, resolve_slug_entries  # noqa: E402
 from codex_usage import integer, read_records as read_codex_records  # noqa: E402
+import limits as limit_events  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data")   # ИНТ-01
@@ -101,8 +102,10 @@ def add(dst, src):
         dst[k] = dst.get(k, 0) + v
 
 
-def read_claude_records(sessions_dir=None):
-    """Preserve Claude's request-id deduplication, including copied logs."""
+def read_claude_records(sessions_dir=None, limits=None):
+    """Preserve Claude's request-id deduplication, including copied logs.
+
+    limits — список: в него складываются события исчерпания лимита (время, сброс, вид окна)."""
     from pathlib import Path
     root = Path(sessions_dir or SESSIONS_DIR)
     scan = {"files": 0, "assistant_rows": 0, "deduped_rows": 0,
@@ -125,6 +128,11 @@ def read_claude_records(sessions_dir=None):
                         continue
                     if not isinstance(d, dict) or d.get("type") != "assistant":
                         continue
+                    if limits is not None and d.get("error") == "rate_limit":
+                        event = limit_events.claude_event(d)
+                        if event:
+                            event["fallback_key"] = slug_to_key(slug)
+                            limits.append(event)
                     scan["assistant_rows"] += 1
                     msg = d.get("message") or {}
                     if not isinstance(msg, dict):
@@ -205,6 +213,8 @@ def totals(projects):
 
 def aggregate(records, provider, scan, source, available, overrides=()):
     projects = defaultdict(zero)
+    hours = defaultdict(lambda: defaultdict(lambda: [0, 0.0, 0]))
+    per_session = defaultdict(lambda: [0, 0.0])
     models, months = defaultdict(lambda: defaultdict(zero)), defaultdict(lambda: defaultdict(zero))
     sessions, model_sessions, month_sessions = defaultdict(set), defaultdict(set), defaultdict(set)
     stamps, dates, unknown = defaultdict(list), defaultdict(set), defaultdict(set)
@@ -223,7 +233,11 @@ def aggregate(records, provider, scan, source, available, overrides=()):
         month_sessions[(key, month)].add(sid)
         if rec.get("unpriced_requests"):
             unknown[key].add(model)
+        cell_s = per_session[sid]; cell_s[0] += billable(numeric); cell_s[1] += rec.get("usd", 0) or 0
         point = parse_time(ts)
+        if point is not None and billable(numeric):
+            cell = hours[key][datetime.fromtimestamp(point, timezone.utc).strftime("%Y-%m-%dT%H")]
+            cell[0] += billable(numeric); cell[1] += rec.get("usd", 0) or 0; cell[2] += 1
         if point is not None:
             stamps[(key, sid)].append(point)
             dates[key].add(datetime.fromtimestamp(point, timezone.utc).date().isoformat())
@@ -255,11 +269,31 @@ def aggregate(records, provider, scan, source, available, overrides=()):
         p["by_month"] = {m: finish(dict(v, sessions=len(month_sessions[(key, m)]),
                                          active_seconds=round(v["active_seconds"])), unknown[key])
                          for m, v in sorted(months[key].items())}
+        # Час UTC -> [токены, $, запросы]: из этого metrics.py собирает спринты.
+        p["by_hour"] = {h: [c[0], round(c[1], 4), c[2]] for h, c in sorted(hours[key].items())}
         output[key] = p
-    return {"label": "Claude" if provider == "claude" else "GPT / Codex",
+    # Сессия -> [токены, $]: metrics.py сопоставляет сессии с запусками ролей (токены каждого агента).
+    sessions_out = {sid: [v[0], round(v[1], 4)] for sid, v in per_session.items() if v[0]}
+    return {"label": "Claude" if provider == "claude" else "GPT / Codex", "sessions": sessions_out,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "source": source, "available": available, "scan": scan,
             "projects": output, "total": totals(output)}
+
+
+def limit_list(events, overrides=()):
+    """События лимита: одно на окно и сессию (повторные отказы в окне — одно событие), с проектом."""
+    out = {}
+    for e in sorted(events, key=lambda x: x.get("at") or ""):
+        if e.get("kind") == "window":
+            k = ("window", e.get("resets_at"))
+        else:
+            k = (e.get("session"), e.get("resets_at") or (e.get("at") or "")[:13])
+        if k in out:
+            continue
+        project = (project_key(e["cwd"], overrides) if e.get("cwd") else None) or e.get("fallback_key") or ""
+        out[k] = {f: e.get(f) for f in ("provider", "at", "resets_at", "kind", "window_minutes") if e.get(f) is not None}
+        out[k]["project"] = project
+    return sorted(out.values(), key=lambda x: x.get("at") or x.get("resets_at") or "")
 
 
 def merge_values(values):
@@ -339,15 +373,17 @@ def collect(source="all", previous=None, claude_dir=None, codex_home=None):
             if name in providers and providers[name].get('projects') and providers[name].get('routing_digest') != routing_digest:
                 providers[name] = dict(providers[name], routing_stale=True)
             continue
-        records, scan, path, available = (read_claude_records(claude_dir) if name == "claude"
-                                           else read_codex_records(codex_home))
+        found = []
+        records, scan, path, available = (read_claude_records(claude_dir, found) if name == "claude"
+                                           else read_codex_records(codex_home, found))
         if (not available or scan.get("unreadable_files")) and name in providers:
             # Временно недоступный каталог не обнуляет уже собранную историю.
             providers[name] = dict(providers[name], available=available, stale=True,
                                    last_attempt=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                                    last_scan=scan)
             continue
-        providers[name] = dict(aggregate(records, name, scan, path, available, overrides), routing_digest=routing_digest)
+        providers[name] = dict(aggregate(records, name, scan, path, available, overrides), routing_digest=routing_digest,
+                               limits=limit_list(found, overrides))
     projects = combine(providers)
     scan = {}
     for provider in providers.values():

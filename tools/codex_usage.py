@@ -10,6 +10,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 from pricing import openai_cost_usd
+import limits as limit_events
 
 
 COUNTERS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
@@ -27,7 +28,7 @@ def home_path():
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
 
 
-def read_records(home=None):
+def read_records(home=None, limits=None):
     """Return normalized token records and scan metadata (no prompts or outputs).
 
     Events from live/archived copies are merged by session and timestamp before
@@ -40,12 +41,14 @@ def read_records(home=None):
     scan = {"files": 0, "assistant_rows": 0, "deduped_rows": 0,
             "malformed_rows": 0, "unreadable_files": 0, "missing_totals": 0}
     sessions = defaultdict(list)
+    windows = set()
     for root in roots:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*.jsonl")):
             scan["files"] += 1
             sid, cwd, model = path.stem, "", "unknown"
+            last_limits = None
             turn = ""
             owner_seen, fork_start = False, ""
             try:
@@ -78,7 +81,23 @@ def read_records(home=None):
                             cwd = payload.get("cwd") or cwd
                             model = payload.get("model") or model
                             turn = payload.get("turn_id") or turn
-                        elif (kind == "event_msg" and payload.get("type") == "token_count") or kind == "token_usage_record":
+                        if limits is not None and isinstance(payload.get("rate_limits"), dict):
+                            # Окно лимита Codex известно точно: время сброса приходит с каждым отчётом о расходе.
+                            primary = payload["rate_limits"].get("primary") or {}
+                            if primary.get("resets_at"):
+                                window = (primary.get("resets_at"), primary.get("window_minutes"))
+                                if window not in windows:
+                                    windows.add(window)
+                                    limits.append(dict(provider="codex", kind="window", resets_at=limit_events.iso(limit_events.stamp(window[0])),
+                                                       window_minutes=window[1], at=row.get("timestamp") or "", cwd=str(cwd)))
+                            last_limits = payload["rate_limits"]
+                        if limits is not None and kind == "event_msg" and payload.get("type") == "task_complete":
+                            err = payload.get("error") or {}
+                            if isinstance(err, dict) and err.get("codex_error_info") == "usage_limit_exceeded":
+                                resets, lim_kind = limit_events.codex_reset(last_limits)
+                                limits.append(dict(provider="codex", kind=lim_kind or "five_hour", resets_at=resets,
+                                                   at=row.get("timestamp") or "", cwd=str(cwd), session=sid))
+                        if (kind == "event_msg" and payload.get("type") == "token_count") or kind == "token_usage_record":
                             scan["assistant_rows"] += 1
                             info = payload.get("info") or {}
                             totals = payload.get("thread_token_usage") if kind == "token_usage_record" else info.get("total_token_usage") if isinstance(info, dict) else None

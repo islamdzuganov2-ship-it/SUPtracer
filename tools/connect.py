@@ -134,6 +134,14 @@ def find_cli():
     exe = shutil.which("claude")
     if exe:
         return exe
+    try:
+        # Приложение кладёт CLI в claude-code/<версия>/<сборка>/claude.exe — тот же поиск, что у запуска сессий.
+        import launcher
+        exe = launcher.find_cli("claude")
+        if exe:
+            return exe
+    except Exception:   # noqa: BLE001 — подключение не должно падать из-за поиска
+        pass
     bundled = glob.glob(os.path.expanduser("~/AppData/Roaming/Claude/claude-code/*/claude.exe"))
 
     def ver(p):
@@ -396,6 +404,12 @@ def cmd_connect(args, provider="claude"):
         print("Подключайте из основного каталога системы или добавьте --force.")
         return 1
     codex_ok = True
+    try:
+        import skills   # скиллы ролей конвейера — тем клиентам, которых подключаем
+        rep = skills.install(("claude", "codex") if provider == "all" else (provider,))
+        print("Скиллы ролей конвейера: %s" % rep)
+    except Exception as e:   # noqa: BLE001 — подключение не должно падать из-за скиллов
+        print("Скиллы ролей не установлены: %s" % e)
     if provider in ("codex", "all"):
         codex_ok, out = install_codex_mcp()
         print(out)

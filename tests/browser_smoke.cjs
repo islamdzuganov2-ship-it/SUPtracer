@@ -11,8 +11,23 @@ const path = require('node:path');
     const errors = [];
     page.on('pageerror', e => errors.push(e.stack || e.message));
     await page.goto(process.env.TT_URL || 'http://127.0.0.1:8790/');
-    await page.locator('#kpis .kpi').first().waitFor();
-    assert.equal(await page.locator('#kpis .kpi').count(), 6);
+    // Дашборд: выпадающий список (весь портфель / проект) и метрики по спринтам лимита.
+    await page.locator('#proj-select').waitFor();
+    await page.selectOption('#proj-select', '__all');
+    await page.locator('#proj-metrics .kpi').first().waitFor();
+    assert.equal(await page.locator('#proj-metrics .kpi').count(), 7);
+    assert.equal(await page.locator('#signalsWrap').isVisible(), true);
+    const withSprints = await page.evaluate(() => Object.entries(JSON.parse(document.getElementById('DATA').textContent).metrics?.projects || {})
+      .find(([, m]) => m.sprints.length)?.[0]);
+    if (withSprints) {
+      await page.selectOption('#proj-select', withSprints);
+      await page.locator('#pm-tokens svg').waitFor();
+      assert.equal(await page.locator('#signalsWrap').isVisible(), false);
+      assert.ok(await page.locator('#proj-metrics table.bl tbody tr').count());
+      await page.reload();
+      assert.equal(await page.locator('#proj-select').inputValue(), withSprints);
+      await page.selectOption('#proj-select', '__all');
+    }
     await page.selectOption('#data-source', 'codex');
     await page.locator('#source-info').getByText('GPT / Codex', {exact: true}).waitFor();
     assert.equal(await page.locator('#source-info .source-card').count(), 1);
@@ -25,13 +40,6 @@ const path = require('node:path');
       return Object.entries(data.projects.projects).filter(([,p])=>p.readiness?.review)
         .map(([key,p])=>({key,readiness:p.readiness}));
     });
-    for(const {key,readiness:rd} of readiness) {
-      for(const dim of ['functional','production','docs','tests','security']) {
-        const cell=page.locator('#c-ready rect');
-        const rendered=await cell.evaluateAll((els,arg)=>els.find(e=>e.dataset.row===arg.key&&e.dataset.col===arg.dim)?.getAttribute('aria-label'),{key,dim});
-        assert.ok(rendered?.endsWith(': '+rd[dim]),'numeric matrix cell '+key+'/'+dim);
-      }
-    }
     fs.mkdirSync(path.join(__dirname, '../ops/logs'), {recursive: true});
     await page.screenshot({path: path.join(__dirname, '../ops/logs/dashboard.png')});
     await page.click('#tab-tree');
@@ -119,6 +127,6 @@ const path = require('node:path');
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     assert.equal(overflow, false, 'dashboard must fit a narrow viewport');
     assert.deepEqual(errors, [], 'no browser runtime errors');
-    console.log('Browser smoke passed: source selection/persistence, charts, tree search, project cards, mobile layout.');
+    console.log('Browser smoke passed: source selection/persistence, sprint dashboard, tree search, project cards, mobile layout.');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

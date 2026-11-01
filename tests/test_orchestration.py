@@ -85,3 +85,31 @@ class BudgetWatchTests(DataCase):
         self.assertEqual((b['usd'], b['budget']), (want, 2.0))
         self.assertTrue(any(n['kind'] == 'budget' for n in w.notifications(w.state(), [])))
         self.assertTrue(any(e['kind'] == 'budget' for e in w.state()['teamlead']))
+
+
+class FakeCtx:
+    def __init__(self, files):
+        self.files = files; self.t = dict(id='AL-1'); self.handoff = {}
+
+    def artifact(self, spec):
+        return self.files.get(spec['path'].split('/')[-1])
+
+
+class TraceTests(DataCase):
+    def test_trace_finds_dangling_and_untraced(self):
+        files = {'BRD.md': '# Требования\nBR-1 выгрузка', 'SRS.md': '## FR\nFR-1 по BR-1\nFR-2 фильтр\nNFR-1 скорость\nсм. API-1',
+                 'RTM.md': '| BR-1 | FR-1 | TC-1 |\n| BR-2 | FR-2 | |', 'HLD.md': 'компонент для FR-1, FR-9, ADR-1, ADR-2',
+                 'adr': '# ADR-1\nрешение'}
+        tr = P.trace(FakeCtx(files))
+        self.assertEqual(tr['requirements'], 3)
+        self.assertEqual(tr['untraced'], ['NFR-1'])                                 # нет в RTM
+        self.assertEqual(set(tr['dangling']), {'BR-2', 'FR-9', 'ADR-2'})   # TC-1 — дело QA; API без api.md — в SRS
+        ok, detail = P.machine(dict(check='trace'), 'system_analyst', FakeCtx(files), {})
+        self.assertFalse(ok); self.assertIn('NFR-1 нет в RTM', detail)
+        ok, detail = P.machine(dict(check='trace'), 'solution_architect', FakeCtx(files), {})
+        self.assertFalse(ok); self.assertIn('FR-9', detail); self.assertNotIn('BR-2', detail)   # архитектору — его ссылки
+        files.update({'RTM.md': '| BR-1 | FR-1 FR-2 NFR-1 | TC-1 |', 'HLD.md': 'FR-1, ADR-1', 'SRS.md': '## FR\nFR-1 по BR-1\nFR-2\nNFR-1'})
+        ok, detail = P.machine(dict(check='trace'), 'system_analyst', FakeCtx(files), {})
+        self.assertTrue(ok, detail)
+        ok, detail = P.machine(dict(check='trace'), 'system_analyst', FakeCtx({'SRS.md': 'без кодов'}), {})
+        self.assertFalse(ok); self.assertIn('нет кодов', detail)

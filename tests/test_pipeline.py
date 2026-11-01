@@ -124,6 +124,8 @@ class PipelineTests(DataCase):
             self.assertTrue(self.do_role(role, 'analysis')['accepted'])
         self.assertEqual(self.task()['pipeline']['stage'], 'analysis')             # ждёт ворот тимлида
         gate = self.claim('teamlead', gate='analysis')
+        dg = w.action(dict(op='packet', ref=self.ref, run=gate))['digest']          # сводка вместо чтения всего (Б6)
+        self.assertGreater(dg['trace']['requirements'], 0); self.assertEqual(dg['trace']['dangling'], {})
         w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve',
                       notes='SRS, HLD и ADR согласованы с BRD, разработка возможна без трактовок'))
         self.assertEqual(self.task()['pipeline']['stage'], 'development')
@@ -305,18 +307,35 @@ class PipelineTests(DataCase):
 
     # --- реестр дефектов (TT-73)
 
-    def to_testing(self):
-        self.ref = self.idea()
+    def to_testing(self, fresh=True):
+        if fresh:
+            self.ref = self.idea()
         self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
                      needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
         for role in ('system_analyst', 'solution_architect'):
             self.do_role(role, 'analysis')
-        gate = self.claim('teamlead', gate='analysis')
-        w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve', notes='Анализ согласован, можно разрабатывать'))
+        if 'analysis' not in self.task()['pipeline']['gates']:
+            gate = self.claim('teamlead', gate='analysis')
+            w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve', notes='Анализ согласован, можно разрабатывать'))
         self.do_role('developer', 'development', extra=[('app.py', 'x = 3\n'), ('tests/test_app.py', 'assert True\n')])
         self.do_role('reviewer', 'review', verdict='approve')
         self.do_role('devops', 'deploy_test')
         self.assertEqual(self.task()['pipeline']['stage'], 'testing')
+
+    def test_simple_task_gates_closed_by_server(self):
+        self.ref = self.idea()
+        d = w.read('projects.json', {})
+        t = next(x for x in d['projects']['alpha-api']['backlog'] if 'alpha-api/' + x['id'] == self.ref)
+        t.update(size='S', risk='low', work_type='implementation'); w.save('projects.json', d)
+        self.to_testing(fresh=False)
+        self.assertFalse([r for r in w.state()['runs'] if r['ref'] == self.ref and r.get('role') == 'teamlead'])
+        g = self.task()['pipeline']['gates']['analysis']
+        self.assertEqual((g['decision'], g['by']), ('approve', 'сервер'))
+        self.assertIn('коды требований сходятся', g['notes'])
+        self.do_role('qa', 'testing', signoff=True)
+        t = self.task()
+        self.assertEqual(t['pipeline']['gates']['release']['by'], 'сервер')
+        self.assertEqual(t['status_note'], 'Ждёт одобрения релиза владельцем')     # «да» владельца сервер не заменяет
 
     def test_technical_task_skips_market_research_and_doc_reads_sections(self):
         self.ref = self.idea()

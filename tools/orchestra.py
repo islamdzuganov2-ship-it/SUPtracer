@@ -296,6 +296,37 @@ def hold(s, run, tasks, conf=None):
     return None
 
 
+def server_gate(s, t, pipe, gate):
+    """Основание закрыть ворота без тимлида или None. Только простые задачи (класс 1) без возвратов и дефектов."""
+    if w.cx.assess(t)['tier'] != 1 or pipe.get('loops') or any(d['status'] == 'open' for d in pipe.get('defects') or []):
+        return None
+    if gate == 'analysis':
+        tr = P.trace(ctx_for(t, pipe))
+        if tr['dangling'] or tr['untraced'] or not tr['requirements']:
+            return None
+        return 'простая задача: DoD ролей анализа сдан, коды требований сходятся (%d требований в RTM)' % tr['requirements']
+    if gate == 'release':
+        import ci
+        run = ci.last(ref=t['ref'], scope='test')
+        qa = (pipe['roles'].get(key('testing', 'qa')) or {}).get('handoff') or {}
+        if qa.get('signoff') and run and run['status'] in ('passed', 'skipped'):
+            return 'простая задача: подпись QA, CI на тестовой ветке — %s, открытых дефектов нет' % ci.summary(run)[:120]
+    return None
+
+
+def gate_digest(t, pipe, gate):
+    """Сводка для тимлида: коды и их сверка, размеры артефактов, история возвратов — вместо чтения всего подряд."""
+    ctx = ctx_for(t, pipe)
+    out = dict(trace=P.trace(ctx), loops=pipe.get('loops') or {},
+               defects=[{k: d.get(k) for k in ('id', 'title', 'severity', 'status')} for d in pipe.get('defects') or []],
+               dod={k: [x['id'] for x in (e.get('result') or []) if x.get('ok') is False] for k, e in pipe['roles'].items()},
+               rule='Сначала эта сводка; документы читай разделами (op=doc) там, где сводка показывает расхождение или риск.')
+    if gate == 'release':
+        import ci
+        out['ci'] = {sc: ci.summary(ci.last(ref=t['ref'], scope=sc)) for sc in ('task', 'test')}
+    return out
+
+
 def dispatch_order(run, tasks, prio):
     """Порядок открытия: Решала первым (А5), затем этапы ближе к main, затем приоритет и возраст."""
     st = run.get('stage')
@@ -362,6 +393,12 @@ def orchestrate(s, t, pipe, at):
         gate = P.STAGE[stage].get('gate')
         if gate:
             g = pipe['gates'].get(gate)
+            if not g:
+                why = server_gate(s, t, pipe, gate)
+                if why:
+                    # Простая задача с чистыми проверками: ворота закрывает сервер, тимлид не открывается (Б6).
+                    g = pipe['gates'][gate] = dict(decision='approve', notes=why, at=at.isoformat(), by='сервер')
+                    journal(s, pipe, t['ref'], 'gate', 'Сервер (%s): approve — %s' % (gate, why), 'teamlead')
             if not g:
                 if not active_run(s, t['ref'], role='teamlead', gate=gate):
                     create_role_run(s, t, pipe, stage, 'teamlead', at, gate=gate)
@@ -988,6 +1025,8 @@ def role_packet(t, run, agent, toc=True):
             escalation='Прежняя эскалация тимлиду (до Решалы): разбери блокер, верни задачу или разблокируй.'
         ).get(run.get('gate'))
         packet['journal'] = pipe.get('journal', [])[-15:]
+        if run.get('gate') in ('analysis', 'release'):
+            packet['digest'] = gate_digest(t, pipe, run['gate'])
         packet['handoff'] = 'tt_work op=gate ref=%s run=%s worker=<ты> decision=approve|return notes=… [to_stage, roles]' % (t['ref'], run['id'])
     else:
         packet['escalate'] = ('tt_work op=escalate ref=%s run=%s worker=<ты> reason=… tried=… need=… — проблема или ограничение: '

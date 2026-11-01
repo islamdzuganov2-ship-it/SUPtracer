@@ -99,7 +99,9 @@ ROLES = {
              item('sa-data', 'Логическая модель данных и Data Mapping (data-model.md)', 'artifact', art=3, allow_na=True),
              item('sa-rtm', 'RTM: таблица «бизнес-требование → системное требование»', 'machine', check='table', art=4),
              item('sa-ui', 'Требования к интерфейсу привязаны к макетам дизайнера', 'evidence', allow_na=True),
-             item('sa-decomp', 'Задачи для разработки с понятными критериями приёмки (dev-tasks.md)', 'artifact', art=5)]),
+             item('sa-decomp', 'Задачи для разработки с понятными критериями приёмки (dev-tasks.md)', 'artifact', art=5),
+             item('sa-trace', 'Коды требований согласованы: каждое требование SRS есть в RTM, ссылки на коды ведут к определённым',
+                  'machine', check='trace')]),
 
     'solution_architect': dict(
         title='Solution-архитектор', stage='analysis', min_tier=2,
@@ -121,7 +123,8 @@ ROLES = {
              item('arch-threats', 'Модель угроз и матрица рисков с мерами', 'artifact', art=2),
              item('arch-stack', 'Стек проверен на соответствие проекту и его ограничениям', 'evidence'),
              item('arch-poc', 'Отчёт PoC, если проверялась новая технология', 'artifact', art=3, allow_na=True),
-             item('arch-handoff', 'Эпики и задачи переданы аналитику и разработке', 'evidence')]),
+             item('arch-handoff', 'Эпики и задачи переданы аналитику и разработке', 'evidence'),
+             item('arch-trace', 'HLD и ADR ссылаются только на существующие требования и ADR', 'machine', check='trace')]),
 
     'designer': dict(
         title='UX/UI-дизайнер', stage='analysis', min_tier=2,
@@ -482,8 +485,66 @@ def check_item(it, role, ctx, state):
     return False, 'неизвестный вид пункта'
 
 
+# Коды требований и решений: где каждый вид определяется (Б6). FR/NFR/SR/UC/US — в SRS, BR — в BRD,
+# API — в api.md (или SRS), ADR — в файлах adr/, TC — в тест-кейсах QA.
+CODE = re.compile(r'\b(FR|NFR|SR|BR|UC|US|API|ADR|TC)-(\d+(?:\.\d+)?)\b')
+DEFINED_IN = {'FR': ('system_analyst', 0), 'NFR': ('system_analyst', 0), 'SR': ('system_analyst', 0),
+              'UC': ('system_analyst', 0), 'US': ('system_analyst', 0), 'BR': ('product_owner', 0),
+              'API': ('system_analyst', 2), 'ADR': ('solution_architect', 1), 'TC': ('qa', 0)}
+
+
+def codes(text):
+    return {'%s-%s' % m for m in CODE.findall(text or '')}
+
+
+def trace(ctx):
+    """Сверка кодов в артефактах анализа: что определено, на что ссылаются, что не попало в RTM."""
+    docs = {}
+    for role in ('product_owner', 'system_analyst', 'solution_architect', 'designer'):
+        for i, a in enumerate(ROLES[role]['artifacts']):
+            text = ctx.artifact(a)
+            if text is not None:
+                docs[(role, i)] = text
+    if ('system_analyst', 2) not in docs and ('system_analyst', 0) in docs:
+        docs[('system_analyst', 2)] = docs[('system_analyst', 0)]      # нет api.md — контракты в SRS
+    defined = {}
+    for code in set().union(*[codes(t) for t in docs.values()] or [set()]):
+        src = DEFINED_IN[code.split('-')[0]]
+        if src in docs and code in codes(docs[src]):
+            defined[code] = src
+    dangling = {}
+    for (role, i), text in docs.items():
+        for code in codes(text):
+            src = DEFINED_IN[code.split('-')[0]]
+            if src[0] == 'qa' or code in defined:
+                continue                     # тест-кейсы пишет QA позже; определённое — в порядке
+            if src in docs or src[0] in ('system_analyst', 'product_owner', 'solution_architect'):
+                dangling.setdefault(code, set()).add(ROLES[role]['artifacts'][i]['path'].split('/')[-1])
+    srs = codes(docs.get(('system_analyst', 0)))
+    rtm = codes(docs.get(('system_analyst', 4)))
+    reqs = sorted(c for c in srs if c.split('-')[0] in ('FR', 'NFR', 'SR', 'UC', 'US'))
+    untraced = [c for c in reqs if c not in rtm] if ('system_analyst', 4) in docs else []
+    by = {}
+    for c in defined:
+        by[c.split('-')[0]] = by.get(c.split('-')[0], 0) + 1
+    return dict(defined=by, requirements=len(reqs), dangling={k: sorted(v) for k, v in sorted(dangling.items())},
+                untraced=untraced, docs=len(docs))
+
+
 def machine(it, role, ctx, state, evidence=''):
     check = it['check']; t = ctx.t
+    if check == 'trace':
+        tr = trace(ctx)
+        if role == 'system_analyst' and not tr['requirements']:
+            return False, 'в SRS нет кодов требований (FR-1, NFR-1, SR-1…): без них RTM и тесты не связать'
+        dangling = {k: v for k, v in tr['dangling'].items() if role == 'system_analyst' or not k.startswith(('BR', 'API'))}
+        bad = ['%s (в %s) не определён' % (k, ', '.join(v)) for k, v in list(dangling.items())[:8]]
+        if role == 'system_analyst':
+            bad += ['%s нет в RTM' % c for c in tr['untraced'][:8]]
+        if bad:
+            return False, 'коды не сходятся: ' + '; '.join(bad)
+        return True, 'требований %d, все в RTM; висящих ссылок нет (%s)' % (
+            tr['requirements'], ', '.join('%s %d' % kv for kv in sorted(tr['defined'].items())))
     if check in ('links', 'mermaid', 'table', 'contains', 'no_blockers'):
         spec = _role_art(role, it['art']); text = ctx.artifact(spec)
         if text is None:

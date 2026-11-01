@@ -259,7 +259,11 @@ def lean_args(agent, run):
     research = (pipe.get("needs") or {}).get("research", True) is not False
     extra, env = launcher.lean(agent, run["role"], research=research, own=own)
     if extra or env:
-        env = dict(env, TASKTREKER_CEILING=str(workflow.settings().get("context_ceiling", workflow.CONTEXT_CEILING)),
+        route = (run.get("packet") or {}).get("route") or {}
+        pol = dict(P.read_policy(t, run["role"], workflow.cx.assess(t)["tier"]) if t.get("id") else {}, ref=run["ref"], run=run["id"])
+        env = dict(env, TASKTREKER_READ_POLICY=json.dumps(pol, ensure_ascii=False),
+                   TASKTREKER_BUDGET=str(route.get("budget_tokens") or ""),
+                   TASKTREKER_CEILING=str(workflow.settings().get("context_ceiling", workflow.CONTEXT_CEILING)),
                    TASKTREKER_RELAY='tt_work op=pause reason=context ref=%s run=%s worker=%s checkpoint="…"'
                    % (run["ref"], run["id"], run.get("worker") or workflow.worker_id(run, agent)))
     return extra, env

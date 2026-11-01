@@ -306,7 +306,7 @@ HANDLERS = {"tt_context": t_context, "tt_recall": t_recall, "tt_search": t_searc
             "tt_ingest": t_ingest, "tt_tree": t_tree, "tt_projects": t_projects}
 
 INSTRUCTIONS += "\n6. Начни с tt_work op=queue agent=<claude|codex> (свой ИИ): там явные запросы запуска с доски. До реализации разложи новый запрос через op=plan: root, критерии, размер, риск, зависимости, по возможности scope (пути правки). Затем next agent=<свой ИИ> → take (ref, model, worker): take атомарно ставит метку claimed_by. Задачу с живой меткой другого ИИ не бери и её scope не правь; работай в ветке из packet.coordination.branch. Пока работаешь дольше аренды — heartbeat (ref, run, worker). finish требует доказательств проверок. Каталог, линейки ИИ и измерения: op=models; распределение проекта между ИИ: op=split (dry_run по умолчанию)."
-INSTRUCTIONS += "\n7. Конвейер: идею владельца из разговора заводи tt_work op=idea (project, title, text, source=claude|codex). Задачи конвейера ведут роли: твоё задание называет роль и скилл tt-<роль>; паспорт — op=packet с run; сдать этап — op=handoff с items по каждому пункту DoD (status done|na, evidence); не принятая передача возвращает список failed. Вернуть назад — op=return, блокер — op=escalate, тимлид решает ворота op=gate. Обычные take/finish/complete к задачам конвейера не применяются. Документы ветки задачи читай разделами: op=doc (ref, path) — оглавление с размером разделов, op=doc (ref, path, section) — один раздел."
+INSTRUCTIONS += "\n7. Конвейер: идею владельца из разговора заводи tt_work op=idea (project, title, text, source=claude|codex). Задачи конвейера ведут роли: твоё задание называет роль и скилл tt-<роль>; паспорт — op=packet с run; сдать этап — op=handoff с items по каждому пункту DoD (status done|na, evidence); не принятая передача возвращает список failed. Вернуть назад — op=return, блокер — op=escalate, тимлид решает ворота op=gate. Обычные take/finish/complete к задачам конвейера не применяются. Документы ветки задачи читай разделами: op=doc (ref, path) — оглавление с размером разделов, op=doc (ref, path, section) — один раздел; целиком — op=doc full=true why=<зачем>, по бюджету запуска."
 INSTRUCTIONS += "\n8. Лимит токенов: при предупреждении о скором исчерпании лимита закоммить незавершённое в ветку задачи, вызови tt_work op=pause (ref, run, worker, checkpoint — что сделано, что осталось, следующий шаг; можно resets_at) и остановись. Сервер продолжит ту же сессию после сброса лимита (без известного времени — через 5 часов); после «продолжай» — heartbeat, packet и работа с точки остановки."
 INSTRUCTIONS += "\n9. Проблема или ограничение (нет доступа, противоречие, блокер, не получается) — не жди и не спрашивай владельца: tt_work op=escalate (ref, run, worker, reason, tried, need). Её разберёт агент «Решала»: найдёт пути решения или сам позовёт владельца."
 TOOLS.append({"name": "tt_work", "title": "Планирование и исполнение задач",
@@ -325,13 +325,13 @@ TOOLS.append({"name": "tt_work", "title": "Планирование и испо�
         "defects": {"type":"array", "items":{"type":"object"}}, "fixes": {"type":"object"},
         "tasks": {"type":"array", "items":{"type":"object"}},
         "projects": {"type":"array", "items":STR}, "changes":{"type":"object"},
-        "path": STR, "section": STR, "code": STR, "recipe": {"type":"object"}, "contract_group": STR,
+        "path": STR, "section": STR, "code": STR, "full": {"type":"boolean"}, "why": STR, "recipe": {"type":"object"}, "contract_group": STR,
         "priority": STR, "offset": {"type":"integer"}, "limit": {"type":"integer"}}, ["op"]),
     "annotations": dict(WRITE, idempotentHint=False, title="Планирование и исполнение")})
 # Сессия роли конвейера (Л1): в списке только tt_work и tt_recall с короткими описаниями.
 # Полный список с инструкциями — ~5 тыс. токенов в начале каждого хода сессии роли, а ей нужен один инструмент.
 ROLE_WORK = ("Конвейер TaskTreker для роли. claim (ref, run, worker, model); packet (ref, run) — паспорт роли, запрашивай один раз; "
-             "doc (ref, path) — указатель документа: разделы, вес, коды требований; doc (ref, path, section|code) — один раздел; "
+             "doc (ref, path) — указатель документа: разделы, вес, коды требований; doc (ref, path, section|code) — один раздел; doc (ref, run, path, full=true, why) — целиком, с обоснованием; "
              "heartbeat; handoff (ref, run, worker, summary, items {id: {status: done|na, evidence}}); return (to_stage, defects); "
              "escalate (reason, tried, need); pause (checkpoint; reason=context — эстафета: свежая сессия с точки остановки); gate — тимлид; resolve — Решала. Аргументы — в задании и паспорте.")
 ROLE_INSTRUCTIONS = ("TaskTreker: ты в сессии роли конвейера. Работай через tt_work по заданию; документы читай указателем и разделами (op=doc), "

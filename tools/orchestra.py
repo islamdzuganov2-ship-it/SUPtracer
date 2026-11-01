@@ -1090,6 +1090,8 @@ def op_doc(s, req, t, at):
     text = ctx_for(t, pipe).read(path)
     if text is None:
         raise ValueError('Нет файла %s в ветке задачи' % path)
+    if str(req.get('full') or '').lower() in ('1', 'true', 'yes', 'да'):
+        return full_read(t, req, path, text)
     want = str(req.get('code') or req.get('section') or '').strip()
     if not want:
         return dict(path=path, tokens=P.tokens(text), index=P.index_lines(P.doc_index(text), 80),
@@ -1100,6 +1102,45 @@ def op_doc(s, req, t, at):
     limit = 24000
     return dict(path=path, section='%d %s' % (entry['n'], entry['title']), lines=entry['lines'], tokens=P.tokens(body),
                 text=body[:limit], truncated=len(body) > limit)
+
+
+FULL_LIMIT = 400_000     # символов: больше одного документа целиком сервер не отдаёт
+
+
+def full_read(t, req, path, text):
+    """Документ целиком по обоснованию (TT-96): роль пишет, зачем ей весь документ. Вход её этапа и документ
+    до порога сложности — без счёта; остальное — из бюджета обоснованных чтений запуска. Каждое такое чтение
+    с причиной и весом — в журнал тимлида: видно, кто и зачем читал целиком."""
+    why = str(req.get('why') or '').strip()
+    if len(why) < 20:
+        raise ValueError('why: зачем нужен весь документ, а не раздел (не короче 20 символов) — '
+                         'например «сверяю согласованность всех FR с HLD перед ревью»')
+    size = P.tokens(text)
+    with w.locked():
+        s = w.state()
+        runs = [r for r in s['runs'] if r['ref'] == t['ref'] and r.get('role') and r['status'] in ('queued', 'running')]
+        run = next((r for r in runs if r['id'] == req.get('run')), runs[0] if len(runs) == 1 else None)
+        if not run:
+            raise ValueError('run: укажи свой запуск (%s)' % (', '.join(r['id'] + ' ' + r['role'] for r in runs) or 'нет активных'))
+        pol = P.read_policy(t, run['role'], w.cx.assess(t)['tier'])
+        free = size <= pol['free'] or path in pol['primary'] or path in [P.art_path(t['id'], a['path']) for a in P.ROLES[run['role']]['artifacts']]
+        used = sum(x['tokens'] for x in run.get('full_reads') or [] if not x.get('free'))
+        if not free and used + size > pol['budget']:
+            raise ValueError('Бюджет полных чтений запуска: прочитано ~%d тыс. из %d тыс. токенов (класс сложности %d), %s — ещё ~%d тыс. '
+                             'Читай разделами (section=|code=). Если без документа целиком задача не решается — tt_work op=escalate.'
+                             % (used // 1000, pol['budget'] // 1000, pol['tier'], path, size // 1000))
+        run.setdefault('full_reads', []).append(dict(path=path, tokens=size, why=why[:300], free=free, at=w.now().isoformat(timespec='seconds')))
+        tt = w.task_for(t['ref'])
+        if tt.get('pipeline'):
+            import copy
+            pp = copy.deepcopy(tt['pipeline'])
+            journal(s, pp, t['ref'], 'read_full', '%s читает целиком %s (~%d тыс. токенов%s): %s' % (
+                run['role'], path, size // 1000, '' if free else ', бюджет %d/%d тыс.' % ((used + size) // 1000, pol['budget'] // 1000), why[:200]),
+                run['role'], run.get('stage'))
+            w.write_patches(s, {t['ref']: dict(pipeline=pp)})
+        w.save('workflow.json', s)
+    return dict(path=path, full=True, tokens=size, budget_left=None if free else (pol['budget'] - used - size) // 1000 * 1000,
+                text=text[:FULL_LIMIT], truncated=len(text) > FULL_LIMIT)
 
 
 def role_packet(t, run, agent, toc=True):

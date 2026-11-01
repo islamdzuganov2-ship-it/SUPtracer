@@ -68,11 +68,25 @@ class ReadGuardTests(unittest.TestCase):
         self.assertIsNone(self.read(f))                              # файл изменился — можно
         st = read_guard.load('S1'); self.assertEqual(st['denied'], 1); self.assertGreater(st['saved_tokens'], 0)
 
+    def test_full_read_follows_role_and_complexity_policy(self):
+        big = '# BRD\n' + ''.join('## Раздел %d BR-%d\n%s\n' % (i, i, 'текст требования ' * 60) for i in range(1, 9))
+        brd = self.docs / 'BRD.md'; brd.write_text(big, encoding='utf-8')
+        pol = lambda **kw: mock.patch.dict(os.environ, {'TASKTREKER_READ_POLICY': json.dumps(dict(dict(free=3000, budget=20000, tier=1, primary=[]), **kw))})
+        with pol():
+            out = self.read(brd)['hookSpecificOutput']['permissionDecisionReason']
+            self.assertIn('класс сложности 1', out); self.assertIn('~20 тыс', out)
+        with pol(free=8000, tier=3):
+            self.assertIsNone(self.read(brd))                        # сложная задача: порог выше — читается целиком
+        time.sleep(0.01); brd.write_text(big + '\n', encoding='utf-8')   # изменился — не повтор прочитанного
+        with pol(primary=['docs/tasks/T-1/BRD.md']):
+            self.assertIsNone(self.read(Path(self.tmp) / 'docs' / 'tasks' / 'T-1' / 'BRD.md'))   # вход этапа роли
+
     def test_big_foreign_document_gets_index_instead_of_text(self):
         big = '# BRD\n' + ''.join('## Раздел %d BR-%d\n%s\n' % (i, i, 'текст требования ' * 60) for i in range(1, 9))
         brd = self.docs / 'BRD.md'; brd.write_text(big, encoding='utf-8')
         out = self.read(brd)['hookSpecificOutput']['permissionDecisionReason']
-        self.assertIn('целиком не читай', out); self.assertIn('2 Раздел 1 BR-1', out); self.assertIn('offset', out)
+        self.assertIn('без причины не читается', out); self.assertIn('2 Раздел 1 BR-1', out); self.assertIn('offset', out)
+        self.assertIn('full=true why=', out)                         # путь к полному чтению с обоснованием
         own = self.docs / 'SRS.md'; own.write_text(big, encoding='utf-8')
         self.assertIsNone(self.read(own))                            # свой артефакт роль читает
         small = self.docs / 'HLD.md'; small.write_text('# HLD\nкоротко\n', encoding='utf-8')

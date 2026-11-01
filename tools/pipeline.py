@@ -403,6 +403,28 @@ def tokens(text):
     return int(latin / 2.55 + (len(text) - latin) / 2.2) + 1
 
 
+# Полное чтение документа (TT-96) — не запрет, а потребность, обоснованная ролью и сложностью задачи.
+# Вход этапа роль читает целиком по смыслу своей работы: аналитик переводит весь BRD, архитектор проектирует
+# по всему SRS, QA покрывает его тестами. Разработчик, ревьюер, DevOps и тимлид берут разделы по кодам из INDEX.md.
+PRIMARY_INPUTS = {
+    'system_analyst': [('product_owner', 0)],
+    'solution_architect': [('system_analyst', 0)],
+    'designer': [('product_owner', 0)],
+    'marketer': [('product_owner', 0)],
+    'qa': [('system_analyst', 0)],
+}
+# По классу сложности задачи: free — документ не больше этого читается целиком без вопросов (раздел ненамного
+# меньше); budget — сколько токенов запуск может прочитать целиком сверх этого с обоснованием (op=doc full=true why=…).
+FULL_READ = {1: dict(free=3000, budget=20_000), 2: dict(free=5000, budget=50_000), 3: dict(free=8000, budget=120_000)}
+
+
+def read_policy(t, role, tier):
+    """Политика полного чтения запуска роли: порог, бюджет обоснованных чтений и вход этапа (пути)."""
+    p = dict(FULL_READ.get(tier) or FULL_READ[2], tier=tier)
+    p['primary'] = [art_path(t['id'], ROLES[r]['artifacts'][i]['path']) for r, i in PRIMARY_INPUTS.get(role, [])] if t.get('id') else []
+    return p
+
+
 def _code_key(c):
     p, num = c.split('-', 1)
     return p, [(0, int(x), '') if x.isdigit() else (1, 0, x) for x in re.split(r'[.-]', num)]

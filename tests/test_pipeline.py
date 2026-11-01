@@ -378,6 +378,14 @@ class PipelineTests(DataCase):
         self.assertEqual(self.task()['pipeline']['contract_group'], 'экспорт')
         toc = w.action(dict(op='doc', ref=self.ref, path=rel))
         self.assertTrue(any(' Риск' in line and 'стр.' in line for line in toc['index']), toc)
+        # Целиком — с обоснованием (TT-96): BRD — вход этапа аналитика, без счёта бюджета; причина — в журнал тимлида
+        sa_run = self.run_of('system_analyst')['id']
+        with self.assertRaisesRegex(ValueError, 'why'):
+            w.action(dict(op='doc', ref=self.ref, run=sa_run, path=rel, full=True, why='надо'))
+        full = w.action(dict(op='doc', ref=self.ref, run=sa_run, path=rel, full=True, why='Перевожу весь BRD в SRS: нужны все разделы'))
+        self.assertTrue(full['full']); self.assertIn('## Риск', full['text']); self.assertIsNone(full['budget_left'])
+        self.assertTrue(any(e['kind'] == 'read_full' and 'Перевожу' in e['text'] for e in self.task()['pipeline']['journal']))
+        self.assertEqual(self.run_of('system_analyst')['full_reads'][0]['free'], True)
         sec = w.action(dict(op='doc', ref=self.ref, path=rel, section='риск'))
         self.assertTrue(sec['text'].startswith('## Риск'))
         num = next(line.split()[0] for line in toc['index'] if ' Риск' in line)

@@ -315,6 +315,20 @@ class RelayTests(DataCase):
             self.assertIsNotNone(hit())                                                 # 130% — напоминает снова
         self.assertIsNone(hit())                                                        # без потолка — молчит
 
+    def test_hook_warns_about_run_budget_inside_session(self):
+        import read_guard
+        path = self.claude_log('sess-b', [self.usage_row(40000), self.usage_row(40000), self.usage_row(50000)])
+        env = {'TASKTREKER_BUDGET': '100000', 'TASKTREKER_READS': str(Path(self.tmp) / 'reads')}
+        hit = lambda: read_guard.decide(dict(hook_event_name='PostToolUse', session_id='B', transcript_path=str(path)))
+        with mock.patch.dict(os.environ, env):
+            self.assertIsNone(hit())                                  # r40000 повтором не считается: 90 тыс. < 100 тыс.
+            self.claude_log('sess-b', [self.usage_row(20000)])
+            self.assertIn('ориентира роли', hit()['hookSpecificOutput']['additionalContext'])
+            self.assertIsNone(hit())
+            self.claude_log('sess-b', [self.usage_row(60000)])
+            self.assertIn('op=escalate', hit()['hookSpecificOutput']['additionalContext'])   # 150%
+            self.assertEqual(read_guard.load('B')['b_total'], 170424)   # 4 разных ответа: контекст + 106
+
     def test_profile_sums_sessions_of_a_run(self):
         import tokens
         self.launched_run()

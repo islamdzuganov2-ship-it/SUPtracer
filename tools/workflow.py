@@ -383,6 +383,10 @@ def next_id(project, taken=()):
         counts = {}
         for pre, _ in found: counts[pre] = counts.get(pre, 0) + 1
         prefix = max(counts, key=lambda k: (counts[k], k)) if counts else 'T-'
+    elif not any(pre == prefix for pre, _ in found):
+        # id_prefix «EGE» при серии «EGE-01…»: продолжать серию с разделителем, а не начинать «EGE01».
+        same = [pre for pre, _ in found if pre.rstrip('-_. ') == prefix.rstrip('-_. ')]
+        if same: prefix = max(set(same), key=same.count)
     numbers = [int(n) for pre, n in found if pre == prefix]
     width = max((len(n) for pre, n in found if pre == prefix), default=2)
     return prefix + str(max(numbers, default=0) + 1).zfill(width)

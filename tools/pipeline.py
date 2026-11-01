@@ -229,6 +229,8 @@ ROLES = {
                    doc(ART + '/release-notes.md', ['Что вошло', 'Откат'], 300)],
         dod={'deploy_test': [
                  item('do-runbook', 'Runbook: развёртывание, откат, проверка, окружение', 'artifact', art=0),
+                 item('do-spec-delta', 'Дельта ТЗ задачи (docs/tasks/<id>/spec-delta.md, если есть) влита в основное ТЗ проекта '
+                      'одним коммитом; отчёт задачи переведён на spec_impact: updated', 'evidence', allow_na=True),
                  item('do-secrets', 'Секретов в изменениях нет', 'machine', check='no_secrets'),
                  item('do-ci', 'Конфигурация CI проекта есть и проверена (pm.py ci show)', 'machine', check='ci_config'),
                  item('do-monitoring', 'Метрики и оповещения настроены', 'evidence', allow_na=True),

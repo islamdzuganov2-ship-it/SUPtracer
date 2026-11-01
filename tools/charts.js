@@ -163,9 +163,9 @@ const VIZ = (() => {
   /* Горизонтальные стопочные бары: состав целого по категориям, когда важны
    * и доля, и абсолютный размер. Общая длина = целое, поэтому проекты сравнимы
    * между собой не только по проценту. */
-  function hstack(host, {title, sub, rows, series, fmt, note}) {
+  function hstack(host, {title, sub, rows, series, fmt, note, rightWidth}) {
     const w = hostWidth(host);
-    const RH = 28, PAD_T = 6, LW = Math.min(180, Math.max(96, w * 0.30)), VW = 60, GAP = 2;
+    const RH = 28, PAD_T = 6, LW = Math.min(180, Math.max(96, w * 0.30)), VW = rightWidth || 60, GAP = 2;
     const h = PAD_T + rows.length * RH + 6;
     const svg = frame(host, w, h, title, sub);
     const totals = rows.map(r => r.parts.reduce((s, v) => s + v, 0));

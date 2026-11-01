@@ -11,7 +11,7 @@
   · обновление только методом POST и только со своим заголовком — чтобы чужая
     вкладка в браузере не могла запустить сбор по ссылке.
 
-  py tools/serve.py [--port 8787] [--no-browser]
+  py tools/serve.py [--port 8787] [--no-browser] [--no-dispatch]
 """
 import json
 import os
@@ -528,6 +528,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(404, {"ok": False, "error": "у запуска нет журнала фоновой сессии"})
             return self.send_json(200, {"ok": True, "data": dict(run=rid, alive=launcher.alive(run["launch"].get("pid")),
                                                                  log=launcher.tail(log, 300))})
+        if path == "/api/taskview":
+            # Факт по задачам для дашборда: считается из данных системы при каждом запросе, без ИИ (TT-95).
+            import taskview
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                hours = max(1, min(24 * 90, int((q.get("hours") or ["24"])[0])))
+            except ValueError:
+                hours = 24
+            return self.send_json(200, {"ok": True, "data": taskview.build((q.get("project") or [""])[0] or None, hours)})
         if path == "/api/cilog":
             import ci
             from urllib.parse import parse_qs, urlparse
@@ -659,7 +669,8 @@ def main():
     if "--no-browser" not in args:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
-        threading.Thread(target=dispatcher, daemon=True, name="автозапуск ревью").start()
+        if "--no-dispatch" not in args:      # просмотр без автозапуска: второй экземпляр не открывает сессии
+            threading.Thread(target=dispatcher, daemon=True, name="автозапуск ревью").start()
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\nостановлен")

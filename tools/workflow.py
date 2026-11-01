@@ -642,6 +642,9 @@ def session_lost(ref, run_id, reason):
                             why_owner='Сессия Решалы %d раза завершилась без решения (%s)' % (3, reason), notified=False,
                             options=prob.get('options') or [])
             write_patches(s, {ref: dict(status='blocked', claimed_by=None, status_note='👤 Нужен владелец: Решала не справился с проблемой')})
+        elif t.get('pipeline') and run.get('role') and run['role']!='teamlead' and orchestra.session_recipe(s, t, copy.deepcopy(t['pipeline']), run, at) is not None:
+            pipe=copy.deepcopy(t['pipeline'])
+            write_patches(s, {ref: orchestra.session_recipe(s, t, pipe, run, at)})   # Р3: роль снова в работе со списком
         elif t.get('pipeline') and run.get('role') and run['role']!='teamlead':
             pipe=copy.deepcopy(t['pipeline'])
             pipe['roles'].setdefault(orchestra.key(run['stage'], run['role']), {}).update(state='pending', feedback=None)
@@ -1295,9 +1298,12 @@ def action(req):
     if agent is not None: check_executor(agent)
     if op=='list':
         snap=snapshot(); tasks=[t for t in snap['tasks'] if not req.get('project') or t['project']==req['project']]
-        return dict(focus=snap['focus'], settings=snap['settings'], total=len(tasks),
-                    tasks=[{k:t.get(k) for k in ('ref','title','status','priority','executor','claim','needs_plan','blocked_by','route')} for t in tasks[:20]],
-                    more='next / packet <ref>; list с project для уточнения')
+        try: offset=max(0,int(req.get('offset') or 0)); limit=max(1,min(100,int(req.get('limit') or 20)))
+        except (TypeError,ValueError): raise ValueError('offset и limit — целые числа (limit до 100)')
+        page=tasks[offset:offset+limit]; nxt=offset+limit if offset+limit<len(tasks) else None
+        return dict(focus=snap['focus'], settings=snap['settings'], total=len(tasks), offset=offset, limit=limit, next_offset=nxt,
+                    tasks=[{k:t.get(k) for k in ('ref','title','status','priority','executor','claim','needs_plan','blocked_by','route')} for t in page],
+                    more=('следующая страница: offset=%d; ' % nxt if nxt is not None else '')+'next / packet <ref>; list с project для уточнения')
     if op=='models':
         metrics=[]
         for m in MODELS:

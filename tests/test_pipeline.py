@@ -372,6 +372,71 @@ class PipelineTests(DataCase):
         brd = next(u for u in up if u['path'] == rel)
         self.assertIn('Риск', brd['sections']); self.assertGreater(brd['tokens'], 100)
 
+    # --- рецепты Решалы (TT-88)
+
+    def esc(self, run, reason, tried='Пробовал дважды', need='Продолжить работу'):
+        return w.action(dict(op='escalate', ref=self.ref, run=run, worker='w-' + run, reason=reason, tried=tried, need=need))
+
+    def test_recipes_close_mechanical_problems_without_resolver(self):
+        self.ref = self.idea()
+        self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
+                     needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
+        sa = self.claim('system_analyst')
+        r = self.esc(sa, 'git commit не проходит: index.lock Permission denied в песочнице')
+        self.assertEqual((r['escalated'], r['recipe']), (False, 'Р1'))
+        self.assertEqual(next(x for x in w.state()['runs'] if x['id'] == sa)['status'], 'running')   # работа продолжается
+        self.assertEqual(w.state()['problems'][-1]['status'], 'resolved')
+        r = self.esc(sa, 'git commit всё равно не проходит: Permission denied')
+        self.assertTrue(r['escalated'])                                                # рецепт не помог — к Решале
+        self.assertTrue(self.run_of('resolver'))
+        # Решала решает и пополняет базу решений
+        res = self.claim('resolver')
+        w.action(dict(op='resolve', ref=self.ref, run=res, worker='w-' + res, options=self.OPTS, decision='continue',
+                      notes='Каталог .git только для чтения: коммитит сервер, роли — только файлы',
+                      instructions='Не коммить сам: сохрани файлы и сдай handoff, сервер закоммитит их',
+                      recipe=dict(title='Каталог .git только для чтения', keywords=['только для чтения', 'git'],
+                                  instructions='Каталог .git в песочнице только для чтения: сохрани файлы и сдай handoff, сервер закоммитит.')))
+        self.assertEqual(w.state()['playbook'][0]['id'], 'К-1')
+        sa = self.claim('system_analyst')
+        r = self.esc(sa, 'Каталог git открыт только для чтения, не сохранить историю')
+        self.assertEqual(r['recipe'], 'К-1')
+        self.assertEqual(w.state()['playbook'][0]['uses'], 1)
+        # Р4: «????» в артефакте не принимается
+        self.write('system_analyst', 'analysis')
+        wt = Path(self.task()['pipeline']['worktree']['path'])
+        srs = wt / P.art_path(self.task()['id'], P.ROLES['system_analyst']['artifacts'][0]['path'])
+        srs.write_text(srs.read_text(encoding='utf-8') + chr(10) + '????????? ?????' + chr(10), encoding='utf-8')
+        git('add', '-A', cwd=wt); git('commit', '-q', '-m', 'garbled', cwd=wt)
+        r = self.handoff('system_analyst', 'analysis', sa)
+        self.assertIn('Р4', str(r['failed']))
+        srs.write_text(srs.read_text(encoding='utf-8').replace('????????? ?????', 'Пояснение'), encoding='utf-8')
+        git('add', '-A', cwd=wt); git('commit', '-q', '-m', 'utf8', cwd=wt)
+        self.assertTrue(self.handoff('system_analyst', 'analysis', sa)['accepted'])
+        # Р5: противоречие контрактов — к системному аналитику с матрицей кодов
+        arch = self.claim('solution_architect')
+        r = self.esc(arch, 'Противоречие между SRS и HLD: контракт API выгрузки расходится по полям')
+        self.assertEqual((r['recipe'], r['returned']), ('Р5', 'analysis'))
+        fb = w.action(dict(op='packet', ref=self.ref, run=self.run_of('system_analyst')['id']))['feedback']
+        self.assertIn('Матрица кодов', fb[0]['detail'])
+        self.assertFalse([x for x in w.state()['runs'] if x['ref'] == self.ref and x.get('role') == 'solution_architect'
+                          and x['status'] == 'queued'])                              # архитектор — снова после аналитика
+
+    def test_session_recipe_and_list_pages(self):
+        self.ref = self.idea()
+        po = self.run_of('product_owner')
+        w.session_lost(self.ref, po['id'], 'сессия 3 раза заканчивалась без сдачи этапа')
+        new = self.run_of('product_owner')                                            # Р3: роль снова в работе
+        fb = w.action(dict(op='packet', ref=self.ref, run=new['id']))['feedback']
+        self.assertEqual(fb[0]['id'], 'recipe-Р3'); self.assertIn('BRD.md', fb[0]['detail'])
+        self.assertEqual(self.task()['status'], 'queued')
+        w.session_lost(self.ref, new['id'], 'сессия 3 раза заканчивалась без сдачи этапа')
+        self.assertEqual(self.task()['status'], 'blocked')                            # второй раз — к Решале
+        self.assertTrue(self.run_of('resolver'))
+        page = w.action(dict(op='list', project='alpha-api', limit=1))
+        self.assertEqual((len(page['tasks']), page['next_offset']), (1, 1))
+        last = w.action(dict(op='list', project='alpha-api', offset=page['total'] - 1, limit=5))
+        self.assertIsNone(last['next_offset'])
+
     def test_red_ci_on_main_rolls_back_release(self):
         d = w.read('projects.json', {}); p = d['projects']['alpha-api']
         p['ci'] = dict(steps=[dict(name='Тесты', kind='test', cmd=[sys.executable, '-c', 'print(1)']),

@@ -404,6 +404,7 @@ def check_document(text, spec):
     return None
 
 
+GARBLED = re.compile(r'\?{4,}')      # кириллица, потерянная при записи не в UTF-8
 SECRET = re.compile(r'(?:api[_-]?key|secret|token|passw(?:or)?d)\s*[:=]\s*["\']?[A-Za-z0-9_\-/+=]{16,}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}', re.I)
 LINK = re.compile(r'https?://[^\s)\]>"]+')
 OPEN_DEFECT = re.compile(r'(?i)\b(blocker|critical|major|блокер|критич\w*|высок\w*)\b.*\b(open|opened|открыт\w*|new|новый)\b|'
@@ -471,6 +472,8 @@ def check_item(it, role, ctx, state):
         if len(evidence) < MIN_NA_REASON:
             return False, 'для «неприменимо» нужна причина (не короче %d символов)' % MIN_NA_REASON
         return True, 'неприменимо: ' + evidence
+    if GARBLED.search(evidence):
+        return False, 'в доказательстве «????» вместо текста: пиши в UTF-8 (рецепт Р4)'
     kind = it['kind']
     if kind == 'evidence':
         if len(evidence) < MIN_EVIDENCE:
@@ -478,7 +481,10 @@ def check_item(it, role, ctx, state):
         return True, evidence
     if kind == 'artifact':
         spec = effective(_role_art(role, it['art']), ctx)
-        reason = check_document(ctx.artifact(spec), spec)
+        text = ctx.artifact(spec)
+        if text and GARBLED.search(text):
+            return False, '%s: «????» вместо текста — файл записан не в UTF-8, перепиши (рецепт Р4)' % art_path(ctx.t['id'], spec['path'])
+        reason = check_document(text, spec)
         return (reason is None), (reason or 'есть: ' + art_path(ctx.t['id'], spec['path']))
     if kind == 'machine':
         return machine(it, role, ctx, state, evidence)

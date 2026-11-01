@@ -113,3 +113,19 @@ class TraceTests(DataCase):
         self.assertTrue(ok, detail)
         ok, detail = P.machine(dict(check='trace'), 'system_analyst', FakeCtx({'SRS.md': 'без кодов'}), {})
         self.assertFalse(ok); self.assertIn('нет кодов', detail)
+
+
+class RecipeMatchTests(DataCase):
+    def test_match(self):
+        import recipes as R
+        m = lambda text, role='developer': (R.match({}, text, role) or {}).get('id')
+        self.assertEqual(m('Нет SRS: аналитик ещё не сдал ТЗ', 'solution_architect'), 'Р2')
+        self.assertIsNone(m('Нет SRS: аналитик ещё не сдал ТЗ', 'qa'))               # Р2 — только архитектору и дизайнеру
+        self.assertEqual(m('В файле ???????? вместо текста'), 'Р4')
+        self.assertEqual(m('UnicodeEncodeError: charmap codec'), 'Р4')
+        self.assertEqual(m('Список задач обрезан, видно только 10 задач'), 'Р6')
+        self.assertIsNone(m('Противоречие в контракте API', 'system_analyst'))      # свой контракт аналитик чинит сам
+        self.assertIsNone(m('Неясно, какие поля нужны инвесторам'))                  # содержательное — к Решале
+        self.assertEqual([r['id'] for r in R.catalog()], ['Р1', 'Р2', 'Р3', 'Р4', 'Р5', 'Р6'])
+        with self.assertRaisesRegex(ValueError, 'keywords'):
+            R.learn({}, dict(title='Заголовок рецепта', instructions='x' * 40, keywords=['a']), dict(id='P-1'), w.now())

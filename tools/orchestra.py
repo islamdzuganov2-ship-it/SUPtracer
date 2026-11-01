@@ -15,6 +15,7 @@ import time
 
 import filekinds as fk
 import pipeline as P
+import recipes
 import workflow as w
 
 MAX_ATTEMPTS = 3          # провалов DoD у роли подряд — дальше эскалация тимлиду
@@ -680,6 +681,9 @@ def op_escalate(s, req, t, at):
         return dict(escalated=True, problem=prob['id'])
     pipe = copy.deepcopy(t['pipeline']); run = _run(s, req, t)
     if run['role'] == 'resolver': raise ValueError('Решала не эскалирует сам себе: позови владельца через op=resolve decision=owner')
+    hit = recipes.match(s, ' '.join((reason, tried, need)), run['role']) if run['role'] != 'teamlead' else None
+    if hit and hit['id'] not in (run.get('recipes') or []):
+        return apply_recipe(s, t, pipe, run, hit, reason, at)      # повтор той же проблемы в запуске — уже к Решале
     _autocommit(s, t, pipe, run, 'WIP перед эскалацией: ' + reason)
     run.update(status='done', finished_at=at.isoformat(), evidence='Эскалация Решале: ' + reason)
     if run['role'] != 'teamlead':
@@ -687,6 +691,79 @@ def op_escalate(s, req, t, at):
     prob = escalate(s, t, pipe, at, '%s: %s' % (P.ROLES[run['role']]['title'], reason), run['role'], run.get('agent'), 'agent', tried, need)
     w.write_patches(s, {t['ref']: dict(pipeline=pipe, status='blocked', status_note='Проблема %s у Решалы: %s' % (prob['id'], reason[:300]), claimed_by=None)})
     return dict(escalated=True, problem=prob['id'])
+
+
+def _recipe_problem(s, t, pipe, run, rid, reason, text, at):
+    prob = open_problem(s, t, at, reason, run.get('role'), run.get('agent'), pipe['stage'], 'agent' if rid != 'Р3' else 'server')
+    prob.update(status='resolved', decision='recipe', recipe=rid, instructions=text[:2000], decided_at=at.isoformat(),
+                resolved_by=dict(agent='сервер', model=None))
+    for p in s.get('playbook') or []:
+        if p['id'] == rid:
+            p['uses'] = p.get('uses', 0) + 1
+    return prob
+
+
+def apply_recipe(s, t, pipe, run, hit, reason, at):
+    """Механическая проблема: рецепт сервера вместо сессии Решалы (Р1, Р2, Р4, Р5, Р6 и накопленные)."""
+    role, stage = run['role'], run['stage']
+    run.setdefault('recipes', []).append(hit['id'])
+    text = hit['instructions']; title = '%s: %s' % (P.ROLES[role]['title'], reason)
+    kind = hit['kind']
+    if kind == 'wait':
+        dep = P.waits_for(stage, role, pipe.get('needs'))
+        if dep and (pipe['roles'].get(key(stage, dep)) or {}).get('state') != 'done':
+            prob = _recipe_problem(s, t, pipe, run, hit['id'], title, text, at)
+            journal(s, pipe, t['ref'], 'recipe', 'Рецепт %s (%s): %s' % (hit['id'], hit['title'], text), role, stage)
+            run.update(status='cancelled', finished_at=at.isoformat(), evidence='Рецепт %s: ждёт сдачи роли «%s»' % (hit['id'], P.ROLES[dep]['title']))
+            pipe['roles'].setdefault(key(stage, role), {}).update(state='pending', feedback=None)
+            w.write_patches(s, {t['ref']: dict(orchestrate(s, t, pipe, at), claimed_by=None)})
+            return dict(escalated=False, recipe=hit['id'], problem=prob['id'], waiting=dep, instructions=text)
+        sa = [P.art_path(t['id'], a['path']) for a in P.ROLES['system_analyst']['artifacts'] if not a.get('optional')]
+        text = 'ТЗ аналитика уже сдано: %s. Оглавление — tt_work op=doc ref=%s path=<путь>, раздел — section=<заголовок>.' % (
+            ', '.join(sa), t['ref'])
+        kind = 'advise'
+    if kind == 'contract':
+        tr = P.trace(ctx_for(t, pipe))
+        matrix = 'определено: %s; висящие ссылки: %s; вне RTM: %s' % (
+            ', '.join('%s %d' % kv for kv in sorted(tr['defined'].items())) or 'нет',
+            '; '.join('%s в %s' % (k, ', '.join(v)) for k, v in tr['dangling'].items()) or 'нет',
+            ', '.join(tr['untraced']) or 'нет')
+        prob = _recipe_problem(s, t, pipe, run, hit['id'], title, text + ' Матрица: ' + matrix, at)
+        _autocommit(s, t, pipe, run, 'WIP перед возвратом контракта: ' + reason)
+        run.update(status='done', finished_at=at.isoformat(), evidence='Рецепт %s: контракт — к системному аналитику' % hit['id'])
+        detail = 'Противоречие контрактов (%s, %s): %s. Матрица кодов: %s' % (P.ROLES[role]['title'], prob['id'], reason[:600], matrix)
+        history(pipe, 'return', role='server', stage=pipe['stage'], to_stage='analysis', agent=None, model=None, run=run['id'],
+                defects=[], roles=['system_analyst'], reason=detail[:500], at=at.isoformat())
+        return_to(s, t, pipe, at, 'analysis', ['system_analyst'], detail, 'Сервер (рецепт %s)' % hit['id'])
+        w.write_patches(s, {t['ref']: dict(orchestrate(s, t, pipe, at), claimed_by=None)})
+        return dict(escalated=False, recipe=hit['id'], problem=prob['id'], returned='analysis', instructions=text)
+    prob = _recipe_problem(s, t, pipe, run, hit['id'], title, text, at)
+    sha = _autocommit(s, t, pipe, run, 'рецепт %s: %s' % (hit['id'], reason))
+    journal(s, pipe, t['ref'], 'recipe', 'Рецепт %s (%s) — запуск продолжается' % (hit['id'], hit['title']), role, stage)
+    w.write_patches(s, {t['ref']: dict(pipeline=pipe)})
+    return dict(escalated=False, recipe=hit['id'], problem=prob['id'], committed=sha, instructions=text,
+                next='Продолжай работу в этом же запуске; если рецепт не помог — op=escalate снова, тогда проблему разберёт Решала.')
+
+
+def session_recipe(s, t, pipe, run, at):
+    """Р3: сессия роли трижды закончилась без сдачи — сервер сверяет артефакты и возвращает роль к работе
+    со списком (один раз на роль этапа). Возвращает правку задачи или None — тогда к Решале."""
+    k = key(run['stage'], run['role']); entry = pipe['roles'].setdefault(k, {})
+    if 'Р3' in (entry.get('recipes') or []) or run['role'] in ('teamlead', 'resolver'):
+        return None
+    ctx = ctx_for(t, pipe)
+    missing = [P.art_path(t['id'], a['path']) for a in P.ROLES[run['role']]['artifacts']
+               if not a.get('optional') and P.check_document(ctx.artifact(P.effective(a, ctx)), P.effective(a, ctx))]
+    if missing:
+        text = 'Сессия трижды закончилась без сдачи. Не готовы артефакты: %s. Доделай их и сдай op=handoff.' % ', '.join(missing)
+    else:
+        text = ('Сессия трижды закончилась без сдачи, а артефакты роли на месте и проходят проверку. '
+                'Проверь пункты DoD и сразу сдай op=handoff — новых исследований не начинай.')
+    prob = _recipe_problem(s, t, pipe, run, 'Р3', '%s: сессия без сдачи' % P.ROLES[run['role']]['title'], text, at)
+    entry.update(state='pending', recipes=(entry.get('recipes') or []) + ['Р3'],
+                 feedback=[dict(id='recipe-Р3', text='Рецепт Р3 (%s)' % prob['id'], detail=text)])
+    journal(s, pipe, t['ref'], 'recipe', 'Рецепт Р3: %s' % text, run['role'], run['stage'])
+    return dict(orchestrate(s, t, pipe, at), claimed_by=None)
 
 
 DECISIONS = dict(continue_='продолжить с указаниями', return_='вернуть на этап', owner='нужен владелец')
@@ -715,6 +792,8 @@ def op_resolve(s, req, t, at):
     if decision not in ('continue', 'return', 'owner'): raise ValueError('decision: continue (продолжить), return (вернуть на этап) или owner (нужен владелец)')
     if len(notes) < 30: raise ValueError('notes: почему выбран этот путь (не короче 30 символов)')
     opts = [dict(title=str(o['title']).strip()[:300], pros=str(o.get('pros') or '')[:500], cons=str(o.get('cons') or '')[:500]) for o in opts[:6]]
+    if req.get('recipe') is not None:
+        prob['learned'] = recipes.learn(s, req['recipe'], prob, at)    # база решений: в следующий раз ответит сервер
     prob.update(options=opts, decision=decision, notes=notes[:2000], resolved_by=dict(agent=run.get('agent'), model=run.get('model')), decided_at=at.isoformat())
     run.update(status='done', finished_at=at.isoformat(), evidence='Решала (%s): %s — %s' % (prob['id'], decision, notes[:300]))
     pipe = copy.deepcopy(t['pipeline']) if is_pipeline(t) else None
@@ -891,6 +970,9 @@ def resolver_packet(t, run, agent):
                 role_state=(pipe.get('roles') or {}).get(key(prob.get('stage') or '', prob.get('role') or '')),
                 journal=(pipe.get('journal') or [])[-15:],
                 recent_runs=[{k: r.get(k) for k in ('id', 'role', 'agent', 'status', 'evidence', 'launch_error')} for r in others],
+                known=recipes.catalog(s),
+                learn=('Если решение повторяемое, приложи к op=resolve recipe={title, keywords: [2–6 слов, по которым узнать проблему], '
+                       'instructions} — в следующий раз агенту ответит сервер, без сессии Решалы.'),
                 second_opinion=('py "%s" ask %s "<вопрос с контекстом>" — пути решения от второго ИИ' % (w.ROOT / 'tools' / 'pm.py', other_ai[0])) if other_ai else None,
                 handoff=('tt_work op=resolve ref=%s run=%s worker=<ты> options=[{title, pros, cons}, …≥2] decision=continue|return|owner '
                          'notes=… instructions=… (continue/return) to_stage=… roles=[…] (return) question=… why_owner=… (owner)' % (t['ref'], run['id'])))

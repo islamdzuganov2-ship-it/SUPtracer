@@ -52,6 +52,9 @@ class TaskTypeTests(DataCase):
         r=self.plan(dict(root='request',task_type='dev_by_spec',spec_ref='x'),dict(root='request',task_type='dev_by_spec',spec_ref='y'))
         self.assertEqual(r['added'],['AL-03','AL-04'])
         self.assertEqual(w.snapshot()['projects']['alpha-api']['next_id'],'AL-05')
+        # id_prefix без разделителя продолжает серию с разделителем, а не начинает новую (EGE01 вместо EGE-101)
+        self.assertEqual(w.next_id(dict(id_prefix='AL', backlog=[dict(id='AL-09'), dict(id='AL-100')])), 'AL-101')
+        self.assertEqual(w.next_id(dict(id_prefix='bt', backlog=[])), 'bt01')
 
     # --- типы задач (TT-51)
 

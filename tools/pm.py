@@ -110,6 +110,7 @@ def cmd_refresh(args):
         ("индекс памяти", ("memory.py", "index")),
         ("свежие сведения о работе и планах проектов", ("project_activity.py",)),
         ("оценка оставшихся задач", ("estimate.py",)),
+        ("метрики работ по спринтам лимита", ("metrics.py",)),
         ("индексы качества и портфельные сигналы", ("quality.py",)),
         ("дерево работ", ("tree.py",)),
         ("сборка дашборда", ("build_dashboard.py",)),
@@ -407,6 +408,37 @@ def cmd_disconnect(args):
     return run("connect.py", "disconnect", *args)
 
 
+def cmd_ask(args):
+    """Второе мнение другого ИИ (для Решалы): pm.py ask <claude|codex> "вопрос" [--cwd папка]."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="pm.py ask")
+    ap.add_argument("ai", choices=("claude", "codex")); ap.add_argument("question"); ap.add_argument("--cwd")
+    a = ap.parse_args(args)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import launcher
+    try:
+        print(launcher.ask(a.ai, a.question, a.cwd))
+        return 0
+    except (ValueError, OSError) as e:
+        print("Второе мнение недоступно: %s" % e); return 1
+
+
+def cmd_idea(args):
+    """Идея в конвейер: pm.py idea <проект> "название" --text "что и зачем"."""
+    import argparse, json
+    ap = argparse.ArgumentParser(prog="pm.py idea")
+    ap.add_argument("project"); ap.add_argument("title"); ap.add_argument("--text", required=True)
+    a = ap.parse_args(args)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import workflow
+    try:
+        print(json.dumps(workflow.action(dict(op="idea", project=a.project, title=a.title, text=a.text, source="cli")),
+                         ensure_ascii=False))
+        return 0
+    except ValueError as e:
+        print(e); return 1
+
+
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
             "work": lambda args: run("workflow.py", *args),
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
@@ -415,7 +447,10 @@ COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "c
             "codex-memory": lambda args: run("codex_memory.py", *args),
             "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
             "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
-            "connect": cmd_connect, "disconnect": cmd_disconnect}
+            "connect": cmd_connect, "disconnect": cmd_disconnect, "idea": cmd_idea, "ask": cmd_ask,
+            "skills": lambda args: run("skills.py", *args),
+            "ci": lambda args: run("ci.py", *args),
+            "tokens": lambda args: run("tokens.py", *args)}
 
 
 def foreign_copy():

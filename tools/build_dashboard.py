@@ -207,6 +207,35 @@ td.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono
 .card>summary .tag{color:var(--ink2);font-size:13px;flex:1;min-width:160px}
 .body{padding:2px 18px 18px;border-top:1px solid var(--line2)}
 
+.bell{position:fixed;top:12px;right:16px;z-index:60;font-size:20px;line-height:1;padding:8px 11px;border-radius:999px;
+  background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);cursor:pointer;color:var(--ink)}
+.bell.bell-on{border-color:var(--bad)}
+.bell-count{position:absolute;top:-6px;right:-6px;min-width:19px;padding:2px 5px;border-radius:999px;background:var(--bad);color:#fff;font-size:11px;font-weight:700}
+.bell-panel{position:fixed;top:58px;right:16px;z-index:61;width:min(440px,calc(100vw - 32px));max-height:75vh;overflow:auto;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:10px 12px}
+.bell-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.bell-x{border:none;background:none;color:var(--ink2);font-size:16px;cursor:pointer}
+.bell-item{border-top:1px solid var(--line2);padding:9px 0}
+.bell-kind{font-size:11.5px;color:var(--ink3)}.bell-title{font-weight:620;margin:3px 0}.bell-text{font-size:13px}
+.bell-why{font-size:12px;color:var(--ink3);margin-top:3px}.bell-err{color:var(--bad);font-size:12px}
+.bell-item button{margin:6px 6px 0 0;font-size:12.5px;padding:4px 9px;border-radius:7px;border:1px solid var(--line);background:var(--panel2);color:var(--ink);cursor:pointer}
+.bell-item button.primary{background:var(--s1);color:#fff;border-color:transparent}
+.bell-answer{width:100%;margin-top:6px;font:inherit;font-size:13px;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px}
+.bell-empty{color:var(--ink3);font-size:13px}
+@media (max-width:600px){.bell{top:8px;right:8px}.bell-panel{right:8px;top:52px}}
+.proj-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 16px;padding:12px 15px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.proj-bar label{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink3)}
+.proj-bar select{min-width:260px;max-width:100%;font-size:14px;padding:6px 9px}
+.proj-hint{font-size:12.5px;color:var(--ink3)}
+.pm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;margin-bottom:14px}
+.pm-note{font-size:12.5px;color:var(--ink3);margin:4px 0 10px;line-height:1.45}
+.pm-stat{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--line2);font-size:13.5px}
+.pm-stat:last-child{border-bottom:none}.pm-stat b{font-variant-numeric:tabular-nums}
+.pm-chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+table.bl tr.pm-focus td{background:var(--panel2)}
+.pm-scroll{overflow-x:auto}
+.pm-scroll table{min-width:860px}
+@media (max-width:600px){.proj-bar select{min-width:0;width:100%}.pm-grid{grid-template-columns:1fr}}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:15px}
 .block{margin-top:17px}
 .block>h3{font-size:11.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--ink3);margin:0 0 8px;font-weight:620}
@@ -321,13 +350,36 @@ def freshness():
     }
 
 
+def slim_usage(usage):
+    """Почасовой расход и события лимита нужны metrics.py, а не странице: в дашборд — без них."""
+    usage = dict(usage or {})
+    providers = {}
+    for name, prov in (usage.get("providers") or {}).items():
+        prov = dict(prov); prov.pop("limits", None); prov.pop("sessions", None)
+        prov["projects"] = {k: {kk: vv for kk, vv in v.items() if kk != "by_hour"} for k, v in (prov.get("projects") or {}).items()}
+        providers[name] = prov
+    if providers:
+        usage["providers"] = providers
+    projects = {}
+    for k, v in (usage.get("projects") or {}).items():
+        v = dict(v)
+        if isinstance(v.get("by_provider"), dict):
+            v["by_provider"] = {n: {kk: vv for kk, vv in pv.items() if kk != "by_hour"} for n, pv in v["by_provider"].items()}
+        projects[k] = v
+    if projects:
+        usage["projects"] = projects
+    return usage
+
+
 def main():
+    import taskstate
     import workflow
     payload = {
         "workflow": workflow.snapshot(),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "projects": load("projects.json"),
-        "usage": load("usage.json"),
+        "projects": taskstate.apply(load("projects.json"), DATA),   # статус задач — с оперативным слоем
+        "usage": slim_usage(load("usage.json")),
+        "metrics": load("metrics.json", {"sprints": [], "projects": {}}),
         "repos": load("repos.json"),
         "estimates": load("estimates.json"),
         "competitors": load("competitors.json"),
@@ -353,9 +405,11 @@ def main():
         + "\n<script id=\"DATA\" type=\"application/json\">" + blob + "</script>\n"
         + "<script>\n" + read_tool("charts.js") + "\n</script>\n"
         + "<script>\n" + read_tool("tree.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("projview.js") + "\n</script>\n"
         + "<script>\n" + read_tool("app.js") + "\n</script>\n"
         + "<script>\n" + read_tool("board_extras.js") + "\n</script>\n"
         + "<script>\n" + read_tool("boards.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("bell.js") + "\n</script>\n"
         + "</body>\n</html>\n"
     )
 

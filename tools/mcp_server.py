@@ -306,19 +306,64 @@ HANDLERS = {"tt_context": t_context, "tt_recall": t_recall, "tt_search": t_searc
             "tt_ingest": t_ingest, "tt_tree": t_tree, "tt_projects": t_projects}
 
 INSTRUCTIONS += "\n6. Начни с tt_work op=queue agent=<claude|codex> (свой ИИ): там явные запросы запуска с доски. До реализации разложи новый запрос через op=plan: root, критерии, размер, риск, зависимости, по возможности scope (пути правки). Затем next agent=<свой ИИ> → take (ref, model, worker): take атомарно ставит метку claimed_by. Задачу с живой меткой другого ИИ не бери и её scope не правь; работай в ветке из packet.coordination.branch. Пока работаешь дольше аренды — heartbeat (ref, run, worker). finish требует доказательств проверок. Каталог, линейки ИИ и измерения: op=models; распределение проекта между ИИ: op=split (dry_run по умолчанию)."
+INSTRUCTIONS += "\n7. Конвейер: идею владельца из разговора заводи tt_work op=idea (project, title, text, source=claude|codex). Задачи конвейера ведут роли: твоё задание называет роль и скилл tt-<роль>; паспорт — op=packet с run; сдать этап — op=handoff с items по каждому пункту DoD (status done|na, evidence); не принятая передача возвращает список failed. Вернуть назад — op=return, блокер — op=escalate, тимлид решает ворота op=gate. Обычные take/finish/complete к задачам конвейера не применяются. Документы ветки задачи читай разделами: op=doc (ref, path) — оглавление с размером разделов, op=doc (ref, path, section) — один раздел."
+INSTRUCTIONS += "\n8. Лимит токенов: при предупреждении о скором исчерпании лимита закоммить незавершённое в ветку задачи, вызови tt_work op=pause (ref, run, worker, checkpoint — что сделано, что осталось, следующий шаг; можно resets_at) и остановись. Сервер продолжит ту же сессию после сброса лимита (без известного времени — через 5 часов); после «продолжай» — heartbeat, packet и работа с точки остановки."
+INSTRUCTIONS += "\n9. Проблема или ограничение (нет доступа, противоречие, блокер, не получается) — не жди и не спрашивай владельца: tt_work op=escalate (ref, run, worker, reason, tried, need). Её разберёт агент «Решала»: найдёт пути решения или сам позовёт владельца."
 TOOLS.append({"name": "tt_work", "title": "Планирование и исполнение задач",
-    "description": "Доски и экономное исполнение несколькими ИИ (claude, codex): list, queue, models, next, packet — с agent для маршрута своего ИИ; plan (project, tasks), focus (projects), settings (changes: default_executor, lease_minutes), update (ref, changes; в т.ч. executor, scope), enqueue (ref), take (ref, model, worker) — атомарно взять задачу и поставить метку занятости, claim (ref, run, worker, model) — принять запуск с доски, heartbeat (ref, run, worker, minutes) — продлить аренду, finish/fail/cancel (ref, run, worker, evidence, tokens), split (project, agents, dry_run) — распределить задачи между ИИ. plan: project обязателен (папка и репозиторий для ИИ), id можно не указывать — присвоится следующий в серии; task_type: dev_by_spec (spec_ref), analysis_spec (question, inputs, deliverable), decomposition (directions из списка направлений), direction_task (direction, deliverable); вместо root можно передать new_root {title, text} — запрос создастся в памяти проекта. packet содержит workspace: путь, активная копия, репозиторий. Каждая задача несёт model_plan: модель и effort для claude и для codex, проработанные при plan; ручная строка — update changes.model_plan.<ИИ>={model, effort, reason}, null — вернуть автоматический выбор; route (task) — план для черновика без записи; enqueue (ref, agent) закрепляет запуск за выбранным ИИ и возвращает prompt; prompt (ref) — задание ждущего запуска. Если packet.phase = assess — не реализуй: оцени и пришли assess (ref, run, worker, assessment {complexity, uncertainty, breadth: 1…5, reasons}); сервер назначит модель и поставит запуск исполнения. После finish в отдельной ветке сервер сам запускает автопроверку (коммиты, область, verify проекта, слияние) и ставит запуск ревью: в фазе review не меняй код, пришли review (ref, run, worker, verdict approve|changes|spec_change, criteria [{ok, note}] по каждому критерию, conclusion, при spec_change spec {deviation, proposal}); approve и spec_change сливают ветку и закрывают задачу, spec_change ещё создаёт задачу на изменение ТЗ. autocheck (ref) — повторить автопроверку. status (ref, status, reason) — ручной перенос: queued, in_progress, review, blocked, cancelled; для blocked и cancelled нужна причина. complete (ref, evidence) закрывает вручную проверенную задачу без активного запуска; нужны все acceptance_done. Задачу с живой меткой claimed_by другого ИИ не брать.",
+    "description": "Доски и экономное исполнение несколькими ИИ (claude, codex): list, queue, models, next, packet — с agent для маршрута своего ИИ; plan (project, tasks), focus (projects), settings (changes: default_executor, lease_minutes), update (ref, changes; в т.ч. executor, scope), enqueue (ref), take (ref, model, worker) — атомарно взять задачу и поставить метку занятости, claim (ref, run, worker, model) — принять запуск с доски, heartbeat (ref, run, worker, minutes) — продлить аренду, finish/fail/cancel (ref, run, worker, evidence, tokens), split (project, agents, dry_run; при dry_run=false можно передать assign {задача: ИИ} — записывается именно показанное, связная группа уходит одному ИИ) — распределить задачи между ИИ. plan: project обязателен (папка и репозиторий для ИИ), id можно не указывать — присвоится следующий в серии; task_type: dev_by_spec (spec_ref), analysis_spec (question, inputs, deliverable), decomposition (directions из списка направлений), direction_task (direction, deliverable); вместо root можно передать new_root {title, text} — запрос создастся в памяти проекта. packet содержит workspace: путь, активная копия, репозиторий. Каждая задача несёт model_plan: модель и effort для claude и для codex, проработанные при plan; ручная строка — update changes.model_plan.<ИИ>={model, effort, reason}, null — вернуть автоматический выбор; route (task) — план для черновика без записи; enqueue (ref, agent) закрепляет запуск за выбранным ИИ и возвращает prompt; prompt (ref) — задание ждущего запуска. Если packet.phase = assess — не реализуй: оцени и пришли assess (ref, run, worker, assessment {complexity, uncertainty, breadth: 1…5, reasons}); сервер назначит модель и поставит запуск исполнения. После finish в отдельной ветке сервер сам запускает автопроверку (коммиты, область, verify проекта, слияние) и ставит запуск ревью: в фазе review не меняй код, пришли review (ref, run, worker, verdict approve|changes|spec_change, criteria [{ok, note}] по каждому критерию, conclusion, при spec_change spec {deviation, proposal}); approve и spec_change сливают ветку и закрывают задачу, spec_change ещё создаёт задачу на изменение ТЗ. autocheck (ref) — повторить автопроверку. status (ref, status, reason) — ручной перенос: queued, in_progress, review, blocked, cancelled; для blocked и cancelled нужна причина. complete (ref, evidence) закрывает вручную проверенную задачу без активного запуска; нужны все acceptance_done. Задачу с живой меткой claimed_by другого ИИ не брать.",
     "inputSchema": _schema({"op": STR, "project": STR, "ref": STR, "run": STR,
         "worker": STR, "model": STR, "evidence": STR, "tokens": {"type":"integer"},
         "agent": {"type":"string", "enum":["claude","codex"]}, "minutes": {"type":"integer"},
         "agents": {"type":"array", "items":STR}, "dry_run": {"type":"boolean"},
+        "assign": {"type":"object"},
         "task": {"type":"object"}, "assessment": {"type":"object"}, "status": STR, "reason": STR,
         "verdict": STR, "criteria": {"type":"array", "items":{"type":"object"}}, "conclusion": STR, "spec": {"type":"object"},
+        "items": {"type":"object"}, "summary": STR, "needs": {"type":"object"}, "acceptance": {"type":"array", "items":STR},
+        "signoff": {"type":"boolean"}, "to_stage": STR, "roles": {"type":"array", "items":STR}, "decision": STR,
+        "notes": STR, "title": STR, "text": STR, "source": STR, "checkpoint": STR, "resets_at": STR, "tried": STR, "need": STR, "question": STR, "why_owner": STR,
+        "instructions": STR, "problem": STR, "options": {"type":"array", "items":{"type":"object"}}, "sessions": {"type":"integer"},
+        "defects": {"type":"array", "items":{"type":"object"}}, "fixes": {"type":"object"},
         "tasks": {"type":"array", "items":{"type":"object"}},
-        "projects": {"type":"array", "items":STR}, "changes":{"type":"object"}}, ["op"]),
+        "projects": {"type":"array", "items":STR}, "changes":{"type":"object"},
+        "path": STR, "section": STR, "code": STR, "recipe": {"type":"object"}, "contract_group": STR,
+        "priority": STR, "offset": {"type":"integer"}, "limit": {"type":"integer"}}, ["op"]),
     "annotations": dict(WRITE, idempotentHint=False, title="Планирование и исполнение")})
+# Сессия роли конвейера (Л1): в списке только tt_work и tt_recall с короткими описаниями.
+# Полный список с инструкциями — ~5 тыс. токенов в начале каждого хода сессии роли, а ей нужен один инструмент.
+ROLE_WORK = ("Конвейер TaskTreker для роли. claim (ref, run, worker, model); packet (ref, run) — паспорт роли, запрашивай один раз; "
+             "doc (ref, path) — указатель документа: разделы, вес, коды требований; doc (ref, path, section|code) — один раздел; "
+             "heartbeat; handoff (ref, run, worker, summary, items {id: {status: done|na, evidence}}); return (to_stage, defects); "
+             "escalate (reason, tried, need); pause (checkpoint); gate — тимлид; resolve — Решала. Аргументы — в задании и паспорте.")
+ROLE_INSTRUCTIONS = ("TaskTreker: ты в сессии роли конвейера. Работай через tt_work по заданию; документы читай указателем и разделами (op=doc), "
+                     "прочитанное не перечитывай; этап сдавай op=handoff.")
+
+
+def role_mode():
+    return os.environ.get("TASKTREKER_MCP_ROLE") == "1"
+
+
+def listed_tools():
+    if not role_mode():
+        return TOOLS
+    keep = {t["name"]: t for t in TOOLS if t["name"] in ("tt_work", "tt_recall")}
+    return [dict(keep["tt_work"], description=ROLE_WORK), keep["tt_recall"]]
+
+
+def instructions():
+    return ROLE_INSTRUCTIONS if role_mode() else INSTRUCTIONS
+
+
+OWNER_SETTINGS = {'autonomy', 'consent', 'max_sessions', 'auto_merge', 'failover', 'roles', 'sessions_per_ai', 'wip_analysis'}
+
+
 def t_work(a):
+    """Решения владельца ИИ через MCP не принимает: согласие на автономию, лимит сессий,
+    автослияние, одобрение релиза, массовый перенос в «Идея» — только на доске."""
     import workflow
+    op = a.get('op')
+    if op in ('approve_release', 'answer') or (op == 'to_idea' and a.get('dry_run') is False) or \
+            (op == 'settings' and OWNER_SETTINGS & set((a.get('changes') or {}))):
+        raise ToolError('Это решение владельца: оно принимается только на доске TaskTreker')
     return json.dumps(workflow.action(a), ensure_ascii=False)
 HANDLERS['tt_work'] = t_work
 
@@ -403,12 +448,12 @@ class Server:
             if method == "server/discover":
                 self.era(params)         # проверит версию, если клиент её прислал
                 return _result(rid, {"supportedVersions": SUPPORTED, "capabilities": self.capabilities(),
-                                     "instructions": INSTRUCTIONS}, modern=True, cacheable=True)
+                                     "instructions": instructions()}, modern=True, cacheable=True)
             modern, _ = self.era(params)
             if method == "ping":
                 return _result(rid, {}, modern)
             if method == "tools/list":
-                return _result(rid, {"tools": TOOLS}, modern, cacheable=True)
+                return _result(rid, {"tools": listed_tools()}, modern, cacheable=True)
             if method == "tools/call":
                 name = params.get("name")
                 # По обработчикам, а не по TOOL_NAMES: tt_work добавляется к TOOLS позже, чем считался TOOL_NAMES.
@@ -427,7 +472,7 @@ class Server:
         # Наследные правила: поддерживаем версию клиента — отвечаем ей же, иначе своей последней.
         self.legacy_version = want if want in LEGACY_VERSIONS else LEGACY_VERSIONS[0]
         return {"protocolVersion": self.legacy_version, "capabilities": self.capabilities(),
-                "serverInfo": SERVER_INFO, "instructions": INSTRUCTIONS}
+                "serverInfo": SERVER_INFO, "instructions": instructions()}
 
 
 def _result(rid, result, modern, cacheable=False):
@@ -450,6 +495,12 @@ def serve(stdin=None, stdout=None):
     """Цикл чтения: одна строка — одно сообщение; пакеты (массивы) наследных версий тоже."""
     inp = stdin or sys.stdin.buffer
     out = stdout or sys.stdout.buffer
+    # Журнал ошибок — только UTF-8: Codex читает stderr сервера как UTF-8 и на тексте в cp1251
+    # (русская ошибка на Windows) рвёт соединение — у агента «Transport closed» на каждом tt_work.
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     server = Server()
 
     def send(obj):

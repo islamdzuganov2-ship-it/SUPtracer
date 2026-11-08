@@ -44,8 +44,11 @@ def _scalar(v):
     return v
 
 
-def parse_frontmatter(text):
-    """Текст заметки -> (словарь фронтматтера, тело без него)."""
+def parse_frontmatter(text, raw_keys=()):
+    """Текст заметки -> (словарь фронтматтера, тело без него).
+
+    raw_keys — ключи, значение которых всегда строка как есть (заголовок «да» не становится True):
+    так читаются и файлы, записанные до того, как _q стал брать такие значения в кавычки."""
     m = FM_RE.match(text or "")
     if not m:
         return {}, text or ""
@@ -62,13 +65,23 @@ def parse_frontmatter(text):
         if ":" in line:
             k, v = line.split(":", 1)
             key = k.strip()
-            out[key] = _scalar(v)
+            out[key] = _text(v) if key in raw_keys else _scalar(v)
     return out, text[m.end():]
+
+
+def _text(v):
+    """Строковое значение без приведения типов: снимаются только внешние кавычки, как в _scalar."""
+    v = v.strip()
+    if len(v) > 1 and v[0] in "\"'" and v[-1] == v[0]:
+        return v[1:-1]
+    return v
 
 
 def _q(v):
     s = str(v)
-    bad = s != s.strip() or "\n" in s or ": " in s
+    # Строка, которую _scalar прочтёт не как ту же строку («да», «42», «null»), берётся в кавычки:
+    # иначе заголовок «да» после записи и чтения становится True и ломает индекс памяти.
+    bad = s != s.strip() or "\n" in s or ": " in s or _scalar(s) != s
     if not bad and s[:1] in ("[", "{", ">", "|", "&", "*", "!", "%", "@", "#", "-", "'", '"', "`"):
         bad = True
     if bad:

@@ -17,10 +17,28 @@ def git(*args, cwd):
 def doc_text(spec, role):
     """Документ, проходящий проверку раздела, размера и машинных пунктов роли."""
     body = ['# %s' % spec['path'].split('/')[-1]]
+    name = spec['path'].split('/')[-1]
+    acs = ', '.join('AC-%d' % i for i in range(1, 7))
     for sec in (spec['sections'] + spec.get('market', [])) or ['Содержание']:
-        body += ['', '## %s' % sec, 'Подробное описание раздела «%s» для задачи. ' % sec * 3]
+        body += ['', '## %s' % sec, 'Подробное описание раздела «%s» для задачи. ' % sec * 3,
+                 '- Порог: 200 мс (источник: замер 2026-11)']
+        if name == 'test-design.md' and sec in ('Позитив', 'Негатив', 'Границ'):
+            body.append('- Случаи для %s; ожидаемый результат — в таблице' % acs)
+        if sec == 'Состояни':
+            body.append('- Ошибка сети, пустой список, загрузка данных')
+        if name == 'runbook.md' and sec in ('Развёртывани', 'Откат'):
+            body += ['```', 'git revert --no-edit HEAD' if sec == 'Откат' else 'git merge --no-ff разработка', '```']
+    if name == 'runbook.md':
+        body += ['', 'Версия: v1.4.0']
+    body += ['', '## Не входит', 'Не входит: всё, что вне выгрузки.', '', '## Исключения и ошибки', '- Ошибка: 1 повтор (источник: замер 2026-11)',
+             '', '## Совместимость', 'Обратно совместимо.', '', '## Откат', 'Откат — revert коммита.', '', '## Доступность', 'Клавиатура и подписи.',
+             '', '## Варианты', '- Вариант A: в процессе', '- Вариант B: отдельной службой']
+    if name in ('dev-tasks.md', 'RTM.md'):
+        body += ['', '## DU-1 Выгрузка', '- %s; файлы `app.py`' % acs]
     if role == 'product_owner':
         body += ['', '## Источники'] + ['- https://example.org/source-%d' % i for i in range(3)]
+    if role == 'qa':
+        body += ['', '## Покрытие критериев'] + ['- AC-%d: позитивный, негативный и граничный случай' % i for i in range(1, 7)]
     body += ['', '```mermaid', 'sequenceDiagram', 'A->>B: запрос', '```',
              '', '| БТ | СТ | Тест |', '|---|---|---|', '| BR-1 | SR-1 | TC-1 |', '| BR-2 | SR-2 | TC-2 |']
     text = '\n'.join(body) + '\n'
@@ -88,8 +106,18 @@ class PipelineTests(DataCase):
         return out
 
     def handoff(self, role, stage, run, **kw):
+        if role == 'reviewer' and 'ac_matrix' not in kw and kw.get('verdict') == 'approve':
+            kw.update(self.review_evidence())
         return w.action(dict(op='handoff', ref=self.ref, run=run, worker='w-' + run, summary='Работа роли выполнена по DoD, артефакты в ветке',
                              items=self.items(role, stage), **kw))
+
+    def review_evidence(self, verdict='ok'):
+        """Честная матрица ревьюера: каждый AC — все изменённые файлы ветки; голова ветки."""
+        wt = self.task()['pipeline']['worktree']
+        files = [f for f in git('diff', '--name-only', '%s...HEAD' % wt['base'], cwd=wt['path']).split() if f.strip()] or             [f for f in git('ls-files', cwd=wt['path']).split() if not f.startswith('docs/') and not f.endswith('.md')]
+        head = git('rev-parse', 'HEAD', cwd=wt['path']).strip()
+        acc = self.task().get('acceptance') or []
+        return dict(reviewed_sha=head, ac_matrix={'AC-%d' % (i + 1): dict(files=files, tests=[], verdict=verdict) for i in range(len(acc))})
 
     def do_role(self, role, stage, extra=(), **kw):
         run = self.claim(role); self.write(role, stage, extra)
@@ -120,7 +148,7 @@ class PipelineTests(DataCase):
         queued = {x['role'] for x in w.state()['runs'] if x['ref'] == self.ref and x['status'] == 'queued'}
         self.assertEqual(queued, {'system_analyst'})          # дизайн и маркетинг не нужны; архитектор — после ТЗ (А1)
         self.assertIn('после: Системный аналитик', self.task()['status_note'])
-        for role in ('system_analyst', 'solution_architect'):
+        for role in ('system_analyst', 'solution_architect', 'qa'):
             self.assertTrue(self.do_role(role, 'analysis')['accepted'])
         self.assertEqual(self.task()['pipeline']['stage'], 'analysis')             # ждёт ворот тимлида
         gate = self.claim('teamlead', gate='analysis')
@@ -153,7 +181,7 @@ class PipelineTests(DataCase):
         t = self.task()
         self.assertEqual((t['pipeline']['stage'], t['status_note']), ('deploy_main', 'Ждёт одобрения релиза владельцем'))
         self.assertFalse(any(x['ref'] == self.ref and x['status'] == 'queued' for x in w.state()['runs']))
-        w.action(dict(op='approve_release', ref=self.ref))
+        w.action(dict(op='approve_release', ref=self.ref), origin='owner')
         r = self.do_role('devops', 'deploy_main')
         self.assertTrue(r['accepted'], r)
         t = self.task()
@@ -161,9 +189,37 @@ class PipelineTests(DataCase):
         self.assertIn('x = 2', git('show', 'main:app.py', cwd=self.repo))
         self.assertTrue(git('tag', '--list', 'release/*', cwd=self.repo))            # тег релиза
         self.assertEqual(ci.last(ref=self.ref, scope='main')['status'], 'passed')
+        import json, release_bundle as rb                                             # пакет доказательств (07: E2E-R39)
+        rel = t['pipeline']['release_bundle']
+        self.assertTrue(rb.verify(rel['path'])[0])
+        bundle = json.loads(Path(rel['path']).read_text(encoding='utf-8'))
+        self.assertEqual(bundle['main_sha'], git('rev-parse', 'main', cwd=self.repo))
+        self.assertTrue(bundle['approval'] and bundle['evidence'] and bundle['acceptance'])
+        bundle['approval']['by'] = 'агент'; Path(rel['path']).write_text(json.dumps(bundle), encoding='utf-8')
+        self.assertFalse(rb.verify(rel['path'])[0])                                   # правка задним числом видна
+        snap = next(x for x in w.snapshot()['tasks'] if x['ref'] == self.ref)
+        self.assertEqual(snap['evidence_state']['state'], 'PASS')
         kinds = [e['kind'] for e in w.state()['teamlead'] if e['ref'] == self.ref]
         for k in ('idea', 'handoff', 'handoff_rejected', 'gate', 'stage_passed', 'approved', 'done'):
             self.assertIn(k, kinds)
+
+    def test_task_index_committed_and_used_by_packet(self):
+        self.ref = self.idea()
+        r = self.do_role('product_owner', 'idea', acceptance=['CSV содержит все проекты', 'Файл открывается в Excel'],
+                                     needs=dict(design=False, marketing=False, reason='Только серверная выгрузка без интерфейса')); self.assertTrue(r['accepted'], r)
+        self.assertTrue(self.do_role('system_analyst', 'analysis')['accepted'])
+        t = self.task(); wt = t['pipeline']['worktree']; rel = P.index_path(t['id'])
+        text = git('show', '%s:%s' % (wt['branch'], rel), cwd=self.repo)
+        self.assertIn('## Реестр требований', text)
+        self.assertRegex(text, r'\| BR-1 \| .*BR-1.* \| BRD\.md §\d+, стр\. \d+ \|')
+        self.assertRegex(text, r'\| SR-1 \| .* \| SRS\.md §\d+')
+        self.assertIn('### %s' % P.art_path(t['id'], P.ROLES['system_analyst']['artifacts'][0]['path']), text)
+        self.assertEqual(git('status', '--porcelain', cwd=wt['path']).strip(), '')           # закоммичен
+        packet = w.action(dict(op='packet', ref=self.ref, run=self.run_of('solution_architect')['id']))
+        self.assertEqual(packet['task_index'], rel)
+        self.assertTrue(all('index' not in u for u in packet['upstream']))                          # указатель — в INDEX.md
+        sec = w.action(dict(op='doc', ref=self.ref, code='SR-1'))                                   # код без пути
+        self.assertTrue(sec['path'].endswith('SRS.md')); self.assertIn('SR-1', sec['text'])
 
     def test_reviewer_returns_to_developer_with_review(self):
         self.ref = self.idea()
@@ -171,8 +227,8 @@ class PipelineTests(DataCase):
                      needs=dict(design=True, marketing=False, reason='Нужен экран выгрузки, запуск не нужен'))
         self.do_role('system_analyst', 'analysis')
         roles = {x['role'] for x in w.state()['runs'] if x['ref'] == self.ref and x['status'] == 'queued'}
-        self.assertEqual(roles, {'solution_architect', 'designer'})                   # оба — после ТЗ
-        for role in ('solution_architect', 'designer'):
+        self.assertEqual(roles, {'solution_architect', 'designer', 'qa'})             # все — после ТЗ
+        for role in ('solution_architect', 'designer', 'qa'):
             self.do_role(role, 'analysis')
         gate = self.claim('teamlead', gate='analysis')
         w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve', notes='Анализ согласован, можно разрабатывать'))
@@ -192,6 +248,28 @@ class PipelineTests(DataCase):
         packet = w.action(dict(op='packet', ref=self.ref, run=dev['id']))
         self.assertIn('пустого портфеля', packet['feedback'][0]['detail'])
 
+    def test_reviewer_cannot_change_code_and_run_has_identity(self):          # 07: A7-02, AG-REV-02, E2E-R07, A0-01
+        self.ref = self.idea()
+        self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
+                     needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
+        for role in ('system_analyst', 'solution_architect', 'qa'):
+            self.do_role(role, 'analysis')
+        gate = self.claim('teamlead', gate='analysis')
+        w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve', notes='Анализ согласован, можно разрабатывать'))
+        self.do_role('developer', 'development', extra=[('app.py', 'x = 3\n'), ('tests/test_app.py', 'assert True\n')])
+        rev = self.run_of('reviewer')
+        ident = rev['identity']
+        self.assertEqual(ident['skill'], 'tt-reviewer'); self.assertTrue(ident['skill_sha']); self.assertEqual(len(ident['base_head']), 40)
+        run = self.claim('reviewer')
+        self.write('reviewer', 'review', extra=[('app.py', 'x = 4  # «исправил» ревьюер\n')])
+        r = self.handoff('reviewer', 'review', run, verdict='approve')
+        self.assertFalse(r['accepted'])
+        zone = next(f for f in r['failed'] if f['id'] == 'zone')
+        self.assertIn('app.py', zone['detail'])
+        wt = Path(self.task()['pipeline']['worktree']['path'])
+        git('checkout', ident['base_head'], '--', 'app.py', cwd=wt); git('commit', '-q', '-am', 'вернуть код', cwd=wt)
+        self.assertTrue(self.handoff('reviewer', 'review', run, verdict='approve')['accepted'])
+
     def test_rules_enforced(self):
         self.ref = self.idea()
         run = self.claim('product_owner'); self.write('product_owner', 'idea')
@@ -207,7 +285,7 @@ class PipelineTests(DataCase):
         with self.assertRaisesRegex(ValueError, 'принявший'):
             w.action(dict(op='handoff', ref=self.ref, run=run, worker='чужой', summary='Сдаю за другого агента, так нельзя', items={}))
         with self.assertRaisesRegex(ValueError, 'Одобрение'):
-            w.action(dict(op='approve_release', ref=self.ref))
+            w.action(dict(op='approve_release', ref=self.ref), origin='owner')
 
     # --- Решала (TT-80)
 
@@ -238,9 +316,9 @@ class PipelineTests(DataCase):
         self.assertEqual(packet['problem']['id'], pid)
         self.assertIn('ask', packet['second_opinion'])
         with self.assertRaisesRegex(ValueError, 'options'):
-            w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS[:1], decision='continue',
+            w.action(dict(op='resolve', cause='Причина видна в журнале запуска и паспорте задачи', cause_kind='fact', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS[:1], decision='continue',
                           notes='Достаточно допущения, владелец не нужен для этого', instructions='Взять полный набор полей'))
-        w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='continue',
+        w.action(dict(op='resolve', cause='Причина видна в журнале запуска и паспорте задачи', cause_kind='fact', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='continue',
                       notes='Полный набор полей покрывает отчёт, лишнее можно убрать позже',
                       instructions='Возьми полный набор полей портфеля и запиши допущение в BRD, раздел «Допущения»'))
         t = self.task()
@@ -256,9 +334,9 @@ class PipelineTests(DataCase):
         pid = self.escalate_po()
         run = self.claim('resolver')
         with self.assertRaisesRegex(ValueError, 'question'):
-            w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='owner',
+            w.action(dict(op='resolve', cause='Причина видна в журнале запуска и паспорте задачи', cause_kind='fact', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='owner',
                           notes='Состав полей — решение владельца продукта', question='?'))
-        w.action(dict(op='resolve', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='owner',
+        w.action(dict(op='resolve', cause='Причина видна в журнале запуска и паспорте задачи', cause_kind='fact', ref=self.ref, run=run, worker='w-' + run, options=self.OPTS, decision='owner',
                       notes='Состав полей — продуктовое решение владельца, агент его не принимает',
                       question='Какие поля включить в CSV для инвесторов?', why_owner='Выбор полей — продуктовое решение владельца'))
         notes = w.snapshot()['notifications']
@@ -267,7 +345,7 @@ class PipelineTests(DataCase):
         self.assertIn('👤', self.task()['status_note'])
         r = mcp_server.call_tool('tt_work', dict(op='answer', ref=self.ref, problem=pid, option=1))
         self.assertTrue(r['isError'])                                               # отвечает только владелец
-        w.action(dict(op='answer', ref=self.ref, problem=pid, option=1))
+        w.action(dict(op='answer', ref=self.ref, problem=pid, option=1), origin='owner')
         self.assertFalse([n for n in w.snapshot()['notifications'] if n['kind'] == 'question'])
         po = self.run_of('product_owner')
         fb = w.action(dict(op='packet', ref=self.ref, run=po['id']))['feedback']
@@ -312,7 +390,7 @@ class PipelineTests(DataCase):
             self.ref = self.idea()
         self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
                      needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
-        for role in ('system_analyst', 'solution_architect'):
+        for role in ('system_analyst', 'solution_architect', 'qa'):
             self.do_role(role, 'analysis')
         if 'analysis' not in self.task()['pipeline']['gates']:
             gate = self.claim('teamlead', gate='analysis')
@@ -360,6 +438,14 @@ class PipelineTests(DataCase):
         self.assertEqual(self.task()['pipeline']['contract_group'], 'экспорт')
         toc = w.action(dict(op='doc', ref=self.ref, path=rel))
         self.assertTrue(any(' Риск' in line and 'стр.' in line for line in toc['index']), toc)
+        # Целиком — с обоснованием (TT-96): BRD — вход этапа аналитика, без счёта бюджета; причина — в журнал тимлида
+        sa_run = self.run_of('system_analyst')['id']
+        with self.assertRaisesRegex(ValueError, 'why'):
+            w.action(dict(op='doc', ref=self.ref, run=sa_run, path=rel, full=True, why='надо'))
+        full = w.action(dict(op='doc', ref=self.ref, run=sa_run, path=rel, full=True, why='Перевожу весь BRD в SRS: нужны все разделы'))
+        self.assertTrue(full['full']); self.assertIn('## Риск', full['text']); self.assertIsNone(full['budget_left'])
+        self.assertTrue(any(e['kind'] == 'read_full' and 'Перевожу' in e['text'] for e in self.task()['pipeline']['journal']))
+        self.assertEqual(self.run_of('system_analyst')['full_reads'][0]['free'], True)
         sec = w.action(dict(op='doc', ref=self.ref, path=rel, section='риск'))
         self.assertTrue(sec['text'].startswith('## Риск'))
         num = next(line.split()[0] for line in toc['index'] if ' Риск' in line)
@@ -370,9 +456,11 @@ class PipelineTests(DataCase):
         with self.assertRaisesRegex(ValueError, 'path'):
             w.action(dict(op='doc', ref=self.ref, path='../secret.txt'))
         sa = self.run_of('system_analyst')
-        up = w.action(dict(op='packet', ref=self.ref, run=sa['id']))['upstream']
-        brd = next(u for u in up if u['path'] == rel)
-        self.assertTrue(any(' Риск' in line for line in brd['index'])); self.assertGreater(brd['tokens'], 100)
+        pk = w.action(dict(op='packet', ref=self.ref, run=sa['id']))
+        brd = next(u for u in pk['upstream'] if u['path'] == rel)
+        self.assertNotIn('index', brd); self.assertGreater(brd['tokens'], 100)      # указатель — в INDEX.md, не в паспорте
+        index = (Path(self.task()['pipeline']['worktree']['path']) / pk['task_index']).read_text(encoding='utf-8')
+        self.assertIn(rel, index); self.assertIn(' Риск', index)
 
     # --- рецепты Решалы (TT-88)
 
@@ -393,7 +481,7 @@ class PipelineTests(DataCase):
         self.assertTrue(self.run_of('resolver'))
         # Решала решает и пополняет базу решений
         res = self.claim('resolver')
-        w.action(dict(op='resolve', ref=self.ref, run=res, worker='w-' + res, options=self.OPTS, decision='continue',
+        w.action(dict(op='resolve', cause='Причина видна в журнале запуска и паспорте задачи', cause_kind='hypothesis', probe='Повторный прогон рецепта подтвердит причину', ref=self.ref, run=res, worker='w-' + res, options=self.OPTS, decision='continue',
                       notes='Каталог .git только для чтения: коммитит сервер, роли — только файлы',
                       instructions='Не коммить сам: сохрани файлы и сдай handoff, сервер закоммитит их',
                       recipe=dict(title='Каталог .git только для чтения', keywords=['только для чтения', 'git'],
@@ -449,7 +537,7 @@ class PipelineTests(DataCase):
         gate = self.claim('teamlead', gate='release')
         w.action(dict(op='gate', ref=self.ref, run=gate, worker='w-' + gate, decision='approve',
                       notes='QA Sign-off есть, деплой в тест чистый, риски релиза приняты'))
-        w.action(dict(op='approve_release', ref=self.ref))
+        w.action(dict(op='approve_release', ref=self.ref), origin='owner')
         self.do_role('devops', 'deploy_main')
         t = self.task()
         self.assertEqual(git('show', 'main:app.py', cwd=self.repo), 'x = 1')          # main вернулся к прежнему
@@ -499,20 +587,21 @@ class PipelineTests(DataCase):
 
     def test_owner_moves_tasks_to_idea(self):
         # Задача вне конвейера «в работе» и задача конвейера на анализе — обе в «Идея».
-        d = w.read('projects.json', {}); b = d['projects']['alpha-api']['backlog']
-        b[0]['status'] = 'in_progress'; b.append(dict(id='AL-05', title='Без запроса', why='Описание задачи без корня', size='S', status='queued'))
-        w.save('projects.json', d)
         self.ref = self.idea()
         self.do_role('product_owner', 'idea', acceptance=['Первый критерий приёмки', 'Второй критерий приёмки'],
                      needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
+        # Старую задачу добавляем после приёма PO: иначе общий спринт правильно запрещает новый старт.
+        d = w.read('projects.json', {}); b = d['projects']['alpha-api']['backlog']
+        b[0]['status'] = 'in_progress'; b.append(dict(id='AL-05', title='Без запроса', why='Описание задачи без корня', size='S', status='queued'))
+        w.save('projects.json', d)
         self.assertEqual(self.task()['pipeline']['stage'], 'analysis')
         prev = self.run_of('system_analyst')
         r = w.action(dict(op='to_idea', project='alpha-api'))
         self.assertTrue(r['dry_run'])
-        self.assertEqual(sorted(x['ref'] for x in r['items']), ['alpha-api/AL-01', 'alpha-api/AL-05', self.ref])
+        self.assertEqual(sorted(x['ref'] for x in r['items']), sorted(['alpha-api/AL-01', 'alpha-api/AL-05', self.ref]))
         self.assertEqual({x['why'] for x in r['skipped_items']}, {'закрыта'})                 # AL-02 готова
         self.assertEqual(self.task()['pipeline']['stage'], 'analysis')                          # предпросмотр ничего не меняет
-        w.action(dict(op='to_idea', project='alpha-api', dry_run=False))
+        w.action(dict(op='to_idea', project='alpha-api', dry_run=False), origin='owner')
         for ref in ('alpha-api/AL-01', 'alpha-api/AL-05', self.ref):
             t = w.task_for(ref)
             self.assertEqual((t['pipeline']['stage'], t['status']), ('idea', 'queued'), ref)
@@ -527,7 +616,7 @@ class PipelineTests(DataCase):
         self.assertLessEqual(plan['sessions'], 4)
 
     def test_full_autonomy_releases_and_project_runs_itself(self):
-        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)))
+        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)), origin='owner')
         self.to_testing()
         self.do_role('qa', 'testing', signoff=True)
         gate = self.claim('teamlead', gate='release')
@@ -535,11 +624,12 @@ class PipelineTests(DataCase):
                       notes='QA Sign-off есть, деплой в тест чистый, риски релиза приняты'))
         t = self.task()
         self.assertEqual(t['pipeline']['stage'], 'deploy_main')
-        self.assertIn('полная автономия', t['pipeline']['approvals']['release']['by'])   # без отдельного да владельца
+        a = t['pipeline']['approvals']['release']                   # без отдельного да владельца — по гранту
+        self.assertIn('грант', a['by']); self.assertEqual(a['grant'], w.state()['policy']['grant']['id'])
         self.assertTrue(self.run_of('devops'))
         # Запуск проекта: все ждущие роли проекта открываются сервером по мере мест; остановка снимает это.
-        w.action(dict(op='to_idea', project='alpha-api', dry_run=False))
-        w.action(dict(op='start', project='alpha-api', agents=['claude'], sessions=1, dry_run=False))
+        w.action(dict(op='to_idea', project='alpha-api', dry_run=False), origin='owner')
+        w.action(dict(op='start', project='alpha-api', agents=['claude'], sessions=1, dry_run=False), origin='owner')
         pos = [r for r in w.state()['runs'] if r.get('role') == 'product_owner' and r['status'] == 'queued']
         self.assertTrue(pos and all(r['auto_launch'] for r in pos))
         self.assertIn('alpha-api', w.snapshot()['active_projects'])
@@ -570,7 +660,7 @@ class PipelineTests(DataCase):
         t3 = dict(t, pipeline=dict(t['pipeline'], roles={'development/developer': dict(agent='codex')}))
         self.assertEqual(orchestra.role_agent(s, t3, 'reviewer'), 'claude')
         # Закрепление владельцем сильнее таблицы; ИИ на лимите пропускается.
-        w.action(dict(op='settings', changes=dict(roles={'developer': 'claude'})))
+        w.action(dict(op='settings', changes=dict(roles={'developer': 'claude'})), origin='owner')
         self.assertEqual(orchestra.role_agent(w.state(), t, 'developer'), 'claude')
         s = w.state(); w.note_limit(s, 'claude', w.now() + __import__('datetime').timedelta(hours=1), w.now()); w.save('workflow.json', s)
         self.assertEqual(orchestra.role_agent(w.state(), t, 'developer'), 'codex')
@@ -594,5 +684,5 @@ class PipelineTests(DataCase):
                          needs=dict(design=False, marketing=False, reason='Только серверная выгрузка, без интерфейса'))
         self.assertTrue(r['accepted'], r)
         self.assertEqual(git('status', '--porcelain', cwd=wt), '')
-        self.assertIn('Автокоммит сервера', git('log', '-1', '--format=%B', cwd=wt))
+        self.assertIn('Автокоммит сервера', git('log', '-2', '--format=%B', cwd=wt))   # последним — INDEX.md
         self.assertTrue(any(e['kind'] == 'autocommit' for e in self.task()['pipeline']['journal']))

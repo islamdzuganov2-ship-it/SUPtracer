@@ -11,7 +11,7 @@
   · обновление только методом POST и только со своим заголовком — чтобы чужая
     вкладка в браузере не могла запустить сбор по ссылке.
 
-  py tools/serve.py [--port 8787] [--no-browser]
+  py tools/serve.py [--port 8787] [--no-browser] [--no-dispatch]
 """
 import json
 import os
@@ -91,42 +91,73 @@ def dashboard_stale():
     return _newest(lambda n: n.endswith((".js", ".html")) or n == "build_dashboard.py") > os.path.getmtime(DASH)
 
 
-def dispatch_once():
-    """Автозапуск: ревью после пройденной автопроверки открывается само, если включено."""
-    import workflow, orchestra
+def dispatch_once(resume_only=False):
+    """Обход Product Owner с конца конвейера: новые и приостановленные роли в одной очереди.
+
+    Проход limits_once возобновляет только паузы, резервируя места для более поздних
+    готовых этапов; обычный проход открывает и их. Оба используют одни ограничения.
+    """
+    import workflow, orchestra, launcher, release_policy as rp
     conf = workflow.settings()
     started = []
     s = workflow.state(); runs = s["runs"]
+    if rp.killed(s):
+        return started                 # аварийная остановка: ни новых сессий, ни продолжений
     busy = workflow.open_sessions(runs)
     per_ai = {a: workflow.open_sessions(runs, agent=a) for a in workflow.PROVIDERS}
     tasks = {t["ref"]: t for t in workflow.snapshot()["tasks"]}
     prio = {ref: workflow.PRIORITY_ORDER.get(t.get("priority"), 1) for ref, t in tasks.items()}
+    due = {r['id'] for r in workflow.resume_due()}
+    orchestra.product_owner_recovery()
+    import provider_balance as pb
+    workflow.provider_sync(workflow.cli_ok)       # FR-016: режим balanced/mono/paused_all и снятие подтверждённых восстановлений
+    s = workflow.state(); runs = s["runs"]
+    probing = pb.conf(s)['balance_mode'] == 'balanced'
     for r in sorted(runs, key=lambda r: orchestra.dispatch_order(r, tasks, prio)):
-        if r.get("status") != "queued" or not r.get("auto_launch") or r.get("launched_at"):
+        resuming = r['id'] in due
+        if not resuming and (r.get('paused') or r.get("status") != "queued" or not r.get("auto_launch") or r.get("launched_at")):
             continue
         # Лимит одновременных сессий; Решала разбирает блокеры и получает одно место сверх него (А5).
         if busy >= conf.get("max_sessions", 4) + (1 if r.get("role") == "resolver" else 0):
             continue
-        if per_ai.get(r.get("agent"), 0) >= (conf.get("sessions_per_ai") or {}).get(r.get("agent"), 99):
-            continue              # у этого ИИ свой лимит сессий (А7): запуски другого ИИ идут дальше
         if orchestra.hold(s, r, tasks, conf):
             continue              # порядок анализа, лимит незавершённого, группа контрактов
         # Роли конвейера — по auto_pipeline, ревью старого потока — по auto_launch_review; передачи по лимиту — всегда.
-        if not (conf["auto_pipeline"] if r.get("role") else (conf["auto_launch_review"] or r.get("failover"))):
+        if not (conf["auto_pipeline"] if r.get("role") else (resuming or conf["auto_launch_review"] or r.get("failover"))):
             continue
         if workflow.limited(None, r.get("agent")):
+            if resuming:
+                continue
             if not workflow.reroute_queued(r["ref"], r["id"]):
                 continue               # все ИИ на лимите: откроется после сброса
             continue                   # ИИ запуска сменён — откроется в следующем проходе
-        if time.time() - _auto_attempts.get(r["id"], 0) < 300:
+        if per_ai.get(r.get("agent"), 0) >= (conf.get("sessions_per_ai") or {}).get(r.get("agent"), 99):
             continue
-        _auto_attempts[r["id"]] = time.time()
+        if probing and not resuming and r.get("agent") in workflow.PROVIDERS and \
+                pb.health(s, r.get("agent"), workflow.now())['state'] == 'degraded' and per_ai.get(r.get("agent"), 0) >= 1:
+            continue                   # восстановление не подтверждено: одна пробная сессия, без ping-pong
+        attempt = ('resume:' if resuming else '') + r['id']
+        if time.time() - _auto_attempts.get(attempt, 0) < 300:
+            continue
+        if resume_only and not resuming:
+            # Не дать ранней паузе занять место готового позднего этапа перед dispatch_once.
+            busy += 1; per_ai[r.get('agent')] = per_ai.get(r.get('agent'), 0) + 1
+            continue
+        _auto_attempts[attempt] = time.time()
         try:
-            launch_session(dict(ref=r["ref"], agent=r.get("agent"), run=r["id"]))
+            if resuming:
+                resume_session(r)
+            else:
+                launch_session(dict(ref=r["ref"], agent=r.get("agent"), run=r["id"]))
             started.append(r["id"]); busy += 1; per_ai[r.get("agent")] = per_ai.get(r.get("agent"), 0) + 1
+            r.pop('paused', None)
             r["launched_at"] = workflow.now().isoformat()     # группа контрактов видит открытый запуск в этом же проходе
         except Exception as e:   # noqa: BLE001 — причина видна на карточке
             workflow.mark_launch_error(r["ref"], r["id"], e)
+            if isinstance(e, launcher.CLIUnavailable) and not resuming:
+                target = workflow.reroute_queued(r["ref"], r["id"], unavailable=True)
+                if target and target != r.get('agent'):
+                    _auto_attempts.pop(r['id'], None)
     return started
 
 
@@ -135,8 +166,28 @@ def limits_once():
     продолжить ту же сессию с места остановки."""
     import workflow, limits
     paused, resumed, handed = [], [], []
+    state = workflow.state()
+    for agent, entry in (state.get('provider_limits') or {}).items():
+        since = limits.stamp(entry.get('at'))
+        oks = [limits.stamp(x) for x in entry.get('oks') or []]
+        since = max([since] + [x for x in oks if x]) if since else since
+        if not since:
+            continue                   # ищем успех и пока лимит не прошёл, и пока восстановление не подтверждено
+        candidates = [r for r in reversed(state['runs']) if (r.get('launch') or {}).get('agent') == agent]
+        for run in candidates[:20]:
+            observed = limits.success_at(run, since)
+            if observed and workflow.mark_provider_available(agent, observed):
+                break
     for r in workflow.state()["runs"]:
-        if r.get("status") not in ("queued", "running") or not r.get("launch") or r.get("paused"):
+        if r.get("status") not in ("queued", "running"):
+            continue
+        if r.get('paused'):
+            if r['paused'].get('reason') in ('limit', 'context') and workflow.limited(None, r.get('agent')):
+                moved = workflow.failover_run(r['ref'], r['id'])
+                if moved:
+                    handed.append(dict(moved, from_run=r['id']))
+            continue
+        if not r.get('launch'):
             continue
         if (r.get("launch") or {}).get("agent") == "codex" and not r["launch"].get("session"):
             sid, _ = limits.session_of(r)
@@ -149,15 +200,7 @@ def limits_once():
             moved = workflow.failover_run(r["ref"], r["id"])
             if moved:
                 handed.append(dict(moved, from_run=r["id"]))
-    for r in workflow.resume_due():
-        if time.time() - _auto_attempts.get("resume:" + r["id"], 0) < 300:
-            continue
-        _auto_attempts["resume:" + r["id"]] = time.time()
-        try:
-            resume_session(r)
-            resumed.append(r["id"])
-        except Exception as e:   # noqa: BLE001 — причина видна на карточке, повтор через 5 минут
-            workflow.mark_launch_error(r["ref"], r["id"], "Возобновление после лимита: %s" % e)
+    resumed = dispatch_once(resume_only=True)
     return dict(paused=paused, resumed=resumed, handed=handed)
 
 
@@ -171,10 +214,12 @@ def resume_session(run, nudge=False):
     session = (run.get("paused") or {}).get("session") or launch.get("session")
     if not session and agent == "codex":
         session = limits.session_of(run)[0]
+    if (run.get("paused") or {}).get("relay"):
+        session = None                 # эстафета: новая сессия, а не продолжение разросшейся
     route = (run.get("packet") or {}).get("route") or {}
     if run.get("role"):
         import orchestra
-        route = orchestra.role_route(t, run["role"], agent)
+        route = orchestra.run_route(t, run, agent)
     if not route.get("model"):
         route = workflow.recommendation(t, agent=agent)
     prompt = NUDGE if nudge else workflow.resume_prompt(t, run)
@@ -184,7 +229,8 @@ def resume_session(run, nudge=False):
         prompt += "\n\n" + (orchestra.role_prompt(t, run, route, run.get("worker") or workflow.worker_id(run, agent))
                              if run.get("role") else workflow.action(dict(op="prompt", ref=run["ref"]))["prompt"]
                              if run["status"] == "queued" else "")
-    cwd = launch.get("cwd")
+    project = workflow.read('projects.json', {}).get('projects', {}).get(t['project'], {})
+    cwd = launch.get("cwd") or ((t.get('pipeline') or {}).get('worktree') or {}).get('path') or project.get('inspection_path') or project.get('path')
     opened = open_session(agent, route, prompt.strip(), cwd, run, edits=bool(run.get("role")), resume=session)
     info = launch_info(opened, cwd, agent)
     if nudge:
@@ -215,6 +261,21 @@ def keep_awake(on):
     return bool(ctypes.windll.kernel32.SetThreadExecutionState(flags))
 
 
+_LEARN_AT = [0.0]
+
+
+def learn_once(every=300):
+    """Раз в 5 минут: события попыток из истории конвейера и предложения причин новым возвратам."""
+    if time.time() - _LEARN_AT[0] < every:
+        return None
+    _LEARN_AT[0] = time.time()
+    import learning_events as le
+    if not le.enabled():
+        return None
+    import learn
+    return learn.refresh()
+
+
 def dispatcher(interval=15):
     while True:
         time.sleep(interval)
@@ -230,6 +291,7 @@ def dispatcher(interval=15):
             budget_once()             # запуск потратил 150% ориентира — отметка и колокольчик
             notify_once()             # новое в колокольчике — системное уведомление владельцу
             dispatch_once()
+            learn_once()              # факты конвейера -> журнал опыта агента (LEARN-03), идемпотентно
         except Exception as e:   # noqa: BLE001 — сервер досок не должен падать из-за автозапуска
             sys.stderr.write("автозапуск: %s\n" % e)
 
@@ -237,6 +299,9 @@ def dispatcher(interval=15):
 def open_session(agent, route, prompt, cwd, run, edits=False, resume=None):
     """Сессия ИИ в режиме согласия владельца: пошаговое — окно, полная автономия — фон без окна."""
     import workflow, launcher
+    if agent == 'local_mimo':
+        import local_mimo
+        return local_mimo.spawn(run, cwd, run.get('worker') or workflow.worker_id(run, agent))
     extra, env = lean_args(agent, run)
     return launcher.launch(agent, route["model"], route["effort"], prompt, cwd, edits=edits, resume=resume,
                            headless=workflow.autonomous(), run_id=run["id"], extra=extra,
@@ -245,7 +310,8 @@ def open_session(agent, route, prompt, cwd, run, edits=False, resume=None):
 
 
 def lean_args(agent, run):
-    """Лёгкий старт для сессии роли конвейера (Л1): свои артефакты роли — сторожу чтений, веб — только при исследовании."""
+    """Лёгкий старт для сессии роли конвейера (Л1): свои артефакты роли — сторожу чтений, веб — только при исследовании,
+    потолок контекста и команда эстафеты — хуку сессии (TT-91)."""
     if not run.get("role"):
         return [], {}
     import workflow, launcher
@@ -254,7 +320,17 @@ def lean_args(agent, run):
     pipe = t.get("pipeline") or {}
     own = [P.art_path(t["id"], a["path"]) for a in P.ROLES[run["role"]]["artifacts"]] if t.get("id") else []
     research = (pipe.get("needs") or {}).get("research", True) is not False
-    return launcher.lean(agent, run["role"], research=research, own=own)
+    extra, env = launcher.lean(agent, run["role"], research=research, own=own)
+    if extra or env:
+        route = (run.get("packet") or {}).get("route") or {}
+        pol = dict(P.read_policy(t, run["role"], workflow.cx.assess(t)["tier"]) if t.get("id") else {}, ref=run["ref"], run=run["id"])
+        env = dict(env, TASKTREKER_READ_POLICY=json.dumps(pol, ensure_ascii=False),
+                   TASKTREKER_MCP_PROJECT=t.get("project") or "",     # SEC-016: память и задачи только своего проекта
+                   TASKTREKER_BUDGET=str(route.get("budget_tokens") or ""),
+                   TASKTREKER_CEILING=str(workflow.settings().get("context_ceiling", workflow.CONTEXT_CEILING)),
+                   TASKTREKER_RELAY='tt_work op=pause reason=context ref=%s run=%s worker=%s checkpoint="…"'
+                   % (run["ref"], run["id"], run.get("worker") or workflow.worker_id(run, agent)))
+    return extra, env
 
 
 def launch_info(opened, cwd, agent, **extra):
@@ -340,7 +416,7 @@ def watch_once():
     Полная автономия: та же сессия продолжается с напоминанием (до двух раз), дальше — эскалация
     тимлиду. Пошаговое согласие: окно закрыл владелец — только отметка на карточке."""
     import workflow, launcher
-    nudged, lost = [], []
+    nudged, lost, relayed = [], [], []
     full = workflow.autonomous()
     for r in workflow.state()["runs"]:
         launch = r.get("launch") or {}
@@ -355,6 +431,8 @@ def watch_once():
             if not r.get("launch_error"):
                 workflow.mark_launch_error(r["ref"], r["id"], "Окно сессии закрыто, этап не сдан — откройте сессию снова")
             continue
+        if relay_due(r):
+            relayed.append(r["id"]); continue        # свежую сессию откроет limits_once на этом же проходе
         if r.get("nudges", 0) >= MAX_NUDGES:
             workflow.session_lost(r["ref"], r["id"], "сессия %d раза заканчивалась без сдачи этапа" % (MAX_NUDGES + 1))
             lost.append(r["id"]); continue
@@ -363,15 +441,40 @@ def watch_once():
             nudged.append(r["id"])
         except Exception as e:   # noqa: BLE001
             workflow.mark_launch_error(r["ref"], r["id"], "Продолжение сессии: %s" % e)
-    return dict(nudged=nudged, lost=lost)
+    return dict(nudged=nudged, lost=lost, relayed=relayed)
+
+
+def relay_due(run):
+    """Сессия роли закончилась без сдачи, а её контекст выше потолка: вместо продолжения той же сессии —
+    эстафета с точкой остановки, собранной сервером по последним репликам (TT-91)."""
+    import workflow, tokens
+    ceiling = workflow.settings().get("context_ceiling", workflow.CONTEXT_CEILING)
+    if not run.get("role") or not ceiling:
+        return False
+    ctx = tokens.context_now(run)
+    if ctx < ceiling:
+        return False
+    words = tokens.last_words(run)
+    checkpoint = ("Точку остановки собрал сервер: прежняя сессия закончилась без сдачи этапа при контексте %d тыс. токенов. "
+                  "Сверься с git log ветки задачи и паспортом. Последнее, что писала сессия: %s" % (ctx // 1000, words or "—"))
+    return workflow.relay(run["ref"], run["id"], checkpoint, "server") is not None
+
+
+def refuse_if_stopped():
+    import workflow, release_policy as rp
+    why = rp.kill_reason(workflow.state())
+    if why:
+        raise ValueError(why)
 
 
 def launch_role(t, run, req):
     """Сессия роли конвейера: своя модель роли, рабочая копия задачи, скилл роли, право правки файлов."""
     import workflow, launcher, orchestra
+    refuse_if_stopped()
     agent = req.get("agent") or run.get("agent") or workflow.settings()["default_executor"]
     if run.get("agent") and agent != run["agent"]:
         raise ValueError("Роль закреплена за ИИ %s: сменить можно в настройках ролей" % run["agent"])
+    workflow.reserve_sprint(t['ref'])
     wt = (t.get("pipeline") or {}).get("worktree") or {}
     if not wt:
         with workflow.locked():
@@ -383,7 +486,7 @@ def launch_role(t, run, req):
         wt = (t.get("pipeline") or {}).get("worktree") or {}
     project = workflow.read("projects.json", {})["projects"][t["project"]]
     cwd = wt.get("path") or project.get("inspection_path") or project.get("path")
-    route = orchestra.role_route(t, run["role"], agent)
+    route = orchestra.run_route(t, run, agent)
     worker = workflow.worker_id(run, agent)
     prompt = orchestra.role_prompt(t, run, route, worker)
     opened = open_session(agent, route, prompt, cwd, run, edits=True)
@@ -398,6 +501,7 @@ def launch_session(req):
     Окно открывается только здесь — по нажатию владельца на локальном сервере. MCP-инструмент
     такой операции не имеет: ИИ не открывает сессии других ИИ."""
     import workflow, launcher
+    refuse_if_stopped()
     ref = str(req.get("ref") or "")
     t = workflow.task_for(ref)
     run = next((r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued"
@@ -413,6 +517,7 @@ def launch_session(req):
     if not run:
         workflow.action(dict(op="enqueue", ref=ref, agent=agent))
         run = next(r for r in workflow.state()["runs"] if r["ref"] == ref and r["status"] == "queued")
+    workflow.reserve_sprint(ref)
     project = workflow.read("projects.json", {})["projects"][t["project"]]
     ws = workflow.workspace(t["project"], project)
     base = ws["active_copy"] or ws["path"]
@@ -432,13 +537,13 @@ def launch_session(req):
                 route=info["route"], worker=info["worker"], prompt=info["prompt"])
 
 
-def start_project(req):
+def start_project(req, origin=None):
     """«▶ Запустить проект»: пакет готовых задач бэклога ставится в очередь, и по каждой
     открывается сессия выбранного ИИ; заодно открываются неоткрытые роли конвейера проекта.
     Сбой одного окна не останавливает остальные — причина пишется на карточку."""
     import workflow
     plan = workflow.action(dict(op="start", project=req.get("project"), agents=req.get("agents"),
-                                sessions=req.get("sessions"), dry_run=False))
+                                sessions=req.get("sessions"), dry_run=False), origin=origin)
     opened, failed = [], []
     jobs = [dict(ref=p["ref"], agent=p["agent"], run=p["run"]) for p in plan["picks"]]
     for job in jobs:
@@ -448,6 +553,12 @@ def start_project(req):
             workflow.mark_launch_error(job["ref"], job["run"], e)
             failed.append(dict(job, error=str(e)[:300]))
     return dict(plan, opened=opened, failed=failed)
+
+
+# Запуск окон ИИ, старт проекта и подключение к ассистентам — действия владельца (TTU-018).
+OWNER_PATHS = ("/api/launch", "/api/start", "/api/connect")
+OWNER_REFUSAL = ("Это действие владельца: откройте доску ссылкой владельца — её печатает "
+                 "py tools/pm.py owner-link в вашем терминале")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -502,6 +613,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(404, {"ok": False, "error": "у запуска нет журнала фоновой сессии"})
             return self.send_json(200, {"ok": True, "data": dict(run=rid, alive=launcher.alive(run["launch"].get("pid")),
                                                                  log=launcher.tail(log, 300))})
+        if path == "/api/taskview":
+            # Факт по задачам для дашборда: считается из данных системы при каждом запросе, без ИИ (TT-95).
+            import taskview
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                hours = max(1, min(24 * 90, int((q.get("hours") or ["24"])[0])))
+            except ValueError:
+                hours = 24
+            return self.send_json(200, {"ok": True, "data": taskview.build((q.get("project") or [""])[0] or None, hours)})
         if path == "/api/cilog":
             import ci
             from urllib.parse import parse_qs, urlparse
@@ -512,16 +633,48 @@ class Handler(BaseHTTPRequestHandler):
             if not log or os.path.dirname(os.path.abspath(log)) != os.path.abspath(str(ci.logs_dir())):
                 return self.send_json(404, {"ok": False, "error": "у прогона нет журнала CI"})
             return self.send_json(200, {"ok": True, "data": dict(run=rid, summary=ci.summary(run), log=ci.tail(log, 400))})
+        if path.startswith("/api/arch/"):
+            return self.send_arch(path)
         if path == "/api/work":
-            import workflow, launcher
+            import workflow, launcher, activity
             data = workflow.snapshot()
             for run in data["runs"]:
                 # Открытая, но не принявшая задачу сессия: причина из журнала ИИ, если она есть.
                 if run.get("status") == "queued" and run.get("launched_at"):
                     run["diagnosis"] = launcher.diagnose(run)
-            return self.send_json(200, {"ok": True, "data": dict(data, launchers=launcher.status(),
+            observed = activity.snapshot(workflow.state()['runs'], data['tasks'], settings=data['settings'])
+            return self.send_json(200, {"ok": True, "data": dict(data, activity=observed, launchers=launcher.status(),
                                                                   server=dict(stale=code_stale(), started=STARTED))})
         self.send_json(404, {"ok": False, "error": "нет такого адреса"})
+
+    def send_arch(self, path):
+        """Модуль «Архитектура систем» (TT-ARCH-001, TTN-004). Топология — чувствительные сведения, поэтому
+        даже чтение требует того же, что запись: свой Origin, заголовок X-TaskTreker и токен сессии сервера.
+        Host и статический заголовок их не заменяют. Пока флаг выключен, данных нет — 409, а не пустой граф."""
+        import session_auth as sa
+        refused = sa.origin_ok(self.headers, self.server.server_address[1])
+        if not refused and self.headers.get("X-TaskTreker") != "1":
+            refused = "нет заголовка X-TaskTreker"
+        if not refused and not sa.check(self.headers.get(sa.HEADER)):
+            refused = "нет токена сессии этого сервера"
+        if refused:
+            sa.audit(path, refused, self.headers)
+            return self.send_json(403, {"ok": False, "error": "запрос не от дашборда: " + refused})
+        import flags, workflow
+        if not flags.enabled("network_architecture_enabled", workflow.state().get("settings")):
+            return self.send_json(409, {"ok": False, "disabled": True,
+                                        "error": "модуль «Архитектура систем» выключен (network_architecture_enabled)"})
+        # Права — по субъекту: владелец по токену владельца; доска без него — агент без проекта, ей ничего.
+        import arch_acl, owner_auth as oa
+        from urllib.parse import parse_qs, urlparse
+        who = arch_acl.principal("owner" if oa.check_token(self.headers.get(oa.HEADER)) else "agent")
+        snap = None
+        inv = os.path.join(os.environ.get("TASKTREKER_DATA") or os.path.join(ROOT, "data"), "arch", "inventory.json")
+        if os.path.exists(inv):
+            with open(inv, encoding="utf-8") as f:
+                snap = json.load(f)
+        code, body = arch_acl.handle(path, parse_qs(urlparse(self.path).query), who, snap)
+        return self.send_json(code, body)
 
     def do_POST(self):
         if not self.local_only():
@@ -529,9 +682,20 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path not in ("/api/refresh", "/api/connect", "/api/work", "/api/launch", "/api/start"):
             return self.send_json(404, {"ok": False, "error": "нет такого адреса"})
-        if self.headers.get("X-TaskTreker") != "1":
-            # Форма с чужого сайта такой заголовок поставить не может.
-            return self.send_json(403, {"ok": False, "error": "запрос не от дашборда"})
+        import session_auth as sa
+        refused = sa.origin_ok(self.headers, self.server.server_address[1])
+        if not refused and self.headers.get("X-TaskTreker") != "1":
+            refused = "нет заголовка X-TaskTreker"      # форма с чужого сайта такой заголовок поставить не может
+        if not refused and not sa.check(self.headers.get(sa.HEADER)):
+            refused = "нет токена сессии этого сервера"   # SEC-006: страница этого сервера несёт его в <meta>
+        if refused:
+            sa.audit(path, refused, self.headers)
+            return self.send_json(403, {"ok": False, "error": "запрос не от дашборда: " + refused})
+        # Свой заголовок поставит и curl агента: владелец — только с токеном владельца (TTU-018).
+        import owner_auth as oa
+        origin = oa.OWNER if oa.check_token(self.headers.get(oa.HEADER)) else oa.AGENT
+        if path in OWNER_PATHS and origin != oa.OWNER:
+            return self.send_json(403, {"ok": False, "error": OWNER_REFUSAL})
         try:
             n = int(self.headers.get("Content-Length") or 0)
             if n < 0 or n > MAX_BODY:
@@ -548,13 +712,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"ok": False, "error": str(e)})
         if path == "/api/start":
             try:
-                return self.send_json(200, {"ok": True, "data": start_project(req)})
+                return self.send_json(200, {"ok": True, "data": start_project(req, origin)})
             except (ValueError, TypeError, KeyError, OSError) as e:
                 return self.send_json(400, {"ok": False, "error": str(e)})
         if path == "/api/work":
             import workflow
             try:
-                return self.send_json(200, {"ok": True, "data": workflow.action(req)})
+                return self.send_json(200, {"ok": True, "data": workflow.action(req, origin=origin)})
             except (ValueError, TypeError, KeyError) as e:
                 return self.send_json(400, {"ok": False, "error": str(e)})
         source = req.get("source", "all")
@@ -600,10 +764,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(500, {"ok": False, "error": "дашборд не собран", "log": log})
         with open(DASH, "rb") as f:
             body = f.read()
+        import session_auth as sa
+        body = sa.inject(body)                   # токен записи — только в странице этого сервера (SEC-006)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")              # страница с токеном не встраивается чужим сайтом
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
@@ -627,13 +796,19 @@ def main():
         print("Не нашлось свободного порта в диапазоне %d–%d" % (port, port + 19))
         return 1
     url = "http://127.0.0.1:%d/" % port
+    import owner_auth as oa
+    owner_url = url + "#owner=" + oa.board_token(create=True)
     print("Дашборд: %s" % url)
+    if oa.interactive():
+        # Ссылка с токеном — только человеку в консоли: у фоновых сессий ИИ вывод не терминал.
+        print("Ссылка владельца (решения владельца, не передавайте ИИ): %s" % owner_url)
     print("Кнопка «Обновить данные» на странице теперь работает по-настоящему.")
     print("Остановить — Ctrl+C.")
     if "--no-browser" not in args:
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.4, lambda: webbrowser.open(owner_url)).start()
     try:
-        threading.Thread(target=dispatcher, daemon=True, name="автозапуск ревью").start()
+        if "--no-dispatch" not in args:      # просмотр без автозапуска: второй экземпляр не открывает сессии
+            threading.Thread(target=dispatcher, daemon=True, name="автозапуск ревью").start()
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\nостановлен")

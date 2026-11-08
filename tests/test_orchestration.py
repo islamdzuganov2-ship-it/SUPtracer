@@ -26,6 +26,8 @@ class OrchestrationTests(DataCase):
 
     def test_wip_limit_stops_product_owner(self):
         s = w.state(); s.setdefault('settings', {})['wip_analysis'] = 2
+        # Проверяем независимый лимит анализа внутри допустимого спринта, не миграцию старых задач.
+        s['delivery_sprints'] = dict(sequence=0, current=None, history=[], legacy=[])
         tasks = {'alpha-api/AL-%d' % i: task('alpha-api/AL-%d' % i, 'analysis') for i in (1, 2)}
         tasks['alpha-api/AL-9'] = task('alpha-api/AL-9', 'idea')
         tasks['beta-tool/BT-1'] = task('beta-tool/BT-1', 'idea')
@@ -53,7 +55,7 @@ class OrchestrationTests(DataCase):
                 dict(id='3', ref='a/1', role='qa', stage='testing', created_at='3'),
                 dict(id='4', ref='a/2', role='resolver', stage='analysis', created_at='4')]
         order = [r['id'] for r in sorted(runs, key=lambda r: O.dispatch_order(r, tasks, prio))]
-        self.assertEqual(order, ['4', '3', '2', '1'])                                # Решала, ближе к main, …
+        self.assertEqual(order, ['3', '4', '2', '1'])  # Поздний этап раньше; Решала первый внутри этапа.
 
 
 class BudgetWatchTests(DataCase):

@@ -31,8 +31,12 @@ def _inside(path, scope):
     return False
 
 
-def run_checks(repo, worktree, branch, base, scope=None, verify=None, timeout=VERIFY_TIMEOUT):
-    """Проверки ветки. Возвращает {ok, at, checks:[{key, name, ok, detail}], files}."""
+def run_checks(repo, worktree, branch, base, scope=None, verify=None, timeout=VERIFY_TIMEOUT, verify_na=None):
+    """Проверки ветки. Возвращает {ok, at, checks:[{key, name, ok, detail}], files}.
+
+    Fail-closed (SEC-003, OBS-03): нет команды проверок — проверка не пройдена. Исключение — явное решение
+    владельца `verify_na` в projects.json (проект без исполняемого кода): тогда пункт помечен «не применимо»,
+    с причиной, а не «пройден»."""
     checks, files = [], []
     def add(key, name, ok, detail=''):
         checks.append(dict(key=key, name=name, ok=bool(ok), detail=detail))
@@ -61,14 +65,20 @@ def run_checks(repo, worktree, branch, base, scope=None, verify=None, timeout=VE
 
     if verify:
         try:
-            r = subprocess.run(verify, cwd=worktree, capture_output=True, text=True, encoding='utf-8',
+            import sandbox_env
+            r = subprocess.run(verify, cwd=worktree, capture_output=True, text=True, encoding='utf-8', env=sandbox_env.minimal(),
                                errors='replace', timeout=timeout)
             add('verify', 'Проверки проекта: ' + ' '.join(verify), r.returncode == 0,
                 _tail((r.stdout or '') + '\n' + (r.stderr or '')))
         except (OSError, subprocess.TimeoutExpired) as e:
             add('verify', 'Проверки проекта: ' + ' '.join(verify), False, str(e)[:300])
     else:
-        add('verify', 'Проверки проекта', True, 'команда verify у проекта не задана — проверка пропущена')
+        if isinstance(verify_na, str) and verify_na.strip():
+            add('verify', 'Проверки проекта', True, 'не применимо по решению владельца: ' + verify_na.strip()[:200])
+            checks[-1]['not_applicable'] = True
+        else:
+            add('verify', 'Проверки проекта', False, 'команда проверок не настроена: ветка без проверок не сливается '
+                '(задайте verify или ci в projects.json; для проекта без кода — verify_na с причиной)')
 
     return dict(ok=all(c['ok'] for c in checks), at=datetime.now(timezone.utc).isoformat(),
                 checks=checks, files=files[:50], branch=branch, base=base)

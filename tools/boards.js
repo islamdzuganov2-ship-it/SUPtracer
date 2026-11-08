@@ -1,6 +1,6 @@
 /* Доски используют тот же контракт, что CLI и MCP. */
 (() => {
-  let data=D.workflow, query='', project='', status='', priority='', ai='', onlyFocus=false;
+  let data=D.workflow, query='', project='', status='', priority='', ai='', onlyFocus=false, activityOffline=false;
   try { const saved=JSON.parse(localStorage.getItem('tt-board-filters')||'{}');
     query=typeof saved.query==='string'?saved.query:''; project=typeof saved.project==='string'?saved.project:'';
     status=typeof saved.status==='string'?saved.status:''; priority=typeof saved.priority==='string'?saved.priority:''; ai=typeof saved.ai==='string'?saved.ai:''; onlyFocus=saved.onlyFocus===true;
@@ -12,10 +12,10 @@
   function modal(title,body){dialog.innerHTML=`<h2>${esc(title)}</h2>${body}<p><button id="board-close">Закрыть</button></p>`;dialog.querySelector('#board-close').onclick=()=>dialog.close();dialog.showModal();hints(dialog);}
   async function api(req){
     if(location.protocol==='file:')throw Error('Для изменения задач запустите py tools/pm.py serve. Пакеты можно просматривать и без сервера.');
-    const r=await fetch('/api/work',{method:'POST',headers:{'Content-Type':'application/json','X-TaskTreker':'1'},body:JSON.stringify(req)});
+    const r=await fetch('/api/work',{method:'POST',headers:ttOwnerHeaders(),body:JSON.stringify(req)});
     const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Операция не выполнена');return j.data;
   }
-  async function refresh(){if(location.protocol!=='file:'){const r=await fetch('/api/work');const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Нет связи');data=j.data;}render();}
+  async function refresh(){if(location.protocol!=='file:'){const r=await fetch('/api/work');const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Нет связи');data=j.data;activityOffline=false;}render();}
   async function change(req){try{await api(req);await refresh();message.textContent='Сохранено';}catch(e){message.textContent=e.message;}}
   const providers=()=>data.providers||{codex:{name:'GPT / Codex'}};
   const aiName=k=>providers()[k]?.name||k;
@@ -91,6 +91,27 @@
   function render(){
     saveFilters();
     root.innerHTML=headTemplate()+toolsTemplate()+policyTemplate();
+    if(data.sprint){
+      const s=data.sprint, box=document.createElement('details');
+      // Спринт у каждого проекта свой: строка на проект, чужие задачи приём не держат.
+      const by=s.projects||{}, keys=Object.keys(by).filter(k=>!project||k===project);
+      const rows=keys.map(k=>{const x=by[k], n=x.current?.refs?.length||0;
+        return `<p><b>${esc(k)}</b>: ${x.legacy?.length?'завершаем ранее начатые':n+' / '+s.limit+' задач'} · ждут main: ${esc((x.pending||[]).join(', ')||'—')}${x.hold?' · новые не берём':''}</p>`;}).join('');
+      const waiting=keys.reduce((a,k)=>a+((by[k].pending||[]).length),0);
+      box.innerHTML=`<summary>Спринты проектов: ${keys.length} · ждут main: ${waiting}</summary><p>${esc(s.rule)}</p>${rows||'<p>Нет незавершённого состава</p>'}`;
+      root.insertBefore(box,root.querySelector('#board-list'));
+    }
+    if(data.flow){
+      // FR-014 п.10: счётчик потока и почему новые задачи сейчас не берём.
+      const f=data.flow, c=f.counts||{}, box=document.createElement('details');
+      const why=f.mode==='rolling'?(f.reasons?.rolling||[]):(f.reasons?.batch?[f.reasons.batch]:Object.entries(f.batch_by_project||{}).filter(([k])=>!project||k===project).map(([,v])=>v));
+      const shadow=f.mode==='batch'?`Режим rolling (FR-014) считается рядом: новые задачи ${f.allowed?.rolling?'брал бы':'не брал бы'}${(f.reasons?.rolling||[]).length?' — '+f.reasons.rolling.join('; '):''}. Отличий в журнале: ${(f.divergences||[]).length}.`:'';
+      box.innerHTML=`<summary>Поток (${esc(f.mode)}): в работе ${c.in_work||0} · ждёт ревью ${c.review_waiting||0} · ждёт тест ${c.test_waiting||0} · ждёт выпуска ${c.release_waiting||0} · заблокировано ${c.blocked||0} · ${f.new_task_admission_allowed?'новые задачи берём':'новые задачи временно не берём'}</summary>`+
+        `${why.map(x=>`<p>${esc(x)}</p>`).join('')}${(f.finish_candidates||[]).length?`<p>Сначала довести: ${esc(f.finish_candidates.map(x=>x.ref+' ('+x.stage+')').join(', '))}</p>`:''}`+
+        `${(f.blocked||[]).map(b=>`<p>⛓ <b>${esc(b.ref)}</b> — ${esc(b.reason)} · <b>${esc(b.responsible)}</b>${b.recheck_at?' · перепроверка '+esc(b.recheck_at.slice(0,16)):''}${b.age_days!=null?' · '+esc(b.age_days)+' дн.':''}${b.overdue?' · срок прошёл':''}</p>`).join('')}`+
+        `${shadow?`<p><small>${esc(shadow)}</small></p>`:''}<p><small>Режим и лимиты (wip_global ${f.policy?.wip_global}, wip_per_project ${f.policy?.wip_per_project}) меняет владелец в настройках.</small></p>`;
+      root.insertBefore(box,root.querySelector('#board-list'));
+    }
     root.insertBefore(message,root.querySelector('#board-list'));
     renderList();
     root.querySelector('#board-search').oninput=e=>{query=e.target.value;saveFilters();renderList();};
@@ -183,7 +204,7 @@
     return `<div class="${cls}">${head}${route} · ${esc(run.id)}${wt}<span>${extra}<button data-prompt="${i}">Задание для ИИ</button><button data-unlaunch="${i}">Отменить запуск</button></span></div>`;
   }
   async function openSession(t,agent,run){
-    const r=await fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json','X-TaskTreker':'1'},body:JSON.stringify(Object.assign({ref:t.ref},agent?{agent}:{},run?{run}:{}))});
+    const r=await fetch('/api/launch',{method:'POST',headers:ttOwnerHeaders(),body:JSON.stringify(Object.assign({ref:t.ref},agent?{agent}:{},run?{run}:{}))});
     const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Сессию открыть не удалось');
     await refresh();const d=j.data;
     modal('Сессия открыта: '+t.id,`<p>Открыто окно <b>${esc(aiName(d.agent))}</b>: ${esc(d.route.model)} · ${esc(d.route.effort)}, запуск ${esc(d.run)}.</p><p>Папка: <code>${esc(d.cwd)}</code>${d.worktree?`<br>Отдельная рабочая копия, ветка <code>${esc(d.worktree.branch)}</code>`:''}</p><p>Первым шагом ИИ примет задачу. Тогда на карточке появится 🔒 с именем <code>${esc(d.worker)}</code>. Если окно спросит о доверии к папке или о разрешениях — ответьте в нём.</p><details><summary>Задание, переданное ИИ</summary><pre>${esc(d.prompt)}</pre></details>`);
@@ -295,7 +316,7 @@
   // Задание для ИИ: для очереди без открытой сессии — вставляется в чат вручную.
   function showPrompt(t,r){
     const ai=aiName(r.route?.provider||'');
-    modal('Задача запущена: '+t.id,`<p>Запуск <b>${esc(r.run)}</b> ждёт ${esc(ai)}${r.phase==='assess'?' — сначала оценка сложности':''}: ${esc(r.route?.model||'')} · ${esc(r.route?.effort||'')}.</p><p>Откройте новую сессию ${esc(ai)} в папке проекта: брифинг сам покажет этот запуск. Или вставьте задание в уже открытый чат:</p><textarea id="board-prompt" readonly rows="9">${esc(r.prompt)}</textarea><p><button id="board-copy">Скопировать задание</button> <span id="board-copied" role="status"></span></p><p class="board-muted">Когда ИИ примет запуск (claim), на карточке появится 🔒 с его именем и сроком аренды.</p>`);
+    modal('Задача запущена: '+t.id,`<p>Запуск <b>${esc(r.run)}</b> ждёт ${esc(ai)}${r.phase==='assess'?' — сначала оценка сложности':''}: ${esc(r.route?.model||'')} · ${esc(r.route?.effort||'')}.</p><p>Откройте новую сессию ${esc(ai)} в папке проекта: брифинг сам покажет этот запуск. Или вставьте задание в уже открытый чат:</p><textarea id="board-prompt" readonly rows="9" aria-label="Задание запуска">${esc(r.prompt)}</textarea><p><button id="board-copy">Скопировать задание</button> <span id="board-copied" role="status"></span></p><p class="board-muted">Когда ИИ примет запуск (claim), на карточке появится 🔒 с его именем и сроком аренды.</p>`);
     dialog.querySelector('#board-copy').onclick=async()=>{const area=dialog.querySelector('#board-prompt');try{await navigator.clipboard.writeText(area.value);}catch{area.select();document.execCommand('copy');}dialog.querySelector('#board-copied').textContent='Скопировано';};
   }
   // Ручной перенос: мышью между колонками или кнопками в паспорте.
@@ -397,12 +418,32 @@
     const a=t.assessment;
     return `<h3>Сложность задачи</h3><p>Балл <b>${c.score}</b> · класс модели ${c.tier} · уверенность ${c.confidence}${c.needs_assessment?' · <b>нужна оценка ИИ</b>':''}${c.floor?' · высокий риск поднял класс':''}</p>${c.conflicts.length?`<p>Противоречия: ${esc(c.conflicts.join('; '))}</p>`:''}${c.unknown.length?`<p>Не указано: ${esc(c.unknown.join(', '))}</p>`:''}${a?`<p>Оценка ИИ (${esc(a.by?.model||a.by?.agent||'')}): сложность ${a.complexity}, неопределённость ${a.uncertainty}, широта ${a.breadth} — ${esc(a.reasons)}</p>`:''}<details><summary>Вклад факторов</summary><table><thead><tr><th>Фактор</th><th>Значение</th><th>Вес</th><th>Вклад</th></tr></thead><tbody>${c.factors.map(f=>`<tr><td>${esc(f.label)}</td><td>${esc(f.note)}</td><td>${f.weight}</td><td>${f.contribution}</td></tr>`).join('')}</tbody></table></details>`;
   }
-  // Кто из ИИ что держит прямо сейчас: одна строка на запуск.
+  function modelGauges(a){
+    const groups={};
+    (a.workloads||[]).filter(g=>(!project||g.project===project)&&(!ai||g.agent===ai)).forEach(g=>{
+      const key=g.agent+'|'+g.model, sum=groups[key]??={agent:g.agent,model:g.model,busy:0,signals:0,queued:0,paused:0,tasks:0};
+      for(const field of ['busy','signals','queued','paused','tasks'])sum[field]+=g[field]||0;
+    });
+    const models=Object.values(groups).sort((a,b)=>b.busy-a.busy||b.signals-a.signals||b.queued-a.queued||a.model.localeCompare(b.model));
+    if(!models.length)return '';
+    return `<div class="model-loads" aria-label="Загрузка моделей по задачам">${models.map(g=>{
+      const cap=a.capacities?.[g.agent]??0, percent=cap>0?Math.round(g.busy/cap*100):null;
+      const label=percent===null?'—':percent+'%';
+      const limit=data.provider_limits?.[g.agent];
+      return `<article class="model-load"><div class="model-donut" role="img" aria-label="${esc(g.model)}: ${esc(label)}, занято ${g.busy} из ${cap} слотов ${esc(aiName(g.agent))}" style="--load:${Math.min(percent||0,100)}%;--load-color:${g.agent==='codex'?'#3986dd':'#a77bda'}"><span>${label}</span></div><div><b>${esc(g.model)}</b><p>${g.busy} / ${cap} слотов ${esc(aiName(g.agent))}</p><small>${g.signals} со свежими сигналами · ${g.queued} запусков в очереди · ${g.paused} на паузе<br>${g.tasks} назначенных задач${limit?'<br>Лимит ИИ до '+esc(time(limit.until)):''}</small></div></article>`;
+    }).join('')}</div><p class="activity-observed">Процент = живые процессы модели / настроенный лимит слотов её ИИ. Модели делят общую ёмкость провайдера; общий предел — ${a.max_sessions??'—'} сессии. Показана загрузка задачами в выбранном проекте.</p>`;
+  }
+  // Пассивное наблюдение за процессами и журналами, а не вывод из аренды задачи.
   function parallel(){
-    const running=data.tasks.filter(t=>t.claim&&(!project||t.project===project));
-    if(!running.length)return '<p class="board-parallel-empty">Параллельная работа: сейчас ни один ИИ не держит задач.</p>';
-    const by={};running.forEach(t=>(by[t.claim.agent||'?']??=[]).push(t));
-    return `<div class="board-parallel" aria-label="Параллельная работа ИИ">${Object.entries(by).map(([k,ts])=>`<div><h3>${esc(aiName(k))} · ${ts.length}</h3>${ts.map(t=>`<p class="${t.claim.stale?'board-claim-stale':leaseSoon(t.claim)?'board-claim-soon':''}"><b>${esc(t.ref)}</b> ${esc(t.title)}<br><small>${esc(t.claim.worker||'?')} · ${esc(t.claim.model||'')} · ${t.claim.stale?'аренда истекла':'до '+esc(time(t.claim.lease_until))}${(t.scope||[]).length?' · область: '+esc(t.scope.join(', ')):''}</small></p>`).join('')}</div>`).join('')}</div>`;
+    const a=data.activity;
+    if(!a)return '<section id="board-activity" class="board-activity"><h3>Активность агентов</h3><p>Текущие сигналы недоступны. Нужен обновлённый локальный сервер.</p></section>';
+    const rows=a.rows.filter(r=>(!project||r.project===project)&&(!ai||r.agent===ai));
+    const queued=ai?(a.workloads||[]).filter(g=>(!project||g.project===project)&&g.agent===ai).reduce((n,g)=>n+g.queued,0):project?(a.queued[project]||0):Object.values(a.queued).reduce((n,x)=>n+x,0);
+    const age=v=>{if(!v)return 'нет';const sec=Math.max(0,Math.floor((Date.now()-Date.parse(v))/1000));return sec<60?`${sec} с назад`:sec<3600?`${Math.floor(sec/60)} мин назад`:`${Math.floor(sec/3600)} ч назад`;};
+    const stale=activityOffline||Date.now()-Date.parse(a.observed_at)>45000;
+    const groups=[['recent','Свежие сигналы'],['quiet','Процессы без свежих сигналов'],['attention','Паузы и проблемы']];
+    const card=r=>`<article class="board-activity-card" data-activity-run="${esc(r.run)}" data-state="${esc(r.state)}"><b>${esc(aiName(r.agent))} · ${esc(roleTitle(r.role)||r.role||'Исполнитель')}</b><p><strong>${esc(r.ref)}</strong> ${esc(r.title)}</p><p class="activity-state">${esc(r.label)}</p><small>${esc(r.model||'Модель не указана')} · ${esc(r.run)}<br>Процесс: ${r.process_alive===true?'жив':r.process_alive===false?'завершён':'не подтверждён'}${r.pid?' · PID '+esc(r.pid):''}<br>Журнал: ${esc(age(r.log_at))} · heartbeat: ${esc(age(r.heartbeat_at))}${r.resume_at?'<br>Продолжение не ранее '+esc(time(r.resume_at)):''}${r.error?'<br>'+esc(r.error):''}</small></article>`;
+    return `<section id="board-activity" class="board-activity${stale?' activity-stale':''}" aria-label="Фактическая активность агентов"><h3>Активность агентов <span class="chip">${rows.filter(r=>r.state==='recent').length} со свежими сигналами</span></h3><p class="activity-observed" role="status">${stale?'⚠ Данные устарели; текущая активность не подтверждена. ':''}Замер: ${esc(new Date(a.observed_at).toLocaleTimeString('ru'))} · в очереди: ${queued}. Обновляется вместе с доской, без запросов к ИИ.</p>${modelGauges(a)}<div class="board-activity-grid">${groups.map(([key,title])=>{const list=rows.filter(r=>key==='attention'?!['recent','quiet'].includes(r.state):r.state===key);return `<div><h4>${title} · ${list.length}</h4>${list.map(card).join('')||'<p class="board-parallel-empty">Нет</p>'}</div>`;}).join('')}</div><small>Свежий сигнал — запись журнала или heartbeat за последние ${Math.round(a.fresh_seconds/60)} минуты. Живой процесс сам по себе не подтверждает продвижение задачи.</small></section>`;
   }
   // «▶ Запустить проект»: предпросмотр пакета (что, кому, почему), затем один запуск.
   async function startDialog(k){
@@ -415,7 +456,7 @@
         <p>Бэклог: открыто <b>${b.open}</b>, готово к запуску <b>${b.ready}</b> (${b.points} очк.), в работе ${b.in_work}, ждут зависимостей или заблокированы ${b.blocked}, без плана ${b.needs_plan}${b.pipeline?`, в конвейере ${b.pipeline}`:''}.</p>
         <p>${esc(r.reason)}</p>
         <p>ИИ: ${Object.entries(providers()).map(([a,p])=>`<label><input type="checkbox" data-start-ai="${esc(a)}"${agents.has(a)?' checked':''}> ${esc(p.name)}</label>`).join(' ')}
-          · Сессий: <select id="start-sessions"><option value="0">по бэклогу (${r.auto_sessions})</option>${[1,2,3,4,5,6].filter(v=>v<=Math.max(b.ready,1)).map(v=>`<option value="${v}"${sessions===v?' selected':''}>${v}</option>`).join('')}</select></p>
+          · Сессий: <select id="start-sessions" aria-label="Число сессий"><option value="0">по бэклогу (${r.auto_sessions})</option>${[1,2,3,4,5,6].filter(v=>v<=Math.max(b.ready,1)).map(v=>`<option value="${v}"${sessions===v?' selected':''}>${v}</option>`).join('')}</select></p>
         ${r.picks.length?`<table class="board-start-table"><thead><tr><th>Задача</th><th>Разм.</th><th>ИИ · модель</th><th>Почему сейчас</th></tr></thead><tbody>${r.picks.map(p=>`<tr><td>${esc(p.priority||'')} <b>${esc(p.ref.split('/')[1])}</b> ${esc(p.title)}${p.kind==='role'?`<div class="board-note">конвейер: ${esc(roleTitle(p.role))}</div>`:''}</td><td>${esc(p.size||'')}</td><td>${esc(aiName(p.agent))} · ${esc(p.model)} · ${esc(p.effort)}</td><td>${p.waiting?`ждут её: ${p.waiting}`:'по приоритету и размеру'}</td></tr>`).join('')}</tbody></table>`:''}
         ${r.later.length?`<details><summary>Готовы, но в следующий запуск (${r.later.length})</summary>${r.later.map(x=>`<div>${esc(x.ref.split('/')[1])} ${esc(x.title)}</div>`).join('')}</details>`:''}
         ${r.skipped.length?`<details><summary>Не запускаются сейчас (${r.skipped.length})</summary>${r.skipped.map(x=>`<div>${esc(x.ref.split('/')[1])} ${esc(x.title)} — <i>${esc(x.why)}</i></div>`).join('')}</details>`:''}
@@ -428,7 +469,7 @@
       if(go)go.onclick=async()=>{
         go.disabled=true;go.textContent='Открываю сессии…';
         try{
-          const res=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json','X-TaskTreker':'1'},body:JSON.stringify({project:k,agents:[...agents],sessions})});
+          const res=await fetch('/api/start',{method:'POST',headers:ttOwnerHeaders(),body:JSON.stringify({project:k,agents:[...agents],sessions})});
           const j=await res.json();if(!res.ok||!j.ok)throw Error(j.error||'Запуск не выполнен');
           if(j.data.failed.length){   // часть окон не открылась — причины здесь же, а не за окном
             const err=dialog.querySelector('#start-error');err.hidden=false;
@@ -481,10 +522,12 @@
     const gate=st?.gate&&roles.every(r=>((p.roles||{})[p.stage+'/'+r]||{}).state==='done')?`<div class="board-role-row">🚦 Ворота тимлида: ${esc((p.gates||{})[st.gate]?.decision||'ждут решения')}</div>`:'';
     const approve=p.stage==='deploy_main'&&(p.gates||{}).release?.decision==='approve'&&!(p.approvals||{}).release?`<button class="board-approve" data-approve="${i}">👤 Одобрить релиз в main</button>`:'';
     const note=t.status_note?`<div class="board-note${t.status==='blocked'?'':' board-note-soft'}">${t.status==='blocked'?'⛔ ':''}${esc(t.status_note)}</div>`:'';
-    const CIS={task:'ветка задачи',test:'тест',main:'main'}, CIC={passed:'✅',failed:'❌',running:'⏳',skipped:'➖'};
+    const CIS={task:'ветка задачи',test:'тест',main:'main'}, CIC={passed:'✅',failed:'❌',running:'⏳',skipped:'➖',not_configured:'⚠️',stale:'🕓',error:'⛔'};
     const cis=Object.entries(t.ci||{}).filter(([k])=>CIS[k]);
     const ciLine=cis.length?`<div class="board-role-row">CI: ${cis.map(([k,r])=>`<button class="board-ci" data-ci-log="${esc(r.id)}" title="${esc(r.note||((r.branch||'')+'@'+(r.sha||'')))}">${CIC[r.status]||'·'} ${esc(CIS[k])}</button>`).join(' ')}</div>`:'';
-    return `<div class="board-pipe">${blockLine}${chips}${gate}${ciLine}</div>${note}${approve}`;
+    const EVS={PASS:'✅ PASS',STALE:'🕓 STALE',FAILED:'❌ FAILED',NOT_RUN:'➖ NOT_RUN'}, ev=t.evidence_state;
+    const evLine=ev&&['deploy_test','testing','deploy_main','done'].includes(p.stage)?`<div class="board-role-row board-ev board-ev-${esc(ev.state.toLowerCase())}" title="${esc((ev.source||'server')+(ev.at?' · '+ev.at:''))}">Доказательства выпуска: ${EVS[ev.state]||esc(ev.state)} — ${esc(ev.detail||'')}${ev.at?` <small>${esc(String(ev.at).slice(0,16).replace('T',' '))}</small>`:''}</div>`:'';
+    return `<div class="board-pipe">${blockLine}${chips}${gate}${ciLine}${evLine}</div>${note}${approve}`;
   }
   const kindRu={artifact:'артефакт',evidence:'доказательство',machine:'сервер',gate:'ворота'};
   function stageInfo(id){
@@ -526,10 +569,12 @@
   // Перерисовка не идёт при открытом диалоге и пока пользователь печатает или выбирает в фильтрах:
   // иначе сбросится фокус и введённое.
   const POLL_MS=20000;
+  let polling=false;
   const typing=()=>{const el=document.activeElement;return !!el&&root.contains(el)&&/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);};
   async function poll(){
-    if(document.hidden||!root.offsetParent||location.protocol==='file:'||dialog.open||typing())return;
-    try{const r=await fetch('/api/work');const j=await r.json();if(r.ok&&j.ok){data=j.data;render();}}catch{/* связь пропала — оставляем последние данные */}
+    if(polling||document.hidden||!root.offsetParent||location.protocol==='file:')return;
+    polling=true;
+    try{const r=await fetch('/api/work');const j=await r.json();if(!r.ok||!j.ok)throw Error('Нет связи');activityOffline=false;if(dialog.open||typing()){data.activity=j.data.activity;root.querySelector('#board-activity')?.replaceWith(document.createRange().createContextualFragment(parallel()));}else{data=j.data;render();}}catch{activityOffline=true;root.querySelector('#board-activity')?.replaceWith(document.createRange().createContextualFragment(parallel()));}finally{polling=false;}
   }
   setInterval(poll,POLL_MS);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});

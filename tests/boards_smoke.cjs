@@ -72,7 +72,7 @@ const path=require('node:path');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 
 // Автообновление досок (TT-43): /api/work опрашивается, пока вкладка видна;
-// при открытом диалоге опроса нет и перерисовки нет; аренда за 5 минут подсвечивается.
+// при открытом диалоге обновляется только активность; форма не перерисовывается.
 // /api/work и страница подменены, поэтому сервер не нужен.
 async function checkPolling(browser){
  const base=process.env.TT_URL||'http://127.0.0.1:8792/';
@@ -107,7 +107,7 @@ async function checkPolling(browser){
   await page.evaluate(()=>{document.querySelector('dialog').dataset.mark='kept';});
   const beforeDialog=calls;
   await page.waitForTimeout(21000);
-  assert.equal(calls,beforeDialog,'no /api/work fetch while the dialog is open');
+  assert.ok(calls>beforeDialog,'activity still updates while the dialog is open');
   assert.equal(await page.locator('dialog').getAttribute('data-mark'),'kept','dialog must not be re-rendered');
   assert.equal(await page.locator('dialog').evaluate(d=>d.open),true,'dialog stays open');
 

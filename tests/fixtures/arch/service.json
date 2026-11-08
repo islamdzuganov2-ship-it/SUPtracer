@@ -1,0 +1,2 @@
+[{"Name":"postgresql-x64-16","State":"Stopped","ProcessId":0,"StartMode":"Manual"},
+ {"Name":"W3SVC","State":"Running","ProcessId":1100,"StartMode":"Auto"}]

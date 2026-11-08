@@ -49,6 +49,10 @@ def logs_dir():
 
 KINDS = ('install', 'lint', 'build', 'test', 'e2e', 'security')
 SCOPES = ('task', 'test', 'main')
+# Итог прогона (TT3-009). Разрешает слияние, ворота и релиз только passed — и только через green():
+# not_configured — шагов нет, stale — ветка ушла вперёд во время прогона, error — шаг не смог запуститься.
+# skipped — так до TT-102 назывался not_configured; старые записи ci.json читаются, но зелёными не считаются.
+STATUSES = ('running', 'passed', 'failed', 'not_configured', 'stale', 'error')
 STEP_TIMEOUT = 1200
 KEEP_RUNS = 400
 
@@ -127,6 +131,12 @@ def validate(ci):
     return None
 
 
+def _child_env():
+    """Шаги CI исполняют код из ветки задачи — недоверенный: без ключей владельца (SEC-009)."""
+    import sandbox_env
+    return sandbox_env.minimal(dict(PYTHONIOENCODING='utf-8'))
+
+
 def _subst(value, ctx):
     out = str(value)
     for k, v in ctx.items():
@@ -182,26 +192,29 @@ def last(ref=None, scope=None, branch=None, project=None):
 
 
 def run_pipeline(project_key, project, cwd, branch, scope, ref=None, trigger='', branches=None):
-    """Прогнать шаги CI для scope в рабочей копии cwd. Возвращает запись прогона (status passed|failed|skipped)."""
+    """Прогнать шаги CI для scope в рабочей копии cwd. Запись прогона: status из STATUSES, sha_full — что проверено."""
     cfg = config(project)
     repo = project.get('inspection_path') or project.get('path') or cwd
     b = dict(branches or {})
     ctx = dict(repo=Path(repo).as_posix(), cwd=Path(cwd).as_posix(), branch=branch,
                base=b.get('base', ''), test=b.get('test', ''), main=b.get('main', ''))
-    sha = _git(['rev-parse', '--short', 'HEAD'], cwd).stdout.strip()
+    sha_full = head_sha(cwd)
+    sha = sha_full[:7]
     rid = 'CI-%s-%s' % (datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S'), os.urandom(3).hex())
     logs_dir().mkdir(parents=True, exist_ok=True)
     log = logs_dir() / (rid + '.log')
     run = dict(id=rid, project=project_key, ref=ref, branch=branch, sha=sha, scope=scope, trigger=trigger,
-               source=cfg['source'], started=now(), status='running', steps=[], log=str(log))
+               sha_full=sha_full, source=cfg['source'], started=now(), status='running', steps=[], log=str(log))
     steps = [s for s in cfg['steps'] if scope in (s.get('on') or SCOPES)]
-    if not steps:
-        run.update(status='skipped', finished=now(),
-                   note='шагов CI для «%s» нет (источник: %s)' % (scope, cfg['source']))
+    if not any(not s.get('optional') for s in steps):
+        # Нечего проверять — не «пропущено», а «не настроено»: релиз по такому прогону невозможен (fail-closed).
+        run.update(status='not_configured', finished=now(),
+                   note='обязательных шагов CI для «%s» нет (источник: %s): задайте поле ci в projects.json или verify'
+                        % (scope, cfg['source']))
         record(run)
         return run
     record(run)
-    ok = True
+    final = 'passed'
     with open(log, 'w', encoding='utf-8') as out:
         for st in steps:
             cmd = [_subst(a, ctx) for a in st['cmd']]
@@ -209,32 +222,84 @@ def run_pipeline(project_key, project, cwd, branch, scope, ref=None, trigger='',
             out.write('\n===== %s · %s\n$ %s\n' % (st['name'], st.get('kind', 'test'), ' '.join(cmd))); out.flush()
             t0 = time.time()
             try:
-                r = subprocess.run(cmd, cwd=str(wd), stdout=out, stderr=subprocess.STDOUT, timeout=st.get('timeout', STEP_TIMEOUT),
-                                   stdin=subprocess.DEVNULL, env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+                # Недоверенный код тестов — в задании ОС: память, процессы, время, сеть (07: A2-07). network: true — шаг с сетью.
+                import job_runner
+                r = job_runner.run(cmd, cwd=str(wd), stdout=out, stderr=subprocess.STDOUT, text=False,
+                                   timeout=st.get('timeout', STEP_TIMEOUT), env=_child_env(), offline=not st.get('network'))
                 status = 'passed' if r.returncode == 0 else 'failed'
                 note = 'код %d' % r.returncode
             except subprocess.TimeoutExpired:
                 status, note = 'failed', 'превышено время %d с' % st.get('timeout', STEP_TIMEOUT)
             except OSError as e:
-                status, note = 'failed', 'не запустился: %s' % e
+                status, note = 'error', 'не запустился: %s' % e
             out.write('----- %s: %s (%s)\n' % (st['name'], status, note)); out.flush()
             run['steps'].append(dict(name=st['name'], kind=st.get('kind', 'test'), status=status, note=note,
                                      seconds=round(time.time() - t0, 1), optional=bool(st.get('optional'))))
-            if status == 'failed' and not st.get('optional'):
-                ok = False
+            if status != 'passed' and not st.get('optional'):
+                final = status
                 break               # дальше не идём: падение раньше — дешевле
-    run.update(status='passed' if ok else 'failed', finished=now(), tail=tail(log, 30))
+    if final == 'passed' and sha_full and head_sha(cwd) != sha_full:
+        # Пока шли проверки, в рабочей копии появился новый коммит: проверено не то, что будет слито.
+        final = 'stale'
+        run['note'] = 'во время прогона HEAD сменился с %s на %s — нужен новый прогон' % (sha, head_sha(cwd)[:7])
+    if final == 'passed' and scope in ('test', 'main'):
+        # Сканирование ИБ на том же коммите, сервером (SEC-012): находки решают ворота выпуска, не итог CI.
+        try:
+            import security_scan
+            sc = security_scan.scan(cwd, project_key, sha=sha_full, ref=ref, source='ci:' + scope)
+            run['security'] = dict(id=sc['id'], counts=sc['counts'], scanners={k: v['status'] for k, v in sc['scanners'].items()})
+        except Exception as e:  # noqa: BLE001 — сбой сканера не красит CI, но виден как not_run
+            run['security'] = dict(error=str(e)[:200])
+    run.update(status=final, finished=now(), tail=tail(log, 30))
     record(run)
     return run
+
+
+def head_sha(cwd, rev='HEAD'):
+    """Полный SHA ревизии или '' — сверка идёт по полному, короткий только для показа."""
+    try:
+        r = _git(['rev-parse', '--verify', '--quiet', rev + '^{commit}'], cwd)
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    return r.stdout.strip() if r.returncode == 0 else ''
+
+
+def green(run, head=None):
+    """(ok, причина): разрешает ли прогон слияние, ворота или релиз. Единственное место такого решения (TT3-009…013).
+
+    Зелёный только passed, у которого хотя бы один обязательный шаг реально прошёл, и — если передан head —
+    проверенный SHA совпадает с текущим. Нет прогона, not_configured, skipped старых записей, stale, error,
+    running — всё отказ: текстом агента машинную проверку не заменить."""
+    if not run:
+        return False, 'прогона CI нет'
+    st = run.get('status')
+    if st != 'passed':
+        why = {'not_configured': 'CI не настроен', 'skipped': 'CI не настроен (прогон без шагов)',
+               'stale': 'прогон на устаревшем коммите', 'error': 'шаг CI не запустился',
+               'running': 'прогон ещё идёт', 'failed': 'CI упал'}.get(st, 'неизвестный итог CI «%s»' % st)
+        return False, '%s: %s' % (why, summary(run))
+    if not any(s.get('status') == 'passed' and not s.get('optional') for s in run.get('steps') or []):
+        return False, 'в прогоне %s нет пройденных обязательных шагов' % run.get('id')
+    if head:
+        done = run.get('sha_full') or ''
+        # Старые записи хранят только короткий SHA — тогда сверяем префикс, но не пустоту.
+        same = done == head if done else bool(run.get('sha')) and head.startswith(run['sha'])
+        if not same:
+            return False, 'прогон %s проверял %s, а ветка уже на %s — нужен новый прогон' % (
+                run.get('id'), (done or run.get('sha') or '?')[:7], head[:7])
+    return True, summary(run)
 
 
 def summary(run):
     if not run:
         return 'прогона CI нет'
-    if run['status'] == 'skipped':
-        return run.get('note') or 'CI пропущен'
-    bad = [s for s in run['steps'] if s['status'] == 'failed' and not s.get('optional')]
-    head = '%s %s на %s@%s' % (run['id'], 'пройден' if run['status'] == 'passed' else 'УПАЛ', run.get('branch'), run.get('sha'))
+    if run['status'] in ('skipped', 'not_configured'):
+        return run.get('note') or 'CI не настроен'
+    bad = [s for s in run['steps'] if s['status'] != 'passed' and not s.get('optional')]
+    word = {'passed': 'пройден', 'stale': 'УСТАРЕЛ', 'error': 'НЕ ЗАПУСТИЛСЯ', 'running': 'идёт'}.get(run['status'], 'УПАЛ')
+    head = '%s %s на %s@%s' % (run['id'], word, run.get('branch'), run.get('sha'))
+    if run['status'] == 'stale':
+        return '%s: %s' % (head, run.get('note') or 'ветка ушла вперёд')
     if bad:
         return '%s: шаг «%s» — %s; журнал %s' % (head, bad[0]['name'], bad[0]['note'], run['log'])
     return '%s: %s' % (head, ', '.join('%s %.0fс' % (s['name'], s['seconds']) for s in run['steps']))
@@ -263,7 +328,7 @@ def deploy(project, env, cwd, branches=None):
         cmd = [_subst(a, ctx) for a in d[key]]
         try:
             r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding='utf-8', errors='replace',
-                               timeout=d.get('timeout', STEP_TIMEOUT), stdin=subprocess.DEVNULL)
+                               timeout=d.get('timeout', STEP_TIMEOUT), stdin=subprocess.DEVNULL, env=_child_env())
         except (OSError, subprocess.TimeoutExpired) as e:
             return False, '%s не выполнено: %s' % (title, e)
         if r.returncode != 0:
@@ -341,7 +406,7 @@ def main(argv=None):
     wt = D.branch_worktree(repo, branch, branches['main'])
     r = run_pipeline(key, p, wt, branch, 'main', trigger='вручную', branches=branches)
     print(summary(r))
-    return 0 if r['status'] in ('passed', 'skipped') else 1
+    return 0 if green(r)[0] else 1
 
 
 if __name__ == '__main__':

@@ -123,13 +123,17 @@ def save(rec):
     return p
 
 
+# Поля, которые всегда текст: «да» в заголовке — это слово, а не True.
+TEXT_KEYS = ("id", "kind", "project", "title", "status", "parent", "root", "source")
+
+
 def read(path):
     try:
         with open(path, encoding="utf-8") as f:
             raw = f.read()
     except OSError:
         return None
-    fm, body = md.parse_frontmatter(raw)
+    fm, body = md.parse_frontmatter(raw, raw_keys=TEXT_KEYS)
     rid = fm.get("id") or os.path.splitext(os.path.basename(path))[0]
     tags = fm.get("tags") or []
     if isinstance(tags, str):
@@ -143,7 +147,7 @@ def read(path):
         "id": rid,
         "kind": fm.get("kind", "заметка"),
         "project": fm.get("project", "портфель"),
-        "title": fm.get("title") or (md.sections(body)[0]["title"] if md.sections(body) else rid),
+        "title": str(fm.get("title") or (md.sections(body)[0]["title"] if md.sections(body) else rid)),
         "status": fm.get("status", "активна"),
         "created": str(fm.get("created", ""))[:10] or today(),
         "updated": str(fm.get("updated", ""))[:10] or today(),
@@ -194,7 +198,9 @@ def build_index(records=None):
         })
         if r.get("foreign_project"):          # ПРМ-08: заметка проекта, которого нет в портфеле
             items[-1]["foreign_project"] = r["foreign_project"]
-        for key in ("source_provider", "session", "role", "model", "cwd", "message_time"):
+        for key in ("source_provider", "session", "role", "model", "cwd", "message_time",
+                    # Карточки опыта (LEARN-06): статус проверки и границы применимости — для отбора без чтения тел.
+                    "learning", "scope", "source_task", "superseded_by", "verified_at", "not_when"):
             if r.get(key):
                 items[-1][key] = r[key]
         by_project[r["project"]] = by_project.get(r["project"], 0) + 1

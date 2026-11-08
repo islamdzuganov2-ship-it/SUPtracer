@@ -1,0 +1,676 @@
+{
+ "about": "Эталон маршрутов FR-001: размеченные задачи, по 12 на режим. Синтетика проверяет механизм, а не экономию: вывод об экономии — только по реальной истории (ТЗ §9.3).",
+ "cases": [
+  {
+   "id": "F01",
+   "task": {
+    "title": "Исправить опечатку в подписи кнопки",
+    "why": "В карточке проекта написано «Сохранть»",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "FAST"
+  },
+  {
+   "id": "F02",
+   "task": {
+    "title": "Выровнять отступ заголовка карточки",
+    "why": "Заголовок наезжает на иконку на узком экране",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/card.css"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "app/ui/card.css"
+   ],
+   "lines": 4
+  },
+  {
+   "id": "F03",
+   "task": {
+    "title": "Дописать раздел README о запуске тестов",
+    "why": "Новичок не находит команду запуска тестов",
+    "size": "S",
+    "risk": "low",
+    "work_type": "docs",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "README.md"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "README.md"
+   ],
+   "lines": 12
+  },
+  {
+   "id": "F04",
+   "task": {
+    "title": "Добавить юнит-тест на форматирование даты",
+    "why": "Формат даты не покрыт тестом",
+    "size": "S",
+    "risk": "low",
+    "work_type": "test",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tests/"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "tests/test_dates.py"
+   ],
+   "lines": 30
+  },
+  {
+   "id": "F05",
+   "task": {
+    "title": "Уточнить текст сообщения в журнале",
+    "why": "Сообщение «ошибка» не говорит, какой файл не найден",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/report.py"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "tools/report.py"
+   ],
+   "lines": 2
+  },
+  {
+   "id": "F06",
+   "task": {
+    "title": "Подсказка при наведении на счётчик задач",
+    "why": "Пользователь не понимает, что значит число",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "app/ui/counter.js"
+   ],
+   "lines": 15
+  },
+  {
+   "id": "F07",
+   "task": {
+    "title": "Исправить сдвиг на единицу в номере недели",
+    "why": "Неделя показывается на одну больше",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/calendar.py",
+     "tests/"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "tools/calendar.py",
+    "tests/test_calendar.py"
+   ],
+   "lines": 18
+  },
+  {
+   "id": "F08",
+   "task": {
+    "title": "Переименовать локальную переменную в отчёте",
+    "why": "Имя tmp2 мешает читать функцию",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/report.py"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "tools/report.py"
+   ],
+   "lines": 6
+  },
+  {
+   "id": "F09",
+   "task": {
+    "title": "Обновить ссылку в документации на новый раздел",
+    "why": "Ссылка ведёт на удалённую страницу",
+    "size": "S",
+    "risk": "low",
+    "work_type": "docs",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "docs/"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "docs/guide.md"
+   ],
+   "lines": 2
+  },
+  {
+   "id": "F10",
+   "task": {
+    "title": "Пустое состояние списка проектов",
+    "why": "При пустом портфеле экран белый, нужен текст «нет проектов»",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "FAST",
+   "files": [
+    "app/ui/list.js",
+    "app/ui/list.css"
+   ],
+   "lines": 25
+  },
+  {
+   "id": "F11",
+   "task": {
+    "title": "Цвет иконки статуса «готово»",
+    "why": "Иконка сливается с фоном в тёмной теме",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/theme.css"
+    ]
+   },
+   "expect": "FAST"
+  },
+  {
+   "id": "F12",
+   "task": {
+    "title": "Добавить пример в справку команды status",
+    "why": "В справке нет примера с проектом",
+    "size": "S",
+    "risk": "low",
+    "work_type": "docs",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "docs/commands.md"
+    ]
+   },
+   "expect": "FAST"
+  },
+  {
+   "id": "S01",
+   "task": {
+    "title": "Экспорт портфеля в CSV",
+    "why": "Владелец хочет выгружать портфель для отчёта",
+    "size": "M",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/export.py"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S02",
+   "task": {
+    "title": "Новая страница сводки по неделям",
+    "why": "Видеть динамику работ по неделям",
+    "size": "M",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S03",
+   "task": {
+    "title": "Переработать модуль построения дерева",
+    "why": "Дерево строится медленно на крупном портфеле",
+    "size": "L",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/tree.py"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S04",
+   "task": {
+    "title": "Исправить фильтр по тегам",
+    "why": "Фильтр теряет выбор после обновления",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S05",
+   "task": {
+    "title": "Подсветка просроченных задач",
+    "why": "Просроченные задачи не видны",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "STANDARD",
+   "files": [
+    "app/ui/a.js",
+    "app/ui/b.js",
+    "app/ui/c.js",
+    "app/ui/d.js",
+    "app/ui/e.js",
+    "app/ui/f.js",
+    "app/ui/g.js"
+   ],
+   "lines": 120
+  },
+  {
+   "id": "S06",
+   "task": {
+    "title": "Поправить расчёт процента готовности",
+    "why": "Процент выходит больше 100",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/readiness.py"
+    ]
+   },
+   "expect": "STANDARD",
+   "files": [
+    "tools/readiness.py",
+    "tools/estimate.py"
+   ],
+   "lines": 40
+  },
+  {
+   "id": "S07",
+   "task": {
+    "title": "Исследовать варианты полнотекстового поиска",
+    "why": "Поиск по памяти медленный",
+    "size": "M",
+    "risk": "low",
+    "work_type": "research",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "docs/"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S08",
+   "task": {
+    "title": "Описать архитектуру модуля отчётов",
+    "why": "Нужен HLD перед доработкой",
+    "size": "M",
+    "risk": "low",
+    "work_type": "architecture",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "docs/"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S09",
+   "task": {
+    "title": "Кэшировать сводку проекта",
+    "why": "Сводка пересчитывается при каждом открытии",
+    "size": "M",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/status.py"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S10",
+   "task": {
+    "title": "Сортировка бэклога по приоритету",
+    "why": "Нужна сортировка в списке задач",
+    "size": "S",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S11",
+   "task": {
+    "title": "Импорт заметок из второй папки",
+    "why": "Часть заметок лежит в отдельной папке",
+    "size": "M",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/ingest.py"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "S12",
+   "task": {
+    "title": "Подсчёт строк кода по языкам",
+    "why": "Хочется видеть разбивку объёма кода",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [],
+    "scope": [
+     "tools/repos.py"
+    ]
+   },
+   "expect": "STANDARD"
+  },
+  {
+   "id": "C01",
+   "task": {
+    "title": "Закрыть утечку пароля в журнале",
+    "why": "Пароль пользователя попадает в лог",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/log.py"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C02",
+   "task": {
+    "title": "Изменить проверку входа в систему",
+    "why": "Вход проходит без второго фактора",
+    "size": "M",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/login/"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C03",
+   "task": {
+    "title": "Оплата подписки картой",
+    "why": "Нужен приём оплаты",
+    "size": "L",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/billing/"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C04",
+   "task": {
+    "title": "Миграция таблицы задач на новый формат",
+    "why": "Старый формат не держит вложенные задачи",
+    "size": "M",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "db/"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C05",
+   "task": {
+    "title": "Новое поле в публичном API статуса",
+    "why": "Клиентам нужно поле readiness",
+    "size": "S",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "api/"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C06",
+   "task": {
+    "title": "Поправить шаг CI на тестовой ветке",
+    "why": "CI не запускает линтер",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     ".github/workflows/ci.yml"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C07",
+   "task": {
+    "title": "Обновить зависимости проекта",
+    "why": "Старые версии библиотек",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "requirements.txt"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C08",
+   "task": {
+    "title": "Ротация секретов доступа к хранилищу",
+    "why": "Ключи не меняли год",
+    "size": "S",
+    "risk": "high",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "ops/"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C09",
+   "task": {
+    "title": "Ускорить загрузку дашборда",
+    "why": "Дашборд открывается 4 секунды",
+    "size": "M",
+    "risk": "high",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "CRITICAL"
+  },
+  {
+   "id": "C10",
+   "task": {
+    "title": "Подсказка у кнопки",
+    "why": "Подпись кнопки неясна",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "app/ui/"
+    ]
+   },
+   "expect": "CRITICAL",
+   "files": [
+    "app/ui/button.js",
+    "app/auth/session.py"
+   ],
+   "lines": 20
+  },
+  {
+   "id": "C11",
+   "task": {
+    "title": "Поправить формат ответа статуса",
+    "why": "Поле даты в неверном формате",
+    "size": "S",
+    "risk": "low",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/status.py"
+    ]
+   },
+   "expect": "CRITICAL",
+   "files": [
+    "tools/status.py",
+    "api/openapi.yaml"
+   ],
+   "lines": 30
+  },
+  {
+   "id": "C12",
+   "task": {
+    "title": "Уточнить правила релиза в main",
+    "why": "Релиз уходит без одобрения владельца",
+    "size": "S",
+    "risk": "medium",
+    "work_type": "implementation",
+    "acceptance": [
+     "Тест проходит"
+    ],
+    "scope": [
+     "tools/release_policy.py"
+    ]
+   },
+   "expect": "CRITICAL"
+  }
+ ]
+}

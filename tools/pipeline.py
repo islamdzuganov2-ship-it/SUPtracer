@@ -30,9 +30,11 @@ MIN_NA_REASON = 10
 STAGES = [
     dict(id='idea', title='Идея', roles=['product_owner']),
     # after: роль стартует только после сдачи другой роли этапа — архитектор и дизайнер читают готовое ТЗ (А1).
-    dict(id='analysis', title='Анализ', roles=['system_analyst', 'solution_architect', 'designer', 'marketer'],
+    # QA в анализе — ранний тест-дизайн (07: A6-01, AG-QA-01/02, E2E-R13): ожидаемое поведение по каждому AC
+    # фиксируется независимо от разработчика и до первого патча; на «Тестировании» QA проверяет по нему.
+    dict(id='analysis', title='Анализ', roles=['system_analyst', 'solution_architect', 'designer', 'marketer', 'qa'],
          optional={'designer': 'design', 'marketer': 'marketing'}, gate='analysis',
-         after={'solution_architect': 'system_analyst', 'designer': 'system_analyst'}),
+         after={'solution_architect': 'system_analyst', 'designer': 'system_analyst', 'qa': 'system_analyst'}),
     dict(id='development', title='Разработка', roles=['developer']),
     dict(id='review', title='Ревью', roles=['reviewer']),
     dict(id='deploy_test', title='Деплой в тест', roles=['devops']),
@@ -74,7 +76,11 @@ ROLES = {
              item('po-results', 'Ожидаемые результаты измеримы: метрики с целевыми значениями', 'evidence'),
              item('po-effects', 'Оценены максимальные эффекты фичи и её ценность', 'evidence'),
              item('po-acceptance', 'Бизнес-критерии приёмки записаны в задачу (не меньше двух)', 'machine', check='acceptance'),
-             item('po-needs', 'Решено, нужны ли дизайн и маркетинг, с причиной', 'machine', check='needs')]),
+             item('po-needs', 'Решено, нужны ли дизайн и маркетинг, с причиной', 'machine', check='needs'),
+             item('po-metrics', 'Каждое число в «Метриках» — с происхождением: источник, замер, «гипотеза» или UNKNOWN',
+                  'machine', check='rule:labeled_numbers', art=0, section='Метрик'),
+             item('po-out', 'В границах явно сказано, что не входит в задачу', 'machine', check='rule:words_any', art=0,
+                  words=('не входит', 'вне рамок', 'out of scope'))]),
 
     'system_analyst': dict(
         title='Системный аналитик', stage='analysis', min_tier=2,
@@ -101,7 +107,13 @@ ROLES = {
              item('sa-ui', 'Требования к интерфейсу привязаны к макетам дизайнера', 'evidence', allow_na=True),
              item('sa-decomp', 'Задачи для разработки с понятными критериями приёмки (dev-tasks.md)', 'artifact', art=5),
              item('sa-trace', 'Коды требований согласованы: каждое требование SRS есть в RTM, ссылки на коды ведут к определённым',
-                  'machine', check='trace')]),
+                  'machine', check='trace'),
+             item('sa-rtm-ac', 'RTM в обе стороны: каждый критерий приёмки задачи (AC-n) прослежен до требований', 'machine', check='rule:covers_ac', art=4),
+             item('sa-exceptions', 'В SRS описаны исключительные и альтернативные потоки (ошибки)', 'machine', check='rule:heading_any', art=0,
+                  needles=['Исключени', 'Ошибк', 'Альтернативн']),
+             item('sa-nfr', 'НФТ измеримы: у каждого порог (время, доля, объём)', 'machine', check='rule:measurable', art=0, section='Нефункциональные'),
+             item('sa-api-version', 'Контракт API (если есть) версионирован и описывает совместимость', 'machine', check='rule:api_version', art=2),
+             item('sa-units', 'Задачи разработки — минимальные шаги DU-n, у каждого критерий AC; монолит XL не проходит', 'machine', check='rule:dev_units', art=5)]),
 
     'solution_architect': dict(
         title='Solution-архитектор', stage='analysis', min_tier=2,
@@ -124,7 +136,11 @@ ROLES = {
              item('arch-stack', 'Стек проверен на соответствие проекту и его ограничениям', 'evidence'),
              item('arch-poc', 'Отчёт PoC, если проверялась новая технология', 'artifact', art=3, allow_na=True),
              item('arch-handoff', 'Эпики и задачи переданы аналитику и разработке', 'evidence'),
-             item('arch-trace', 'HLD и ADR ссылаются только на существующие требования и ADR', 'machine', check='trace')]),
+             item('arch-trace', 'HLD и ADR ссылаются только на существующие требования и ADR', 'machine', check='trace'),
+             item('arch-refs', 'Пути файлов в HLD существуют в ветке или помечены как новые', 'machine', check='rule:refs_exist', art=0),
+             item('arch-options', 'В каждом ADR не меньше двух рассмотренных вариантов', 'machine', check='rule:adr_options', art=1),
+             item('arch-compat', 'HLD описывает совместимость и откат', 'machine', check='rule:heading_all', art=0, needles=['Совместим', 'Откат']),
+             item('arch-threat-measures', 'Модель угроз — таблица угроз с мерой по каждой', 'machine', check='rule:threat_table', art=2)]),
 
     'designer': dict(
         title='UX/UI-дизайнер', stage='analysis', min_tier=2,
@@ -145,7 +161,14 @@ ROLES = {
              item('ds-adaptive', 'Адаптивные версии: мобильная и десктопная', 'evidence'),
              item('ds-kit', 'Новые компоненты описаны как UI-кит (с тёмной темой, если есть)', 'evidence', allow_na=True),
              item('ds-handoff', 'Спецификация передачи: валидации, анимации, поведение', 'artifact', art=2),
-             item('ds-prototype', 'Кликабельный прототип', 'artifact', art=3, allow_na=True)]),
+             item('ds-prototype', 'Кликабельный прототип', 'artifact', art=3, allow_na=True),
+             item('ds-states', 'Состояния экранов: ошибка, пустой экран, загрузка', 'machine', check='rule:words_in_section', art=1, section='Состояни',
+                  words=('ошибк', 'пуст', 'загрузк')),
+             item('ds-a11y', 'Доступность: клавиатура, контраст, подписи элементов', 'machine', check='rule:heading_any', art=1,
+                  needles=['Доступност', 'Accessibility', 'a11y']),
+             item('ds-fields', 'Поля интерфейса из спецификации передачи есть в контракте API', 'machine', check='rule:fields_in_api', art=2),
+             item('ds-legacy', 'Переделка интерфейса: каждое поле старого интерфейса перенесено или убрано с причиной',
+                  'machine', check='rule:legacy_fields', art=1)]),
 
     'marketer': dict(
         title='Продуктовый маркетолог', stage='analysis', min_tier=2,
@@ -163,7 +186,9 @@ ROLES = {
              item('mk-media', 'Медиаплан таблицей: каналы, бюджет, прогноз, целевой CAC/CPA', 'machine', check='table', art=1),
              item('mk-briefs', 'Брифы на креативы и лендинги', 'artifact', art=2),
              item('mk-analytics', 'Аналитика: события, UTM, метрики ROMI/CAC/LTV', 'artifact', art=3),
-             item('mk-launch', 'Запуск кампании и отчёт план/факт — после релиза, вне конвейера', 'evidence', allow_na=True)]),
+             item('mk-launch', 'Запуск кампании и отчёт план/факт — после релиза, вне конвейера', 'evidence', allow_na=True),
+             item('mk-sources', 'Числа GTM — с источником и датой или с пометкой «гипотеза»', 'machine', check='rule:labeled_numbers', art=0, date=True),
+             item('mk-media-sources', 'Прогноз медиаплана — с источником и датой или «гипотеза»', 'machine', check='rule:labeled_numbers', art=1, date=True)]),
 
     'developer': dict(
         title='Разработчик', stage='development', min_tier=1,
@@ -176,9 +201,15 @@ ROLES = {
         dod=[item('dev-code', 'Код в ветке задачи, всё закоммичено', 'machine', check='committed'),
              item('dev-verify', 'CI проекта на ветке задачи зелёный', 'machine', check='verify', heavy=True),
              item('dev-tests', 'Написаны или обновлены тесты', 'machine', check='tests_changed', allow_na=True),
+             item('dev-mutation', 'Задача CRITICAL: тесты ловят внесённые в изменённый код ошибки (мутационная проверка)',
+                  'machine', check='mutation', heavy=True),
              item('dev-migrations', 'Миграции БД написаны и проверены', 'evidence', allow_na=True),
              item('dev-docs', 'Документация обновлена (README, API)', 'evidence', allow_na=True),
              item('dev-mergeable', 'Ветка сливается с базовой без конфликтов', 'machine', check='mergeable'),
+             item('dev-contract', 'Код написан по актуальному контракту группы (contract_group): контракт не менялся другой задачей после анализа',
+                  'machine', check='contract_current'),
+             item('dev-oracle', 'Эталон приёмки (приёмочные тесты, правила ИБ, CI) не изменён или изменение одобрил владелец',
+                  'machine', check='oracle_intact'),
              item('dev-mr', 'Описание изменений MR.md: что изменено, как проверить, какие требования', 'artifact', art=0)]),
 
     'reviewer': dict(
@@ -192,6 +223,8 @@ ROLES = {
         artifacts=[doc(ART + '/review.md', ['Замечани', 'Решени', 'Вердикт'], 400)],
         dod=[item('rv-report', 'review.md: замечания, решения по ним, вердикт', 'artifact', art=0),
              item('rv-verdict', 'Вердикт approve (иначе задача возвращается разработчику)', 'machine', check='verdict'),
+             item('rv-ac', 'Матрица по каждому критерию приёмки и изменённому файлу: файлы, тесты, ok|gap|defect', 'machine', check='ac_matrix'),
+             item('rv-sha', 'Ревью на текущей голове ветки (reviewed_sha)', 'machine', check='reviewed_sha'),
              item('rv-tests', 'Тесты проверяют реальную логику', 'evidence'),
              item('rv-security', 'Проверены инъекции, XSS, секреты и работа с персональными данными', 'evidence'),
              item('rv-debt', 'Техдолг заведён задачами', 'evidence', allow_na=True),
@@ -199,7 +232,7 @@ ROLES = {
              item('rv-merge', 'Ветка задачи слита в базовую ветку проекта', 'machine', check='merge_to_base', heavy=True)]),
 
     'qa': dict(
-        title='QA-инженер', stage='testing', min_tier=2,
+        title='QA-инженер', stage=('analysis', 'testing'), min_tier=2,
         mission='Проверить развёрнутую тестовую ветку: реализация соответствует требованиям, ничего не сломано; '
                 'дать решение о допуске в main только при отсутствии ошибок.',
         scope=['Ревью требований на тестируемость; тест-дизайн: классы эквивалентности, границы, переходы состояний.',
@@ -209,13 +242,23 @@ ROLES = {
                'Отчёт о тестировании и решение о допуске (QA Sign-off); RTM с тест-кейсами.'],
         artifacts=[doc(ART + '/test-cases.md', ['TC-'], 500),
                    doc(ART + '/test-report.md', ['Результат', 'Дефект', 'Регресс', 'Решение'], 500),
-                   doc(ART + '/RTM.md', [], 200)],
-        dod=[item('qa-cases', 'Тест-кейсы с шагами и ожидаемым результатом (TC-…)', 'artifact', art=0),
+                   doc(ART + '/RTM.md', [], 200),
+                   doc(ART + '/test-design.md', ['Позитив', 'Негатив', 'Границ', 'Ожидаем'], 500)],
+        dod={'analysis': [
+             item('qa-design', 'Тест-дизайн до разработки: по каждому критерию приёмки позитивные, негативные и граничные '
+                  'случаи с ожидаемым результатом (test-design.md) — без опоры на способ реализации', 'artifact', art=3),
+             item('qa-design-ac', 'Каждый критерий приёмки задачи покрыт случаем тест-дизайна', 'machine', check='design_covers_ac', art=3),
+             item('qa-design-matrix', 'Каждый AC — в позитивных, негативных и граничных случаях; ожидаемый результат указан',
+                  'machine', check='rule:design_matrix', art=3)],
+             'testing': [
+             item('qa-cases', 'Тест-кейсы с шагами и ожидаемым результатом (TC-…)', 'artifact', art=0),
              item('qa-report', 'Отчёт: статусы Pass/Fail, дефекты, регресс, решение', 'artifact', art=1),
              item('qa-blockers', 'Нет открытых дефектов Blocker, Critical, Major — ни в отчёте, ни в реестре', 'machine', check='no_blockers', art=1),
              item('qa-ci', 'CI на развёрнутой тестовой ветке зелёный (последний прогон — на текущем коммите)', 'machine', check='ci_test_green'),
              item('qa-rtm', 'RTM дополнена тест-кейсами (TC-…)', 'machine', check='contains', art=2, needle='TC-'),
-             item('qa-signoff', 'Решение о допуске в релиз (QA Sign-off)', 'machine', check='signoff')]),
+             item('qa-retest', 'Исправленные дефекты перепроверены: тест дефекта есть в тестовой ветке (или повтор описан в отчёте) '
+                  'и CI доверенного раннера зелёный на текущем коммите теста', 'machine', check='defects_retested', art=1),
+             item('qa-signoff', 'Решение о допуске в релиз (QA Sign-off)', 'machine', check='signoff')]}),
 
     'devops': dict(
         title='DevOps-инженер', stage=('deploy_test', 'deploy_main'), min_tier=1,
@@ -229,6 +272,8 @@ ROLES = {
                    doc(ART + '/release-notes.md', ['Что вошло', 'Откат'], 300)],
         dod={'deploy_test': [
                  item('do-runbook', 'Runbook: развёртывание, откат, проверка, окружение', 'artifact', art=0),
+                 item('do-runbook-cmd', 'В runbook команды развёртывания и отката и версия выпуска — оператор восстановит без догадок',
+                      'machine', check='rule:runbook', art=0),
                  item('do-spec-delta', 'Дельта ТЗ задачи (docs/tasks/<id>/spec-delta.md, если есть) влита в основное ТЗ проекта '
                       'одним коммитом; отчёт задачи переведён на spec_impact: updated', 'evidence', allow_na=True),
                  item('do-secrets', 'Секретов в изменениях нет', 'machine', check='no_secrets'),
@@ -276,13 +321,18 @@ DOR = {
                  item('dor-workspace', 'Рабочая копия задачи доступна для артефактов', 'machine', check='worktree')],
     'development': [item('dor-analysis', 'Анализ сдан всеми нужными ролями по DoD', 'machine', check='stage:analysis'),
                     item('dor-gate-analysis', 'Ворота тимлида «анализ → разработка» пройдены', 'machine', check='gate:analysis'),
-                    item('dor-tasks', 'Задачи разработки с критериями приёмки есть (dev-tasks.md)', 'machine', check='artifact', art='dev-tasks.md')],
+                    item('dor-tasks', 'Задачи разработки с критериями приёмки есть (dev-tasks.md)', 'machine', check='artifact', art='dev-tasks.md'),
+                    item('dor-test-design', 'Тест-дизайн QA готов до разработки (test-design.md)', 'machine', check='artifact', art='test-design.md'),
+                    item('dor-conflicts', 'Нет открытых вопросов и противоречий в требованиях (CF-n)', 'machine', check='no_conflicts'),
+                    item('dor-brd', 'BRD не менялся после анализа (иначе анализ по нему устарел)', 'machine', check='brd_current')],
     'review': [item('dor-dev', 'Разработка сдана по DoD: код, тесты, MR', 'machine', check='stage:development'),
                item('dor-mr', 'Описание изменений MR.md в ветке', 'machine', check='artifact', art='MR.md')],
     'deploy_test': [item('dor-review', 'Ревью сдано: approve, CI ветки зелёный, ветка слита в базовую', 'machine', check='stage:review')],
     'testing': [item('dor-deployed', 'Работа развёрнута в тестовой ветке, CI там зелёный', 'machine', check='stage:deploy_test')],
     'deploy_main': [item('dor-qa', 'Тестирование сдано: QA Sign-off, открытых дефектов нет', 'machine', check='stage:testing'),
                     item('dor-gate-release', 'Ворота тимлида «тест → main» пройдены', 'machine', check='gate:release'),
+                    item('dor-evidence', 'Доказательства выпуска: CI зелёный на коммите теста, эталон цел, блокирующих находок ИБ нет',
+                         'machine', check='release_evidence'),
                     item('dor-owner', 'Владелец одобрил релиз в main', 'machine', check='owner_release')],
 }
 
@@ -341,6 +391,15 @@ def art_path(task_id, path):
     return path.format(id=task_id)
 
 
+def stage_artifacts(role, stage):
+    """Артефакты роли на этом этапе: у роли с несколькими этапами — только те, на которые ссылается DoD этапа."""
+    arts = ROLES[role]['artifacts']
+    if not isinstance(ROLES[role]['dod'], dict):
+        return arts
+    used = {i.get('art') for i in role_dod(role, stage) if isinstance(i.get('art'), int)}
+    return [a for n, a in enumerate(arts) if n in used]
+
+
 # ---------------------------------------------------------------- проверки артефактов в ветке
 
 def _git(args, cwd, timeout=60):
@@ -394,16 +453,46 @@ def sections(text):
 
 
 def tokens(text):
-    """Оценка токенов текста: латиница ~4 символа на токен, кириллица и прочее ~2.5 (Л2)."""
+    """Оценка токенов текста: ASCII ~2.55 символа на токен, кириллица и прочее ~2.2.
+    Калибровка TT-93 по точному счёту Claude (разница входа с документом в системном промпте и без):
+    BRD, SRS, КОНВЕЙЕР.md и Python-модуль — ошибка в пределах ±9% (прежние 4 и 2.5 занижали на 10–34%)."""
     if not text:
         return 0
     latin = len(text.encode('ascii', 'ignore'))
-    return int(latin / 4 + (len(text) - latin) / 2.5) + 1
+    return int(latin / 2.55 + (len(text) - latin) / 2.2) + 1
+
+
+# Полное чтение документа (TT-96) — не запрет, а потребность, обоснованная ролью и сложностью задачи.
+# Вход этапа роль читает целиком по смыслу своей работы: аналитик переводит весь BRD, архитектор проектирует
+# по всему SRS, QA покрывает его тестами. Разработчик, ревьюер, DevOps и тимлид берут разделы по кодам из INDEX.md.
+PRIMARY_INPUTS = {
+    'system_analyst': [('product_owner', 0)],
+    'solution_architect': [('system_analyst', 0)],
+    'designer': [('product_owner', 0)],
+    'marketer': [('product_owner', 0)],
+    'qa': [('system_analyst', 0)],
+}
+# По классу сложности задачи: free — документ не больше этого читается целиком без вопросов (раздел ненамного
+# меньше); budget — сколько токенов запуск может прочитать целиком сверх этого с обоснованием (op=doc full=true why=…).
+FULL_READ = {1: dict(free=3000, budget=20_000), 2: dict(free=5000, budget=50_000), 3: dict(free=8000, budget=120_000)}
+
+
+def read_policy(t, role, tier):
+    """Политика полного чтения запуска роли: порог, бюджет обоснованных чтений и вход этапа (пути)."""
+    p = dict(FULL_READ.get(tier) or FULL_READ[2], tier=tier)
+    p['primary'] = [art_path(t['id'], ROLES[r]['artifacts'][i]['path']) for r, i in PRIMARY_INPUTS.get(role, [])] if t.get('id') else []
+    return p
 
 
 def _code_key(c):
     p, num = c.split('-', 1)
-    return p, [int(x) for x in num.split('.')]
+    return p, [(0, int(x), '') if x.isdigit() else (1, 0, x) for x in re.split(r'[.-]', num)]
+
+
+def _next_code(a, b):
+    """b следует за a: та же группа, номер на единицу больше (ACC-01 → ACC-02, 3 → 4)."""
+    ga, _, na = a.rpartition('-'); gb, _, nb = b.rpartition('-')
+    return ga == gb and na.isdigit() and nb.isdigit() and int(nb) == int(na) + 1
 
 
 def code_span(cs):
@@ -415,10 +504,10 @@ def code_span(cs):
     for p, nums in by.items():
         run = []
         for x in nums + [None]:
-            if x is not None and x.isdigit() and run and run[-1].isdigit() and int(x) == int(run[-1]) + 1:
+            if x is not None and run and _next_code(run[-1], x):
                 run.append(x); continue
             if run:
-                out.append('%s-%s' % (p, run[0] if len(run) == 1 else '%s–%s' % (run[0], run[-1])))
+                out.append('%s-%s' % (p, run[0] if len(run) == 1 else '%s–%s' % (run[0], run[-1].rpartition('-')[2])))
             run = [x] if x is not None else []
     return ', '.join(out)
 
@@ -438,8 +527,10 @@ def doc_index(text):
     return out
 
 
-def index_lines(idx, limit=40):
-    """Указатель строками — компактно для паспорта и отказа на чтение целиком."""
+def index_lines(idx, limit=40, max_level=4):
+    """Указатель строками — компактно для паспорта и отказа на чтение целиком. max_level — глубина заголовков:
+    в паспорте без INDEX.md — только верхние уровни, полный указатель — op=doc без section."""
+    idx = [e for e in idx if e['level'] <= max_level]
     rows = ['%s%d %s · ~%dт · стр. %d–%d%s' % ('  ' * (e['level'] - 1), e['n'], e['title'][:80], e['tokens'], e['lines'][0],
                                              e['lines'][1], ' · ' + code_span(e['codes']) if e['codes'] else '') for e in idx[:limit]]
     if len(idx) > limit:
@@ -571,7 +662,9 @@ def check_item(it, role, ctx, state):
 
 # Коды требований и решений: где каждый вид определяется (Б6). FR/NFR/SR/UC/US — в SRS, BR — в BRD,
 # API — в api.md (или SRS), ADR — в файлах adr/, TC — в тест-кейсах QA.
-CODE = re.compile(r'\b(FR|NFR|SR|BR|UC|US|API|ADR|TC)-(\d+(?:\.\d+)?)\b')
+# Коды требований: простые (FR-3, FR-2.1) и составные с группой (FR-POL-04, NFR-PERF-01) — в EGE составных
+# больше, чем простых, и без них сверка и реестр видели меньше трети требований.
+CODE = re.compile(r'\b(FR|NFR|SR|BR|UC|US|API|ADR|TC)-((?:[A-Z][A-Z0-9]{1,7}-)*\d+(?:\.\d+)?)\b')
 DEFINED_IN = {'FR': ('system_analyst', 0), 'NFR': ('system_analyst', 0), 'SR': ('system_analyst', 0),
               'UC': ('system_analyst', 0), 'US': ('system_analyst', 0), 'BR': ('product_owner', 0),
               'API': ('system_analyst', 2), 'ADR': ('solution_architect', 1), 'TC': ('qa', 0)}
@@ -581,8 +674,9 @@ def codes(text):
     return {'%s-%s' % m for m in CODE.findall(text or '')}
 
 
-def trace(ctx):
-    """Сверка кодов в артефактах анализа: что определено, на что ссылаются, что не попало в RTM."""
+def analysis_docs(ctx):
+    """Тексты артефактов анализа в ветке задачи: {(роль, номер артефакта): текст}; каталог (adr/) — его файлы
+    подряд. Нет api.md — контракты в SRS."""
     docs = {}
     for role in ('product_owner', 'system_analyst', 'solution_architect', 'designer'):
         for i, a in enumerate(ROLES[role]['artifacts']):
@@ -590,7 +684,91 @@ def trace(ctx):
             if text is not None:
                 docs[(role, i)] = text
     if ('system_analyst', 2) not in docs and ('system_analyst', 0) in docs:
-        docs[('system_analyst', 2)] = docs[('system_analyst', 0)]      # нет api.md — контракты в SRS
+        docs[('system_analyst', 2)] = docs[('system_analyst', 0)]
+    return docs
+
+
+def source_path(task_id, code, docs=None):
+    """Документ, где определяется код (FR — SRS, ADR — HLD…); API без api.md — в SRS."""
+    role, i = DEFINED_IN[code.split('-')[0]]
+    if docs is not None and code.startswith('API-') and (role, i) in docs and docs[(role, i)] is docs.get(('system_analyst', 0)):
+        i = 0
+    return art_path(task_id, ROLES[role]['artifacts'][i]['path'])
+
+
+def _plain(line):
+    """Строка Markdown без разметки: ячейки таблицы через « · », без решёток, звёздочек и обратных кавычек."""
+    l = line.strip()
+    if l.startswith('|'):
+        l = ' · '.join(c.strip() for c in l.strip('|').split('|') if c.strip() and not set(c.strip()) <= set('-: '))
+    return re.sub(r'[#*`>]+', '', l).strip(' -·:\t')
+
+
+def definition(text, code):
+    """Где и как код определён в своём документе: первая строка с кодом, её суть, номер раздела указателя."""
+    lines = text.splitlines(); idx = doc_index(text)
+    for i, line in enumerate(lines):
+        if code not in codes(line):
+            continue
+        gist = _plain(line)
+        if len(gist) < len(code) + 8:            # заголовок «FR-3» без текста — суть в следующей строке
+            nxt = next((x for x in lines[i + 1:i + 4] if x.strip()), '')
+            gist = (gist + ' — ' + _plain(nxt)).strip(' —')
+        sec = next((e for e in reversed(idx) if e['lines'][0] <= i + 1), None)
+        return dict(line=i + 1, section=sec['n'] if sec else None, gist=gist[:160])
+    return None
+
+
+def registry(ctx, docs=None):
+    """Реестр требований задачи (TT-92): код, суть, документ, раздел и строка определения — по артефактам ветки."""
+    docs = analysis_docs(ctx) if docs is None else docs
+    out = []
+    for code in sorted(set().union(*[codes(t) for t in docs.values()] or [set()]), key=_code_key):
+        src = DEFINED_IN[code.split('-')[0]]
+        if src not in docs:
+            continue
+        d = definition(docs[src], code)
+        if d:
+            out.append(dict(code=code, path=source_path(ctx.t['id'], code, docs),
+                            dir=bool(ROLES[src[0]]['artifacts'][src[1]].get('dir')), **d))
+    return out
+
+
+def index_path(task_id):
+    return art_path(task_id, ART) + '/INDEX.md'
+
+
+def task_index(ctx):
+    """Указатель задачи для любого агента — Claude, Codex, человека (TT-92): документы анализа с разделами,
+    весом и строками и реестр требований с сутью и местом определения. Сервер коммитит его в ветку задачи."""
+    docs = analysis_docs(ctx); tid = ctx.t['id']
+    lines = ['# Указатель задачи %s' % tid, '',
+             'Собирает сервер TaskTreker при сдаче этапа — не править. Читай отсюда и бери только нужный раздел: '
+             'Read с offset/limit по строкам или `tt_work op=doc path=… section=<номер>` / `code=<FR-3>`.', '',
+             '## Документы', '']
+    seen = set()
+    for (role, i), text in sorted(docs.items()):
+        path = art_path(tid, ROLES[role]['artifacts'][i]['path'])
+        if path in seen:
+            continue
+        seen.add(path)
+        if ROLES[role]['artifacts'][i].get('dir'):       # строки склеенных файлов каталога ни на что не указывают
+            lines += ['### %s/ · ~%d токенов · каталог: файлы короткие, читай нужный по имени' % (path, tokens(text)), '']
+            continue
+        lines += ['### %s · ~%d токенов' % (path, tokens(text)), ''] + index_lines(doc_index(text), 60) + ['']
+    reg = registry(ctx, docs)
+    if reg:
+        lines += ['## Реестр требований', '', '| Код | Суть | Где |', '|---|---|---|']
+        lines += ['| %s | %s | %s |' % (r['code'], r['gist'].replace('|', '/'),
+                                        r['path'].split('/')[-1] + '/' if r['dir'] else
+                                        '%s §%s, стр. %d' % (r['path'].split('/')[-1], r['section'] or '—', r['line']))
+                  for r in reg]
+    return '\n'.join(lines) + '\n'
+
+
+def trace(ctx):
+    """Сверка кодов в артефактах анализа: что определено, на что ссылаются, что не попало в RTM."""
+    docs = analysis_docs(ctx)
     defined = {}
     for code in set().union(*[codes(t) for t in docs.values()] or [set()]):
         src = DEFINED_IN[code.split('-')[0]]
@@ -629,6 +807,12 @@ def machine(it, role, ctx, state, evidence=''):
             return False, 'коды не сходятся: ' + '; '.join(bad)
         return True, 'требований %d, все в RTM; висящих ссылок нет (%s)' % (
             tr['requirements'], ', '.join('%s %d' % kv for kv in sorted(tr['defined'].items())))
+    if check.startswith('rule:'):
+        import artifact_rules as ar
+        name = check.split(':', 1)[1]; spec = _role_art(role, it['art']); text = ctx.artifact(spec)
+        if text is None and name not in ar.OPTIONAL:
+            return False, 'нет файла %s в ветке задачи' % spec['path']
+        return ar.check(name, text, ctx, it)
     if check in ('links', 'mermaid', 'table', 'contains', 'no_blockers'):
         spec = _role_art(role, it['art']); text = ctx.artifact(spec)
         if text is None:
@@ -650,6 +834,18 @@ def machine(it, role, ctx, state, evidence=''):
         if reg:
             bad.append('в реестре открыты: ' + ', '.join(reg))
         return not bad, ('открытые дефекты: ' + '; '.join(bad[:3])) if bad else 'открытых Blocker/Critical/Major нет'
+    if check == 'contract_current':
+        why = contract_problem(ctx.t.get('pipeline'))
+        return (False, why) if why else (True, 'контракт группы актуален' if (ctx.t.get('pipeline') or {}).get('contract_group') else 'задача вне группы контрактов')
+    if check == 'design_covers_ac':
+        text = ctx.artifact(ROLES['qa']['artifacts'][it['art']]) or ''
+        acc = [a for a in t.get('acceptance') or [] if isinstance(a, str) and a.strip()]
+        low = text.lower()
+        miss = [i + 1 for i, a in enumerate(acc) if 'ac-%d' % (i + 1) not in low and a.strip().lower()[:40] not in low]
+        if not acc:
+            return False, 'у задачи нет критериев приёмки — тест-дизайну нечего покрывать'
+        return not miss, ('все %d критериев приёмки покрыты (AC-n или текст критерия)' % len(acc)) if not miss else \
+            'не покрыты критерии приёмки: %s — сошлитесь на AC-n в test-design.md' % ', '.join('AC-%d' % i for i in miss)
     if check == 'acceptance':
         acc = ctx.handoff.get('acceptance') or t.get('acceptance') or []
         ok = isinstance(acc, list) and len([a for a in acc if isinstance(a, str) and len(a.strip()) >= 10]) >= 2
@@ -664,10 +860,23 @@ def machine(it, role, ctx, state, evidence=''):
     if check == 'verdict':
         v = ctx.handoff.get('verdict')
         return v == 'approve', 'вердикт: %s' % (v or 'не указан')
+    if check == 'ac_matrix':
+        return ac_matrix_check(ctx)
+    if check == 'reviewed_sha':
+        sha = str(ctx.handoff.get('reviewed_sha') or '').strip().lower()
+        head = _git(['rev-parse', ctx.branch], ctx.repo).stdout.strip() if ctx.repo and ctx.branch else ''
+        if len(sha) < 7:
+            return False, 'reviewed_sha: укажи голову ветки, которую читал (git rev-parse HEAD, не короче 7 знаков)'
+        return head.startswith(sha), ('ревью на текущей голове %s' % head[:10]) if head.startswith(sha) else \
+            'ревью сделано на %s, а голова ветки %s — перечитай свежий дифф' % (sha[:10], head[:10])
     if check == 'signoff':
         return ctx.handoff.get('signoff') is True, 'QA Sign-off: %s' % ('да' if ctx.handoff.get('signoff') is True else 'нет')
     if check in ('committed', 'mergeable', 'tests_changed', 'no_secrets'):
         return git_check(check, ctx, evidence)
+    if check == 'oracle_intact':
+        import trusted_oracle as to
+        ok, detail, _ = to.intact(t.get('pipeline'), t.get('ref'), ctx.repo, ctx.branches.get('base'), ctx.branch, ctx.project)
+        return ok, detail
     if check == 'ci_config':
         import ci
         cfg = ci.config(ctx.project); err = ci.validate(cfg)
@@ -676,15 +885,45 @@ def machine(it, role, ctx, state, evidence=''):
         if not cfg['steps']:
             return False, 'у проекта нет шагов CI: задайте поле ci в projects.json или команду verify'
         return True, 'CI: %d шагов (%s)' % (len(cfg['steps']), cfg['source'])
+    if check == 'defects_retested':
+        # VERIFIED — только после PASS доверенного раннера на актуальном SHA (07: QA-08), не по слову QA.
+        fixed = [d for d in (t.get('pipeline') or {}).get('defects') or [] if d.get('status') == 'fixed']
+        if not fixed:
+            return True, 'исправленных дефектов к перепроверке нет'
+        import ci
+        test = ctx.branches.get('test')
+        head = ci.head_sha(ctx.repo, 'refs/heads/' + test) if ctx.repo and test else ''
+        if not head:
+            return False, 'нет коммита тестовой ветки — перепроверку не с чем сверить'
+        ok_ci, why_ci = ci.green(ci.last(project=t.get('project'), scope='test', branch=test), head)
+        report = (ctx.artifact(ROLES['qa']['artifacts'][it['art']]) or '').lower()
+        bad = []
+        for d in fixed:
+            path = str(d.get('test') or '').split('::')[0].strip()
+            if path and ('/' in path or path.endswith(('.py', '.js', '.ts', '.go', '.rs', '.java', '.cs'))):
+                if not read_file_at(ctx.repo, test, path):
+                    bad.append('%s: теста %s нет в тестовой ветке' % (d['id'], path))
+            elif path:                                   # тест-кейс QA (TC-n): повтор — в отчёте о тестировании
+                if path.lower() not in report:
+                    bad.append('%s: тест-кейс %s не упомянут в test-report.md — повтор не описан' % (d['id'], path))
+            elif d['id'].lower() not in report:
+                bad.append('%s: у дефекта нет теста, а повтор шагов не описан в test-report.md' % d['id'])
+        if not ok_ci:
+            bad.append('CI теста: ' + why_ci)
+        return not bad, '; '.join(bad[:4]) if bad else 'перепроверено %d: тесты на месте, CI зелёный на %s' % (len(fixed), head[:7])
     if check == 'ci_test_green':
         import ci
         repo = ctx.repo; test = ctx.branches.get('test')
-        head = _git(['rev-parse', '--short', 'refs/heads/' + test], repo).stdout.strip() if repo and test else ''
         run = ci.last(project=ctx.t.get('project'), scope='test', branch=test)
         if not run:
             return False, 'на тестовой ветке ещё не было прогона CI'
-        ok = run['status'] in ('passed', 'skipped') and (not head or run.get('sha') == head)
-        return ok, ci.summary(run) + ('' if not head or run.get('sha') == head else '; тестовая ветка ушла вперёд (%s) — нужен новый прогон' % head)
+        # Сверка с текущей головой тестовой ветки обязательна (TT3-013): не нашли голову — не одобряем.
+        head = ci.head_sha(repo, 'refs/heads/' + test) if repo and test else ''
+        if not head:
+            return False, 'не удалось определить HEAD тестовой ветки %s — прогон не с чем сверить' % (test or '?')
+        return ci.green(run, head)
+    if check == 'mutation':
+        return mutation_check(ctx, state)
     if check.startswith('verify') or check.startswith('ci_') or check.startswith('env_') or \
             check in ('merge_to_base', 'deploy_test', 'deploy_main', 'release_tag'):
         if not state.get('heavy'):
@@ -692,6 +931,80 @@ def machine(it, role, ctx, state, evidence=''):
         import deploy
         return deploy.run(check, ctx, evidence)
     return False, 'неизвестная проверка ' + check
+
+
+def mutation_check(ctx, state):
+    """Мутационная проверка (07: A6-08) — только для расчётного маршрута CRITICAL: там слабые тесты дороже всего."""
+    import adaptive_pipeline as ap
+    r = ap.route(ctx.t.get('pipeline'))
+    if 'CRITICAL' not in (r.get('applied'), (r.get('plan') or {}).get('mode')):
+        return True, 'не требуется: задача не CRITICAL'
+    if not state.get('heavy'):
+        return None, 'проверит сервер в фоне'
+    import mutation, local_mimo as lm
+    repo, branch, base = ctx.repo, ctx.branch, ctx.branches.get('base')
+    files = [f for f in _git(['diff', '--name-only', '%s...%s' % (base, branch)], repo).stdout.splitlines() if f.strip()] if branch else []
+    cmd = lm.verify_commands(ctx.project).get('verify')
+    res = mutation.run(ctx.worktree.get('path') or repo, files, cmd)
+    return res['status'] != 'failed', mutation.summary(res)
+
+
+def read_file_at(repo, branch, path):
+    """Есть ли файл в ветке (для ссылок ревьюера и дефектов)."""
+    if not repo or not branch or not path or '..' in path: return False
+    return _git(['cat-file', '-e', '%s:%s' % (branch, path.lstrip('/'))], repo).returncode == 0
+
+
+def brd_digest(ctx):
+    import hashlib
+    text = ctx.artifact(ROLES['product_owner']['artifacts'][0])
+    return 'sha256:' + hashlib.sha256(text.encode('utf-8')).hexdigest()[:24] if text is not None else None
+
+
+def brd_current(ctx, pipe):
+    """BRD, по которому сделан анализ, не менялся (AG-PO-05): иначе SRS, HLD и тест-дизайн описывают другое."""
+    want = (pipe or {}).get('brd_digest')
+    if not want:
+        return True, 'отпечаток BRD не записан (задача до этой проверки)'
+    got = brd_digest(ctx)
+    return got == want, 'BRD тот же, что при сдаче PO' if got == want else \
+        'BRD изменён после сдачи PO (%s → %s): анализ по нему устарел — верни на «Идея» или «Анализ»' % (want[7:15], (got or 'нет')[7:15])
+
+
+AC_VERDICTS = ('ok', 'gap', 'defect')
+
+
+def ac_matrix_check(ctx):
+    """Ревью по каждому AC и каждому изменённому файлу кода, а не по тексту автора (07: A7-01, AG-REV-01..03)."""
+    acc = [a for a in ctx.t.get('acceptance') or [] if isinstance(a, str) and a.strip()]
+    m = ctx.handoff.get('ac_matrix')
+    if not acc:
+        return True, 'у задачи нет критериев приёмки — матрица не требуется'
+    if not isinstance(m, dict):
+        return False, 'нет ac_matrix: {AC-1: {files, tests, verdict}, …} по %d критериям' % len(acc)
+    repo, branch, base = ctx.repo, ctx.branch, ctx.branches.get('base')
+    diff = [f for f in _git(['diff', '--name-only', '%s...%s' % (base, branch)], repo).stdout.splitlines() if f.strip()] if branch else []
+    code = [f for f in diff if not f.startswith('docs/tasks/') and not f.lower().endswith('.md')]
+    bad, seen = [], set()
+    for i in range(1, len(acc) + 1):
+        e = m.get('AC-%d' % i)
+        if not isinstance(e, dict):
+            bad.append('AC-%d: нет строки' % i); continue
+        if e.get('verdict') not in AC_VERDICTS:
+            bad.append('AC-%d: verdict ok|gap|defect' % i); continue
+        refs = [re.sub(r':\d+(-\d+)?$', '', str(x).strip()) for x in list(e.get('files') or []) + list(e.get('tests') or [])]
+        if not refs:
+            bad.append('AC-%d: нет файлов и тестов' % i); continue
+        missing = [r for r in refs if not read_file_at(repo, branch, r)]
+        if missing:
+            bad.append('AC-%d: нет в ветке %s' % (i, ', '.join(missing[:3])))
+        seen.update(refs)
+        if e['verdict'] != 'ok':
+            bad.append('AC-%d: %s — одобрить нельзя, верни задачу (op=return)' % (i, e['verdict']))
+    loose = [f for f in code if f not in seen]
+    if loose:
+        bad.append('изменённые файлы без критерия: ' + ', '.join(loose[:5]))
+    return not bad, '; '.join(bad[:6]) if bad else 'все %d критериев и %d изменённых файлов кода проверены' % (len(acc), len(code))
 
 
 def git_check(check, ctx, evidence):
@@ -718,9 +1031,17 @@ def git_check(check, ctx, evidence):
 
 def check_dor(stage, ctx, pipe):
     """Пункты DoR этапа: [(item, ok, detail)]."""
-    out = []
+    import adaptive_pipeline as ap
+    out = []; skipped = set(ap.skipped_stages(pipe))
     for it in DOR[stage]:
         check = it['check']
+        gate_stage = next((x['id'] for x in STAGES if x.get('gate') == check.split(':', 1)[1]), None) if check.startswith('gate:') else None
+        if (check.startswith('stage:') and check.split(':', 1)[1] in skipped) or gate_stage in skipped:
+            out.append((it, True, 'не требуется маршрутом FAST')); continue
+        if check == 'artifact' and it.get('art') in ('dev-tasks.md', 'test-design.md') and 'analysis' in skipped:
+            ok = bool(ctx.t.get('acceptance'))
+            out.append((it, ok, 'маршрут FAST: критерии приёмки задачи вместо dev-tasks.md' if ok else
+                        'маршрут FAST без критериев приёмки задачи')); continue
         if check == 'intake':
             ok = bool(ctx.t.get('root') and ctx.t.get('title') and ctx.t.get('why')); detail = 'исходный запрос и описание есть' if ok else 'нет исходного запроса или описания'
         elif check.startswith('stage:'):
@@ -730,10 +1051,19 @@ def check_dor(stage, ctx, pipe):
             g = (pipe.get('gates') or {}).get(check.split(':', 1)[1]) or {}
             ok, detail = g.get('decision') == 'approve', 'ворота: %s' % (g.get('decision') or 'не пройдены')
         elif check == 'owner_release':
-            a = (pipe.get('approvals') or {}).get('release')
-            ok, detail = bool(a), ('одобрил %s' % a.get('at', '')[:16]) if a else 'ждёт «Одобрить релиз» владельца'
+            # Подписанное одобрение этой задачи на текущем коммите тестовой ветки (TT3-014).
+            import ci, release_policy as rp, workflow as w
+            head = ci.head_sha(ctx.repo, 'refs/heads/' + ctx.branches['test']) if ctx.repo else ''
+            ok, detail = rp.release_ok(w.state(), pipe, ctx.t.get('ref'), ctx.t.get('project'), ctx.branches['main'], head, w.now())
+        elif check == 'release_evidence':
+            ok, detail = release_evidence(ctx, pipe)
         elif check == 'worktree':
             ok = bool(ctx.branch); detail = 'ветка %s' % ctx.branch if ok else 'нет рабочей копии задачи'
+        elif check == 'brd_current':
+            ok, detail = brd_current(ctx, pipe)
+        elif check == 'no_conflicts':
+            opened = [c['id'] for c in pipe.get('conflicts') or [] if c['status'] == 'open']
+            ok = not opened; detail = 'открытых вопросов нет' if ok else 'открыты: ' + ', '.join(opened)
         elif check in ('section', 'artifact'):
             text = read_artifact(ctx.repo, ctx.branch, art_path(ctx.t['id'], ART + '/' + it['art']))
             ok = text is not None and (check == 'artifact' or any(it['needle'].lower() in h for h in headings(text)))
@@ -742,6 +1072,111 @@ def check_dor(stage, ctx, pipe):
             ok, detail = False, 'неизвестная проверка'
         out.append((it, ok, detail))
     return out
+
+
+CONTRACT_ARTS = ('api.md', 'data-model.md')
+
+
+def contract_digest(ctx):
+    """Хеш контрактов задачи (api.md, data-model.md аналитика) или None, если их нет."""
+    import hashlib
+    parts = []
+    for name in CONTRACT_ARTS:
+        text = ctx.read(art_path(ctx.t['id'], ART + '/' + name))
+        if text:
+            parts.append(name + '\n' + text.replace('\r\n', '\n').strip())
+    return hashlib.sha256('\n\n'.join(parts).encode('utf-8')).hexdigest()[:16] if parts else None
+
+
+def contract_problem(pipe):
+    """Контракт группы изменён другой задачей после анализа этой (07: A5-06, AG-SA-08, E2E-R30)."""
+    st = (pipe or {}).get('contract_stale')
+    if not st:
+        return None
+    return ('контракт группы «%s» изменён задачей %s (%s) после анализа этой задачи: код опирается на старый контракт — '
+            'верните задачу в анализ (op=return to_stage=analysis), аналитик сверит ТЗ с новым контрактом' % (
+                st.get('group'), st.get('by'), (st.get('at') or '')[:10]))
+
+
+def role_zone(role, task, scope=None):
+    """Что роли разрешено менять в ветке задачи (07: A2-01, A7-02, AG-REV-02, AG-DES-09, AG-MKT-06, AG-RES-05).
+    Разработчик — код задачи (в пределах scope, если он задан), документы задачи и тесты; остальные роли —
+    только свои артефакты в docs/tasks/<id>/. Эталон приёмки разработчику проверяет trusted_oracle."""
+    docs = art_path(task['id'], ART) + '/'
+    if role == 'developer':
+        return dict(docs=docs, scope=[x for x in (scope or []) if x], tests=True)
+    return dict(docs=docs, scope=None, tests=False)
+
+
+def zone_violations(role, task, files, scope=None):
+    import risk_policy as rpol
+    z = role_zone(role, task, scope)
+    bad = []
+    for f in files:
+        f = f.replace('\\', '/')
+        if f.startswith(z['docs']):
+            continue
+        if role != 'developer':
+            bad.append(f); continue
+        if z['scope'] and not rpol._within(f.lower(), z['scope']) and not (z['tests'] and TEST_FILE.search(f)):
+            bad.append(f)
+    return bad
+
+
+TEST_FILE = re.compile(r'(^|/)(tests?|spec|__tests__)/|(_test|\.test|\.spec)\.\w+$|test_\w+\.py$')
+
+
+def ac_digest(acceptance):
+    import hashlib
+    return 'sha256:' + hashlib.sha256(json.dumps([str(a).strip() for a in acceptance or []], ensure_ascii=False).encode('utf-8')).hexdigest()[:24]
+
+
+def ac_frozen(task, pipe):
+    """(ok, detail): критерии приёмки те же, что на старте разработки."""
+    fz = (pipe or {}).get('ac_freeze')
+    if not fz:
+        return True, 'заморозки критериев нет (задача начата до правила)'
+    if fz['digest'] == ac_digest(task.get('acceptance')):
+        return True, 'критерии приёмки не менялись с начала разработки (%d)' % fz.get('count', 0)
+    return False, 'критерии приёмки изменены после начала разработки — изменение требований идёт возвратом в анализ'
+
+
+def release_evidence(ctx, pipe):
+    """Только доверенные доказательства разрешают выпуск (SEC-011): CI passed на текущем коммите тестовой ветки,
+    эталон приёмки задачи не изменён без владельца, нет открытых High/Critical находок ИБ и обязательных NOT_RUN.
+    Пишет запись SecurityEvidence в pipe['evidence'] — её формирует сервер, текст агента сюда не попадает."""
+    import ci, trusted_oracle as to, security_triage as st, workflow as w
+    ref, test = ctx.t.get('ref'), ctx.branches.get('test')
+    head = ci.head_sha(ctx.repo, 'refs/heads/' + test) if ctx.repo and test else ''
+    if not head:
+        return False, 'нет коммита тестовой ветки %s — выпуск не с чем сверить' % (test or '?')
+    run = ci.last(project=ctx.t.get('project'), scope='test', branch=test)
+    bad = []
+    ok_ci, why_ci = ci.green(run, head)
+    if not ok_ci:
+        bad.append('CI: ' + why_ci)
+    ok_or, why_or, _ = to.intact(pipe, ref, ctx.repo, ctx.branches.get('base'), ctx.branch, ctx.project)
+    if not ok_or:
+        bad.append(why_or)
+    files = [f for f in _git(['diff', '--name-only', '%s...%s' % (ctx.branches.get('base'), ctx.branch)], ctx.repo).stdout.splitlines()
+             if f.strip()] if ctx.branch else None
+    blocking = st.blocking(ctx.t.get('project'), ref, files=files, sha=head)
+    why_contract = contract_problem(pipe)
+    if why_contract:
+        bad.append(why_contract)
+    ok_ac, why_ac = ac_frozen(ctx.t, pipe)
+    if not ok_ac:
+        bad.append(why_ac)
+    if blocking:
+        bad.append('находки ИБ: ' + '; '.join(blocking[:3]))
+    s = w.state()
+    ev = to.evidence(ref, (run or {}).get('id'), ctx.repo, head, ctx.project, w.settings(s), 'release_evidence',
+                     'failed' if bad else 'passed', ci_run=run)
+    lst = [e for e in pipe.get('evidence') or [] if e.get('commit_sha') != head][-19:]
+    pipe['evidence'] = lst + [ev]
+    if bad:
+        return False, '; '.join(bad)
+    return True, 'CI passed на %s, эталон цел, блокирующих находок ИБ нет' % head[:7]
 
 
 def evaluate_role(role, stage, ctx, heavy=False):

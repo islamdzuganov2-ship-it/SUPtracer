@@ -11,6 +11,8 @@
   py tools/pm.py comments             показать комментарии
   py tools/pm.py snapshot             сохранить снимок для истории трендов
   py tools/pm.py check                проверки перед слиянием в тестирование и main
+  py tools/pm.py hardware [--json]    оборудование: CPU, ОЗУ, GPU, свободная VRAM, CUDA (только чтение)
+  py tools/pm.py backup create|verify|restore|drill|list  резервная копия ручных данных и памяти
 
 Память системы — знание лежит здесь, а не в контексте ассистента
   py tools/pm.py context              брифинг сессии: что происходит, без содержимого
@@ -439,6 +441,20 @@ def cmd_idea(args):
         print(e); return 1
 
 
+def cmd_owner_link(args):
+    """Ссылка владельца на доску (TTU-018): токен решений владельца. Печатается только человеку
+    в терминале — у сессий ИИ ввод и вывод перенаправлены, им ссылка не выдаётся."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import owner_auth as oa
+    if not oa.interactive():
+        print("Ссылку владельца выдаю только в терминале владельца (не в сессии ИИ и не в конвейере вывода).")
+        return 2
+    port = int(args[0]) if args and args[0].isdigit() else 8787
+    print("http://127.0.0.1:%d/#owner=%s" % (port, oa.board_token(create=True)))
+    print("Откройте один раз: браузер запомнит токен. Не передавайте ссылку ИИ и не вставляйте в заметки.")
+    return 0
+
+
 COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "comments": cmd_comments,
             "work": lambda args: run("workflow.py", *args),
             "status": cmd_status, "snapshot": cmd_snapshot, "check": cmd_check,
@@ -447,10 +463,14 @@ COMMANDS = {"init": cmd_init, "refresh": cmd_refresh, "comment": cmd_comment, "c
             "codex-memory": lambda args: run("codex_memory.py", *args),
             "inbox": cmd_inbox, "apply": cmd_apply, "reject": cmd_reject,
             "vault": cmd_vault, "tree": cmd_tree, "serve": cmd_serve,
-            "connect": cmd_connect, "disconnect": cmd_disconnect, "idea": cmd_idea, "ask": cmd_ask,
+            "connect": cmd_connect, "disconnect": cmd_disconnect, "idea": cmd_idea, "ask": cmd_ask, "owner-link": cmd_owner_link,
             "skills": lambda args: run("skills.py", *args),
             "ci": lambda args: run("ci.py", *args),
-            "tokens": lambda args: run("tokens.py", *args)}
+            "tokens": lambda args: run("tokens.py", *args),
+            "hardware": lambda args: run("hardware_probe.py", *args),
+            "learn": lambda args: run("learn.py", *args),
+            "security": lambda args: run("security_triage.py", *args),
+            "backup": lambda args: run("backup.py", *args)}
 
 
 def foreign_copy():

@@ -65,7 +65,7 @@ class CITests(DataCase):
         self.assertEqual(ci.last(ref='alpha-api/AL-01', scope='task')['id'], r['id'])
         self.assertEqual(len(ci.runs(ref='alpha-api/AL-01')), 2)
         skipped = ci.run_pipeline('alpha-api', dict(path=str(repo)), repo, 'main', 'test')
-        self.assertEqual(skipped['status'], 'skipped')
+        self.assertEqual(skipped['status'], 'not_configured')          # нет шагов — не «пропущено»
 
     def test_deploy_tag_and_rollback(self):
         repo = self.make_repo()

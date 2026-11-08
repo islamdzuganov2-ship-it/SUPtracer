@@ -45,6 +45,10 @@
     <select class="sel" id="proj-select" title="Весь портфель или один проект: графики реализации по спринтам и качество работ"></select>
     <span class="proj-hint" id="proj-hint"></span>
   </div>
+  <div id="taskview"></div>
+  <div id="tokview"></div>
+  <div id="learnview"></div>
+  <div id="secview"></div>
   <div id="signalsWrap">
     <div class="section-h">За чем следить — портфельные сигналы</div>
     <div class="signals" id="signals"></div>
@@ -149,5 +153,18 @@
 .board-parallel h3{font-size:13px;margin:4px 0}
 .board-parallel p{font-size:12px;margin:8px 0}
 .board-parallel-empty{color:var(--ink3);font-size:12px}
+.board-activity{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
+.board-activity h3,.board-activity h4{margin:0 0 10px}.activity-observed,.board-activity small{font-size:12px;color:var(--ink3)}
+.board-activity-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:16px 0}
+.board-activity-card{padding:12px;margin:8px 0;border:1px solid var(--line);border-radius:10px;overflow-wrap:anywhere;font-size:13px}
+.board-activity-card p{margin:7px 0}.board-activity-card[data-state="recent"]{border-left:3px solid #35b879}
+.board-activity-card[data-state="quiet"]{border-left:3px solid #e6b454}.activity-state{font-weight:600}.activity-stale .activity-observed{color:#e6b454}
+.model-loads{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:14px}
+.model-load{display:flex;gap:14px;align-items:center;padding:14px;border:1px solid var(--line);border-radius:12px;min-width:0;overflow-wrap:anywhere}
+.model-load b{font-size:13px}.model-load p{margin:6px 0;font-size:12px}
+.model-donut{width:82px;height:82px;flex:0 0 82px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--load-color) var(--load),var(--line) 0);position:relative}
+.model-donut:before{content:"";position:absolute;inset:9px;border-radius:50%;background:var(--panel)}.model-donut span{position:relative;font-weight:700;font-size:19px}
+.activity-stale .model-donut{opacity:.45}
+@media(max-width:800px){.board-activity-grid{grid-template-columns:1fr}}
 .board-claim-soon{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--ink);font-weight:600}
 </style>

@@ -19,7 +19,7 @@ def git(*args, cwd):
 class ReviewTests(DataCase):
     def setUp(self):
         super().setUp()
-        self.verify = None
+        self.verify = [sys.executable, '-c', 'print(1)']      # SEC-003: без проверок ветка не сливается
         def mutate(d):
             if self.verify: d['projects']['alpha-api']['verify'] = self.verify
         self.mutate = mutate
@@ -79,6 +79,21 @@ class ReviewTests(DataCase):
         self.assertEqual((rv['agent'], rv['auto_launch'], t['status']), ('claude', True, 'review'))
         p = w.packet(REF, agent='claude')
         self.assertEqual((p['phase'], p['review']['branch']), ('review', 'ai/claude/al-03'))
+
+    def test_no_verify_is_not_green(self):                                         # SEC-003, OBS-03
+        d = w.read('projects.json', {}); d['projects']['alpha-api'].pop('verify', None); w.save('projects.json', d)
+        self.work()
+        chk = {c['key']: c for c in w.task_for(REF)['auto_check']['checks']}
+        self.assertFalse(chk['verify']['ok']); self.assertIn('не настроена', chk['verify']['detail'])
+        self.assertFalse(any(r.get('phase') == 'review' for r in w.state()['runs']))
+
+    def test_verify_na_is_explicit(self):
+        d = w.read('projects.json', {}); p = d['projects']['alpha-api']; p.pop('verify', None)
+        p['verify_na'] = 'только документы, кода нет'; w.save('projects.json', d)
+        self.work()
+        chk = {c['key']: c for c in w.task_for(REF)['auto_check']['checks']}
+        self.assertTrue(chk['verify']['ok']); self.assertTrue(chk['verify']['not_applicable'])
+        self.assertIn('по решению владельца', chk['verify']['detail'])
 
     def test_failed_autocheck_returns_task_for_rework(self):
         self.set_verify([sys.executable, '-c', 'import sys; sys.exit(3)'])
@@ -164,11 +179,11 @@ class ReviewTests(DataCase):
         self.assertIn('незакоммиченные', t['status_note'])
 
     def test_reviewer_other_ai(self):
-        w.action(dict(op='settings', changes={'reviewer': 'other', 'auto_launch_review': False}))
+        w.action(dict(op='settings', changes={'reviewer': 'other', 'auto_launch_review': False}), origin='owner')
         self.work()
         rv = self.review_run()
         self.assertEqual((rv['agent'], rv['auto_launch']), ('codex', False))
-        with self.assertRaises(ValueError): w.action(dict(op='settings', changes={'reviewer': 'gemini'}))
+        with self.assertRaises(ValueError): w.action(dict(op='settings', changes={'reviewer': 'gemini'}), origin='owner')
 
     # --- автозапуск ревью сервером досок
 
@@ -183,7 +198,7 @@ class ReviewTests(DataCase):
         ls.assert_called_once_with(dict(ref=REF, agent='claude', run=rv['id']))
         self.assertIn('не найдена', next(r for r in w.state()['runs'] if r['id'] == rv['id'])['launch_error'])
         serve._auto_attempts.clear()
-        w.action(dict(op='settings', changes={'auto_launch_review': False}))
+        w.action(dict(op='settings', changes={'auto_launch_review': False}), origin='owner')
         with mock.patch.object(serve, 'launch_session') as ls:
             serve.dispatch_once()
         ls.assert_not_called()

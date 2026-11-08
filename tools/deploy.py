@@ -1,0 +1,144 @@
+"""Тяжёлые проверки конвейера: тесты проекта и слияния веток (деплой).
+
+Идут фоновым заданием, не под блокировкой задач. Слияния — только здесь, сервером,
+по пройденному DoD: агенты не сливают ветки сами.
+
+- merge_to_base — ветка задачи в базовую ветку проекта (основная рабочая копия);
+- deploy_test   — базовая ветка в тестовую (своя рабочая копия <repo>.worktrees/deploy-<ветка>);
+- deploy_main   — тестовая ветка в main (так же);
+- ci_* / verify* — прогон CI проекта (tools/ci.py) в рабочей копии нужной ветки: task — ветка задачи,
+  test — тестовая ветка после деплоя, main — main после релиза (красный CI на main откатывает слияние);
+- env_*         — развёртывание окружения и проверка работоспособности, если они заданы у проекта;
+- release_tag   — тег релиза в main.
+Без шагов CI у проекта пункт засчитывается только с доказательством ручной проверки от агента.
+"""
+import re
+import subprocess
+from pathlib import Path
+
+import autocheck
+import ci
+
+VERIFY_TIMEOUT = 900
+
+
+def _git(args, cwd, timeout=120):
+    return subprocess.run(['git', '-c', 'core.quotepath=off', *args], cwd=cwd, capture_output=True, text=True,
+                          encoding='utf-8', errors='replace', timeout=timeout)
+
+
+def reapply(wt, task_id):
+    """Перед повторным релизом вернуть откаченное слияние задачи: иначе git сочтёт тестовую ветку уже слитой."""
+    log = _git(['log', '-200', '--format=%H%x1f%s'], wt).stdout.splitlines()
+    rows = [l.split('', 1) for l in log if '' in l and task_id in l]
+    reverts = [h for h, subj in rows if subj.startswith('Revert "') and not subj.startswith('Revert "Revert')]
+    again = [h for h, subj in rows if subj.startswith('Revert "Revert') or subj.startswith('Reapply')]
+    if len(reverts) <= len(again):
+        return ''
+    r = _git(['-c', 'user.name=TaskTreker', '-c', 'user.email=tasktreker@localhost', 'revert', '--no-edit', reverts[0]], wt)
+    if r.returncode != 0:
+        _git(['revert', '--abort'], wt)
+        raise ValueError('не удалось вернуть откаченный релиз %s: %s' % (reverts[0][:9], (r.stderr or r.stdout).strip()[:200]))
+    return 'прежний откат %s возвращён' % reverts[0][:9]
+
+
+def branch_worktree(repo, branch, start=None):
+    """Рабочая копия для ветки деплоя. Нет ветки — создаётся от start (обычно main)."""
+    repo = Path(repo)
+    slug = re.sub(r'[^\w.-]+', '-', branch).strip('-')
+    path = repo.parent / (repo.name + '.worktrees') / ('deploy-' + slug)
+    listed = _git(['worktree', 'list', '--porcelain'], repo).stdout.replace('\\', '/')
+    for block in listed.split('\n\n'):
+        if 'branch refs/heads/%s' % branch in block:
+            return Path(block.splitlines()[0].split(' ', 1)[1])
+    if _git(['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch], repo).returncode != 0:
+        r = _git(['branch', branch, start or 'HEAD'], repo)
+        if r.returncode != 0:
+            raise ValueError('не удалось создать ветку %s: %s' % (branch, r.stderr.strip()[:200]))
+    r = _git(['worktree', 'add', str(path), branch], repo)
+    if r.returncode != 0:
+        raise ValueError('не удалось открыть рабочую копию %s: %s' % (branch, r.stderr.strip()[:200]))
+    return path
+
+
+def verify(cwd, cmd):
+    try:
+        r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding='utf-8', errors='replace',
+                           timeout=VERIFY_TIMEOUT)
+        tail = ((r.stdout or '') + '\n' + (r.stderr or '')).strip()[-400:]
+        return r.returncode == 0, ('проверки прошли' if r.returncode == 0 else 'проверки упали') + ': ' + tail
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, 'проверки не запустились: %s' % e
+
+
+def merge_into(cwd, source, message):
+    """Слить source в ветку, выгруженную в cwd. Конфликт — слияние отменяется."""
+    dirty = _git(['status', '--porcelain', '--untracked-files=no'], cwd).stdout.strip()
+    if dirty:
+        return False, 'в рабочей копии %s есть незакоммиченные изменения' % cwd
+    r = _git(['merge', '--no-ff', source, '-m', message], cwd)
+    if r.returncode != 0:
+        if 'Already up to date' in (r.stdout + r.stderr) or 'Уже актуально' in (r.stdout + r.stderr):
+            return True, 'уже актуально'
+        _git(['merge', '--abort'], cwd)
+        return False, 'слияние %s не удалось: %s' % (source, (r.stderr or r.stdout).strip()[-300:])
+    return True, 'слито: ' + _git(['rev-parse', '--short', 'HEAD'], cwd).stdout.strip()
+
+
+def run(check, ctx, evidence=''):
+    """(ok, detail) тяжёлой проверки для пункта DoD."""
+    repo, b, t = ctx.repo, ctx.branches, ctx.t
+    key = t.get('project') or ''
+
+    def pipeline_ci(cwd, branch, scope):
+        if not ci.config(ctx.project)['steps']:
+            ok = len((evidence or '').strip()) >= 20
+            return ok, ('у проекта нет шагов CI — засчитано по доказательству агента' if ok else
+                        'у проекта нет шагов CI: задайте поле ci в projects.json или опишите в доказательстве, как проверено')
+        r = ci.run_pipeline(key, ctx.project, cwd, branch, scope, ref=t.get('ref'), trigger=check, branches=b)
+        return r['status'] in ('passed', 'skipped'), ci.summary(r)
+    try:
+        if check in ('verify', 'ci_task'):
+            return pipeline_ci(ctx.worktree.get('path') or repo, ctx.branch, 'task')
+        if check == 'verify_base':
+            return pipeline_ci(repo, b['base'], 'test')
+        if check == 'merge_to_base':
+            ok, info = autocheck.merge(repo, ctx.branch, b['base'], 'Слияние %s: %s (%s)' % (ctx.branch, t['title'], t['id']))
+            return ok, info
+        if check == 'deploy_test':
+            # Догоняющее слияние: артефакты, закоммиченные в ветку задачи после ревью, — тоже в базовую.
+            if ctx.branch and _git(['rev-list', '--count', '%s..%s' % (b['base'], ctx.branch)], repo).stdout.strip() not in ('', '0'):
+                ok, info = autocheck.merge(repo, ctx.branch, b['base'], 'Слияние %s перед деплоем в тест (%s)' % (ctx.branch, t['id']))
+                if not ok:
+                    return False, info
+            wt = branch_worktree(repo, b['test'], b['main'])
+            return merge_into(wt, b['base'], 'Деплой в %s: %s (%s)' % (b['test'], t['title'], t['id']))
+        if check in ('ci_test', 'verify_test'):
+            return pipeline_ci(branch_worktree(repo, b['test'], b['main']), b['test'], 'test')
+        if check == 'env_test':
+            ok, info = ci.deploy(ctx.project, 'test', branch_worktree(repo, b['test'], b['main']), b)
+            return (True if ok is None else ok), info
+        if check == 'deploy_main':
+            wt = branch_worktree(repo, b['main'])
+            note = reapply(wt, t['id'])
+            ok, info = merge_into(wt, b['test'], 'Деплой в %s: %s (%s)' % (b['main'], t['title'], t['id']))
+            return ok, (note + '; ' + info) if note else info
+        if check in ('ci_main', 'verify_main'):
+            wt = branch_worktree(repo, b['main'])
+            ok, info = pipeline_ci(wt, b['main'], 'main')
+            if not ok:
+                head = _git(['log', '-1', '--format=%H%x1f%P%x1f%s'], wt).stdout.strip().split('\x1f')
+                if len(head) == 3 and len(head[1].split()) == 2 and t['id'] in head[2]:
+                    rok, rinfo = ci.rollback(wt, head[0])
+                    info += '; ' + rinfo
+            return ok, info
+        if check == 'env_main':
+            ok, info = ci.deploy(ctx.project, 'main', branch_worktree(repo, b['main']), b)
+            return (True if ok is None else ok), info
+        if check == 'release_tag':
+            if not ci.config(ctx.project).get('tag', True):
+                return True, 'тег релиза у проекта выключен'
+            return ci.tag_release(branch_worktree(repo, b['main']), t['id'], t['title'])
+    except (ValueError, OSError, subprocess.SubprocessError) as e:
+        return False, str(e)[:300]
+    return False, 'неизвестная проверка ' + check

@@ -1,0 +1,16 @@
+{
+  "_": "ПРИМЕР. Скопируйте в comments.json. Пополняется командой pm.py comment, разбирается ассистентом по регламенту CLAUDE.md.",
+  "schema": 1,
+  "next_id": 2,
+  "comments": [
+    {
+      "id": 1,
+      "project": "example-api",
+      "kind": "техдолг",
+      "text": "Пример комментария: то, что пришло в голову и должно стать задачей бэклога",
+      "date": "2026-01-01 12:00",
+      "status": "processed",
+      "moved_to": "example-api / EX-02"
+    }
+  ]
+}

@@ -105,7 +105,7 @@ class LauncherTests(DataCase):
         self.assertEqual(run['repins'][0]['from_agent'],'codex')
         self.assertEqual(win.call_args[0][0][3:5],['--model','claude-haiku-5-5'])   # окно — именно Claude
         # Без явного выбора сервер держится закрепления запуска, а не ИИ по умолчанию.
-        w.action(dict(op='settings',changes={'default_executor':'codex'}))
+        w.action(dict(op='settings',changes={'default_executor':'codex'}), origin='owner')
         with mock.patch.object(launcher,'find_cli',return_value='C:/bin/x.exe'), mock.patch.object(launcher,'open_window',return_value=6):
             self.assertEqual(serve.launch_session(dict(ref='alpha-api/AL-03',isolate=False))['agent'],'claude')
 

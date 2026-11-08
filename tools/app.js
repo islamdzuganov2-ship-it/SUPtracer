@@ -1,3 +1,22 @@
+/* Токен владельца (TTU-018): приходит один раз во фрагменте ссылки владельца (#owner=…) и хранится
+   в этом браузере. Без него доска показывает данные, а решения владельца сервер отклоняет. */
+window.ttOwnerHeaders = (function () {
+  const m = /(?:^#|&)owner=([0-9a-f]{64})/.exec(location.hash || '');
+  let tok = m ? m[1] : null;
+  try {
+    if (m) { localStorage.setItem('tt-owner', tok); history.replaceState(null, '', location.pathname + location.search); }
+    tok = tok || localStorage.getItem('tt-owner');
+  } catch (e) { /* хранилище недоступно — токен живёт до перезагрузки */ }
+  const meta = document.querySelector('meta[name="tt-session"]');
+  const session = meta ? meta.content : '';      // токен сессии сервера (SEC-006): без него запись отклоняется
+  return function () {
+    const h = {'Content-Type': 'application/json', 'X-TaskTreker': '1'};
+    if (session) h['X-TaskTreker-Session'] = session;
+    if (tok) h['X-TaskTreker-Owner'] = tok;
+    return h;
+  };
+})();
+
 /* Рендер дашборда. Две вкладки: диаграммы и полная информация по проектам.
    Все цифры приходят из data/*.json — здесь только отображение. */
 
@@ -26,6 +45,9 @@ const tok = n => n >= 1e9 ? (n / 1e9).toFixed(2).replace('.', ',') + ' млрд'
 const hrs = n => (n == null) ? '—' : (n >= 10 ? Math.round(n) : n.toFixed(1).replace('.', ',')) + ' ч';
 const usageMoney = u => !u ? '—' : u.cost_complete === false
   ? (u.usd > 0 ? 'от ' + money(u.usd) : 'неизвестно') : money(u.usd);
+// Мерило — токены (TT-94): деньги — эквивалент по прайсу API, только во всплывающей подсказке.
+const tokensOf = u => !u ? 0 : (u.billable || u.tokens || ['input', 'output', 'cache_write', 'cache_read'].reduce((s, k) => s + (u[k] || 0), 0));
+const usageTok = u => !u ? '—' : `<span title="эквивалент по прайсу API: ${esc(usageMoney(u))}">${tok(tokensOf(u))}</span>`;
 const sourceSelect = document.getElementById('data-source');
 try { sourceSelect.value = localStorage.getItem('tt-source') || 'all'; } catch (_) {}
 if (!sourceSelect.value) sourceSelect.value = 'all';
@@ -40,7 +62,7 @@ function renderSources() {
     const p = sourceProviders[id], t = p?.total || {}, name = id === 'codex' ? 'GPT / Codex' : 'Claude Code';
     const date = p?.generated_at ? new Date(p.generated_at).toLocaleString('ru-RU') : 'ещё не собирались';
     return `<div class="source-card"><b>${name}</b><p>${p ? `${tok(t.tokens || t.billable || 0)} токенов · ${nf(t.sessions || 0)} сессий · ${hrs(t.active_hours || 0)}` : 'Данных пока нет — нажмите «Обновить данные».'}</p>
-      <p>Стоимость: ${usageMoney(p?.total)}${t.cost_complete === false ? ' · для части моделей нет проверенного тарифа' : ''}</p>
+      <p>Эквивалент по прайсу API: ${usageMoney(p?.total)}${t.cost_complete === false ? ' · для части моделей нет проверенного тарифа' : ''}</p>
       ${id === 'codex' ? `<p>Ветви дерева: ${nf(D.codex_sessions?.sessions?.length || 0)} сессий · ${nf(D.codex_sessions?.requests || 0)} запросов · ${nf(D.codex_sessions?.answers || 0)} ответов</p>` : ''}
       ${id === 'codex' && D.usage.pricing?.openai_rates ? `<details><summary>Тарифы OpenAI · проверены ${esc(D.usage.pricing.openai_checked)}</summary>
         <p>Standard API, $ за 1 млн токенов. Это эквивалент работы, а не счёт подписки.</p><div style="overflow:auto"><table><thead><tr><th>Модель</th><th>Вход</th><th>Кеш: чтение</th><th>Кеш: запись</th><th>Выход</th></tr></thead><tbody>${Object.entries(D.usage.pricing.openai_rates).map(([m,v]) => `<tr><td>${esc(m)}</td><td>${v.in}</td><td>${v.read}</td><td>${v.write}</td><td>${v.out}</td></tr>`).join('')}</tbody></table></div>
@@ -57,7 +79,7 @@ renderSources();
 
 function activityOf(k) {
   const activity = D.project_activity?.projects?.[k] || {}, providers = usageOf(k)?.by_provider || {};
-  const sources = Object.keys(providers).map(id => `<span class="chip">${id === 'codex' ? 'GPT / Codex' : 'Claude'} · ${usageMoney(providers[id])}</span>`).join(' ');
+  const sources = Object.keys(providers).map(id => `<span class="chip">${id === 'codex' ? 'GPT / Codex' : 'Claude'} · ${usageTok(providers[id])} токенов</span>`).join(' ');
   const docs = (activity.documents || []).filter(d => d.tasks?.length || d.missing);
   return `<div class="block provider-activity"><h3>Источники и последняя работа</h3>${sources}
     ${activity.codex_sessions ? `<p>GPT / Codex: ${nf(activity.codex_sessions)} сессий · ${nf(activity.requests)} запросов · ${nf(activity.answers)} ответов.</p>` : ''}
@@ -95,7 +117,7 @@ document.getElementById('discoveredWrap').innerHTML = discoveredKeys.length
     status.textContent = 'Подключаю…';
     try {
       const response = await fetch('/api/connect', {method: 'POST',
-        headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
+        headers: ttOwnerHeaders(),
         body: JSON.stringify({source: selectedSource()})});
       const j = await response.json();
       document.getElementById('rlogWrap').innerHTML = `<div class="rlog ${j.ok ? 'ok' : 'bad'}">${esc(j.log || j.error || '')}</div>`;
@@ -194,10 +216,10 @@ if (alerts.length) document.getElementById('alertsWrap').innerHTML =
   alerts.sort((a, b) => a[0] === 'crit' ? -1 : 1).map(([s, t]) =>
     `<div class="alert"><span class="sev sev-${s}">${s === 'crit' ? 'КРИТ' : 'ВНИМ'}</span><div class="txt">${t}</div></div>`).join('') + `</div>`;
 
-const order = keys.slice().sort((a, b) => (P[a].tier - P[b].tier) || ((usageOf(b)?.usd || 0) - (usageOf(a)?.usd || 0)));
+const order = keys.slice().sort((a, b) => (P[a].tier - P[b].tier) || (tokensOf(usageOf(b)) - tokensOf(usageOf(a))));
 document.getElementById('tableWrap').innerHTML = `<table class="pf"><thead><tr>
-<th>Проект</th><th>Цель</th><th>Готовность</th><th>ИБ</th><th class="num">Часов</th><th class="num">Потрачено</th>
-<th class="num">Осталось</th><th class="num">ТЗ</th><th class="num">Инж.</th><th class="num">Коммитов</th><th>Последнее</th>
+<th>Проект</th><th>Цель</th><th>Готовность</th><th>ИБ</th><th class="num">Часов</th><th class="num">Потрачено, токенов</th>
+<th class="num">Осталось, токенов</th><th class="num">ТЗ</th><th class="num">Инж.</th><th class="num">Коммитов</th><th>Последнее</th>
 </tr></thead><tbody>` + order.map(k => {
   const p = P[k], u = usageOf(k), r = R[k] || {}, e = E[k] || {}, rd = p.readiness || {}, g = r.git || {}, q = Q[k] || {};
   return `<tr data-k="${k}">
@@ -206,8 +228,8 @@ document.getElementById('tableWrap').innerHTML = `<table class="pf"><thead><tr>
    <td><span class="pct">${rd.assessed === false ? 'не оценено' : (rd.functional ?? '—') + '%'}</span>${rd.assessed === false ? '' : bar(rd.functional || 0)}</td>
    <td><span class="chip ${rd.assessed === false ? 'idle' : (rd.security || 0) >= 70 ? 'ok' : (rd.security || 0) >= 40 ? 'warn' : 'bad'}">${rd.assessed === false ? 'не оценено' : (rd.security ?? '—') + '%'}</span></td>
    <td class="num">${u ? hrs(u.active_hours) : '—'}</td>
-   <td class="num">${usageMoney(u)}</td>
-   <td class="num">${e.remaining_usd ? money(e.remaining_usd) : '—'}</td>
+   <td class="num">${usageTok(u)}</td>
+   <td class="num">${e.remaining_tokens ? `<span title="эквивалент: ${esc(money(e.remaining_usd))}">~${tok(e.remaining_tokens)}</span>` : '—'}</td>
    <td class="num">${q.spec?.score ?? '—'}</td>
    <td class="num">${q.engineering?.score ?? '—'}</td>
    <td class="num">${g.commits != null ? (g.project_commits ?? g.commits) : '<span style="color:var(--bad)">нет git</span>'}</td>
@@ -252,7 +274,7 @@ document.getElementById('cards').innerHTML = order.map(k => {
       <td>${esc(b.title)}${b.why ? `<div style="color:var(--ink3);font-size:12px;margin-top:3px">${esc(b.why)}</div>` : ''}</td>
       <td><span class="size ${b.size}">${b.size}</span></td>
       <td><span class="chip ${b.blocked ? 'bad' : b.status === 'done' ? 'ok' : 'idle'}">${esc(b.status || '—')}</span>${b.days ? `<div style="color:var(--ink3);font-size:11.5px;margin-top:3px">${esc(b.days)}</div>` : ''}</td>
-      <td class="num">${tok(b.est_tokens)}</td><td class="num">${usageMoney({usd:b.est_usd, cost_complete:e.cost_complete})}</td></tr>`).join('') +
+      <td class="num">${tok(b.est_tokens)}</td><td class="num" style="color:var(--ink3)">${usageMoney({usd:b.est_usd, cost_complete:e.cost_complete})}</td></tr>`).join('') +
     `</tbody></table><div style="margin-top:9px;font-size:12.5px;color:var(--ink3)">
       Итого по бэклогу: <b style="color:var(--ink)">${tok(e.remaining_tokens)} токенов · ${usageMoney({usd:e.remaining_usd, cost_complete:e.cost_complete})}</b>.
       Оценка по ${esc(e.rate_basis)} — ${nf(e.tokens_per_commit)} токенов (${money(e.usd_per_commit)}) на коммит.</div>`
@@ -279,7 +301,7 @@ document.getElementById('cards').innerHTML = order.map(k => {
     <span class="tag">${esc(p.tagline)}</span>
     <span class="chip">${esc(p.goal || '')}</span>
     <span class="chip ${rd.assessed === false ? 'idle' : rd.functional >= 70 ? 'ok' : rd.functional >= 40 ? 'warn' : 'bad'}">${rd.assessed === false ? 'готовность не оценена' : (rd.functional ?? '—') + '% готово'}</span>
-    ${u ? `<span class="chip">${usageMoney(u)} · ${hrs(u.active_hours)}</span>` : ''}
+    ${u ? `<span class="chip">${usageTok(u)} токенов · ${hrs(u.active_hours)}</span>` : ''}
   </summary><div class="body">
 
   <div class="prow"><button class="btn prefresh" data-k="${esc(k)}"
@@ -336,8 +358,8 @@ document.getElementById('cards').innerHTML = order.map(k => {
     <dt>Гигиена</dt><dd>${r.hygiene ? Object.entries({gitignore:'.gitignore',readme:'README',license:'LICENSE',ci:'CI',docker:'Docker',lockfile:'lock-файл',env_example:'.env.example',claude_md:'CLAUDE.md'}).map(([f, l]) => `<span class="chip ${r.hygiene[f] ? 'ok' : 'idle'}" style="margin:0 3px 3px 0">${l}${r.hygiene[f] ? '' : ' нет'}</span>`).join('') : '—'}</dd>
     ${u ? `<dt>Время</dt><dd>${hrs(u.active_hours)} активной работы, ${u.calendar_days} дней, ${u.sessions} сессий, ${hrs(u.hours_per_day)} в день</dd>
     <dt>Токены</dt><dd class="mono">вход ${nf(u.input)} · выход ${nf(u.output)} · запись кеша ${nf(u.cache_write)} · чтение кеша ${nf(u.cache_read)} · размышление ${nf(u.thinking)}</dd>
-    <dt>Модели</dt><dd class="mono">${Object.entries(u.by_model).filter(([m]) => !m.startsWith('<')).map(([m, v]) => `${esc(m)} — ${nf(v.requests)} запр., ${usageMoney(v)}`).join(' · ')}</dd>
-    <dt>По месяцам</dt><dd class="mono">${Object.entries(u.by_month).map(([m, v]) => `${esc(m)}: ${usageMoney(v)}`).join(' · ')}</dd>` : ''}
+    <dt>Модели</dt><dd class="mono">${Object.entries(u.by_model).filter(([m]) => !m.startsWith('<')).map(([m, v]) => `${esc(m)} — ${nf(v.requests)} запр., ${usageTok(v)} ток.`).join(' · ')}</dd>
+    <dt>По месяцам</dt><dd class="mono">${Object.entries(u.by_month).map(([m, v]) => `${esc(m)}: ${usageTok(v)} ток.`).join(' · ')}</dd>` : ''}
   </dl></div>
 
   ${(c.items || []).length ? `<div class="block"><h3>Конкуренты</h3>
@@ -465,7 +487,7 @@ document.getElementById('foot').innerHTML =
     try {
       const r = await fetch('/api/refresh', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
+        headers: ttOwnerHeaders(),
         body: JSON.stringify({mode: m, source: selectedSource()}),
       });
       const j = await r.json();
@@ -501,7 +523,7 @@ document.getElementById('cards').addEventListener('click', async e => {
   try {
     const r = await fetch('/api/refresh', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-TaskTreker': '1'},
+      headers: ttOwnerHeaders(),
       body: JSON.stringify({mode: 'project', project: k, source: selectedSource()}),
     });
     const j = await r.json();

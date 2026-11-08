@@ -13,9 +13,18 @@ from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 import complexity as cx
 import taskstate as ts
+import sprints
+import flow_policy as fp
+import owner_auth as oa
+import release_policy as rp
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = 'https://developers.openai.com/api/docs/guides/model-selection'
+def provider_name(agent):
+    """Имя исполнителя для заметок: внешние ИИ из PROVIDERS, локальный исполнитель пилота — свой."""
+    if agent in PROVIDERS: return PROVIDERS[agent]['name']
+    return 'MiMo (локально)' if agent=='local_mimo' else str(agent)
+
 PROVIDERS = {
     'codex': dict(name='GPT / Codex', short='GPT', client='Codex CLI, ChatGPT Desktop, расширение IDE',
                   source=SOURCE, verified='2026-10-19'),
@@ -116,6 +125,11 @@ REVIEW_VERDICTS = {'approve': 'Принято', 'changes': 'Нужна дора�
 MAX_SESSIONS = 4   # окон ИИ, которые сервер досок держит открытыми одновременно
 SESSIONS_PER_AI = 2   # и не больше стольких на каждый ИИ (А7)
 WIP_ANALYSIS = 6   # задач проекта в анализе одновременно; пока лимит занят, PO новые идеи не разбирает (А2)
+# Эстафета (TT-91): контекст сессии роли перерос потолок — свежая сессия с точки остановки. Каждый ход
+# заново читает весь контекст, поэтому сессия на 150 тыс. токенов платит за каждый шаг вдесятеро больше
+# свежей (старт ~15 тыс.). 0 — эстафета выключена.
+CONTEXT_CEILING = 90_000
+MAX_RELAYS = 4     # эстафет на запуск — дальше сессия работает как есть: значит, этап не дробится
 # Режим согласия владельца: step — окна и вопросы на каждом шаге; full — одно согласие на всё:
 # сессии без окон, без вопросов, релиз в main без отдельного «да». В удалённый репозиторий — никогда.
 AUTONOMY = ('step', 'full')
@@ -129,11 +143,16 @@ AUTONOMY_RULE = ('ПОЛНАЯ АВТОНОМИЯ: владелец заране
 def autonomous(s=None):
     return settings(s)['autonomy']=='full'
 
+def _balance_defaults():
+    import provider_balance as pb, adaptive_pipeline as ap, copy
+    return copy.deepcopy(dict(pb.DEFAULTS, **ap.DEFAULTS, learning=dict(enabled=True, pilot_projects=[])))
+
 def settings(s=None):
     return dict(dict(default_executor=DEFAULT_EXECUTOR, lease_minutes=LEASE_MINUTES,
                      reviewer='same', auto_merge=True, auto_launch_review=True, auto_pipeline=True, roles={},
                      max_sessions=MAX_SESSIONS, autonomy='step', failover=True,
-                     sessions_per_ai={p: SESSIONS_PER_AI for p in PROVIDERS}, wip_analysis=WIP_ANALYSIS),
+                     sessions_per_ai={p: SESSIONS_PER_AI for p in PROVIDERS}, wip_analysis=WIP_ANALYSIS,
+                     context_ceiling=CONTEXT_CEILING, **fp.DEFAULTS, **_balance_defaults()),
                 **(s or state()).get('settings', {}))
 
 def model_entry(model):
@@ -141,6 +160,9 @@ def model_entry(model):
 
 def provider_of(model):
     entry = model_entry(model)
+    if not entry:
+        import local_mimo
+        entry = local_mimo.model_entry(model)      # локальный исполнитель пилота (LEARN-02)
     if not entry: raise ValueError('Модель отсутствует в каталоге: ' + str(model))
     return entry['provider']
 
@@ -271,6 +293,11 @@ def snapshot():
             ref = key + '/' + original['id']
             t = ts.merge_task(original, s['tasks'].get(ref)); t.update(project=key, ref=ref)
             if t.get('status') == 'in-progress': t['status'] = 'in_progress'   # прежнее написание из Obsidian
+            # Ручная правка: критерии строкой, а не списком. Доска ждёт список — паспорт падал на .map (A11-06).
+            for f in ('acceptance', 'depends_on'):
+                if isinstance(t.get(f), str):
+                    t[f] = [x.strip() for x in (t[f].splitlines() if f == 'acceptance' else t[f].replace(';', ',').split(','))
+                            if x.strip()]
             t['complexity'] = cx.assess(t)
             try: t['route'] = recommendation(t, default=conf['default_executor'])
             except ValueError as e:
@@ -301,12 +328,16 @@ def snapshot():
     cilast = {}
     for r in ci.runs(limit=ci.KEEP_RUNS):
         if r.get('ref'): cilast.setdefault(r['ref'], {})[r['scope']] = {k: r.get(k) for k in ('id', 'status', 'branch', 'sha', 'finished', 'note')}
+    import release_bundle as rb
     for t in tasks:
-        if t.get('pipeline'): t['ci'] = cilast.get(t['ref']) or {}
+        if t.get('pipeline'):
+            t['ci'] = cilast.get(t['ref']) or {}
+            # Состояние доказательств выпуска — источник и дата, STALE и NOT_RUN не красятся зелёным (07: A11-07).
+            t['evidence_state'] = rb.evidence_state(t['pipeline'], (t['ci'].get('test') or {}).get('sha'))
     roots=[{k:r.get(k) for k in ('id','title','project')} for r in read('memory/index.json',{}).get('records',[])
            if r.get('kind')=='запрос' and r.get('status')=='активна']
     import pipeline as P
-    return dict(pipeline=P.spec_for_board(), teamlead=s.get('teamlead',[])[-80:], active_projects=s.get('active_projects',[]),
+    return dict(sprint=sprints.view(s, tasks), flow=fp.snapshot(s, tasks, now()), pipeline=P.spec_for_board(), teamlead=s.get('teamlead',[])[-80:], active_projects=s.get('active_projects',[]),
                 provider_limits={a:v for a,v in (s.get('provider_limits') or {}).items() if limited(s, a)},
                 problems=(s.get('problems') or [])[-200:], notifications=notifications(s, tasks),
                 projects={k:dict(workspace(k,p), next_id=next_id(p)) for k,p in projects.items()},
@@ -701,9 +732,13 @@ def start_plan(project, agents, sessions, tasks, runs, at):
     limit=auto if sessions in (None,0) else min(int(sessions), len(cands))
     cap=-(-limit//len(agents)) if limit else 0
     load={a:0 for a in agents}; count={a:0 for a in agents}; picks=[]
+    sprint_state=state()                  # только предпросмотр; применение под locked()
     for c in cands:
         if len(picks)>=limit: break
         t=c['task']
+        hold=sprints.reason(sprint_state, t['ref'], tasks)
+        if hold:
+            skipped.append(dict(ref=t['ref'], title=t['title'], why=hold)); continue
         if c['kind']=='task' and (scope_conflict(t, tasks, runs, at) or any(t.get('scope') and p['scope'] and scopes_overlap(t['scope'], p['scope']) for p in picks)):
             skipped.append(dict(ref=t['ref'], title=t['title'], why='область пересекается с задачей в работе или в пакете')); continue
         pinned=t.get('executor') if c['kind']=='task' else None
@@ -717,7 +752,7 @@ def start_plan(project, agents, sessions, tasks, runs, at):
         agent=free[0] if c['kind']=='role' else min(free, key=lambda a:(count[a], load[a], agents.index(a)))
         if c['kind']=='role':
             import orchestra
-            route=orchestra.role_route(t, c['run']['role'], agent)
+            route=orchestra.run_route(t, c['run'], agent)
             pick=dict(kind='role', run=c['run']['id'], role=c['run']['role'], stage=c['run'].get('stage'))
         else:
             try: packet(t['ref'], agent=agent)   # негодный паспорт не должен ронять весь пакет
@@ -725,6 +760,7 @@ def start_plan(project, agents, sessions, tasks, runs, at):
                 skipped.append(dict(ref=t['ref'], title=t['title'], why='паспорт: %s' % e)); continue
             route=recommendation(t, agent=agent); pick=dict(kind='task')
         load[agent]+=SIZE_POINTS.get(t.get('size'),3); count[agent]+=1
+        sprints.admit(sprint_state, t['ref'], tasks)
         picks.append(dict(pick, ref=t['ref'], title=t['title'], size=t.get('size'), priority=t.get('priority'), agent=agent,
                           model=route['model'], effort=route['effort'], waiting=waiting[t['id']], scope=t.get('scope') or []))
     picked={p['ref'] for p in picks}
@@ -792,6 +828,41 @@ def write_patches(s, patches):
     d=read('projects.json',{})
     if ts.commit(d, s.setdefault('tasks',{}), patches): save('projects.json',d)
 
+def _learning_start(run, t, p):
+    """Запуск разработчика (§5 п.2): конфигурация модели, ревизия ТЗ, хеш паспорта, выданные карточки.
+    Только ссылки и хеши; сбой учёта не мешает взять работу (§15.5)."""
+    try:
+        import learning_events as le, learning_knowledge as lk
+        cards=p.get('knowledge') or []
+        run['learning']=dict(model_config_id=(p.get('route') or {}).get('model_config_id') or '%s:%s' % (run.get('agent'), run.get('model')),
+                             spec_revision=le.spec_revision(t), context_digest=le.digest({k:v for k,v in p.items() if k!='knowledge'}),
+                             knowledge_refs=[dict(id=c['id'], version=c.get('version')) for c in cards])
+        if cards: lk.note_use(run['id'], t['ref'], cards)
+    except Exception:
+        pass
+
+def input_hash(p):
+    """Отпечаток входного паспорта: канонический JSON, sha256. Одинаковый вход — одинаковый отпечаток."""
+    import hashlib
+    return 'sha256:'+hashlib.sha256(json.dumps(p, ensure_ascii=False, sort_keys=True, default=str, separators=(',',':')).encode('utf-8')).hexdigest()
+
+
+def replay(s, ref, run_id):
+    """Воспроизведение запуска (07: A1-07): сохранённый вход, его отпечаток и проверка, след решений по запуску."""
+    run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
+    if not run: raise ValueError('Запуск не найден')
+    p=run.get('packet') or {}
+    stored=run.get('input_hash')
+    t=next((x for x in snapshot()['tasks'] if x['ref']==ref),{})
+    pipe=t.get('pipeline') or {}
+    trace=[e for e in pipe.get('history') or [] if e.get('run')==run_id]
+    return dict(ref=ref, run=run_id, role=run.get('role'), agent=run.get('agent'), model=run.get('model'),
+                identity=run.get('identity'), route=p.get('route'), input=p, input_hash=stored,
+                input_intact=None if not stored else stored==input_hash(p), status=run.get('status'),
+                claimed_at=run.get('claimed_at'), finished_at=run.get('finished_at'), trace=trace,
+                journal=[e for e in pipe.get('journal') or [] if run_id in (e.get('text') or '')][-20:])
+
+
 def start_run(s, t, run, req, at):
     """Общее для claim и take: проверка ИИ, модели, областей; метка занятости."""
     model=req.get('model'); worker=req.get('worker')
@@ -803,6 +874,7 @@ def start_run(s, t, run, req, at):
     if t.get('executor') and t['executor']!=agent and not run.get('role') and not run.get('failover'):
         raise ValueError('Задача назначена ИИ %s; ИИ %s её не берёт' % (t['executor'], agent))
     extra_patch={}
+    sprints.admit(s, t['ref'], snapshot()['tasks'])
     if run.get('role'):
         import orchestra
         pipe=orchestra.materialize(s, t)
@@ -819,18 +891,22 @@ def start_run(s, t, run, req, at):
     minutes=settings(s)['lease_minutes']
     until=(at+timedelta(minutes=minutes)).isoformat()
     run.update(status='running',worker=worker,model=model,agent=agent,packet=p,phase=p['phase'],
-               claimed_at=at.isoformat(),heartbeat_at=at.isoformat(),lease_until=until)
+               claimed_at=at.isoformat(),heartbeat_at=at.isoformat(),lease_until=until,
+               input_hash=input_hash(p))   # отпечаток входа: по нему op=replay доказывает, на чём работал запуск (07: A1-07)
+    if run.get('role')=='developer':
+        _learning_start(run, t, p)
+    provider_succeeded(s, agent, at)
     # Доработка — факт для метрик: изменение кода по итогам проверки, а не первая реализация.
     if not run.get('role') and p['phase'] not in ('review','assess'):
         rework='autocheck' if (t.get('auto_check') or {}).get('ok') is False else 'review' if (t.get('review') or {}).get('verdict')=='changes' else None
         if rework: run['rework']=rework
     if run.get('role'):
         import pipeline as P
-        return dict(extra_patch, status='in_progress', status_note='%s: %s (%s)' % (P.ROLES[run['role']]['title'], PROVIDERS[agent]['name'], worker),
+        return dict(extra_patch, status='in_progress', status_note='%s: %s (%s)' % (P.ROLES[run['role']]['title'], provider_name(agent), worker),
                     claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until, role=run['role']))
     note={'review':'Идёт ревью', 'assess':'Идёт оценка сложности'}.get(p['phase'],
           'Доработка' if (t.get('auto_check') or {}).get('ok') is False or (t.get('review') or {}).get('verdict')=='changes' else None)
-    return dict(status='review' if p['phase']=='review' else 'in_progress', status_note=note and '%s: %s (%s)' % (note, PROVIDERS[agent]['name'], worker),
+    return dict(status='review' if p['phase']=='review' else 'in_progress', status_note=note and '%s: %s (%s)' % (note, provider_name(agent), worker),
                 claimed_by=dict(agent=agent, worker=worker, run=run['id'], model=model, lease_until=until))
 
 def new_run(s, ref, p, at):
@@ -844,7 +920,7 @@ def worker_id(run, agent):
 
 def launch_prompt(t, run, route, project, worker=None, worktree=None):
     """Задание для ИИ: первая реплика сессии, открытой с доски, или текст для вставки в чат."""
-    ai=PROVIDERS[route['provider']]['name']; ref=t['ref']; ws=workspace(t['project'], project)
+    ai=provider_name(route['provider']); ref=t['ref']; ws=workspace(t['project'], project)
     folder=(worktree or {}).get('path') or ws['active_copy'] or ws['path'] or 'не указана'
     lines=['Задача TaskTreker %s «%s» запущена для тебя (%s).' % (ref, t['title'], ai),
            'Рабочая папка: %s.' % folder]
@@ -864,6 +940,7 @@ def launch_prompt(t, run, route, project, worker=None, worktree=None):
                             else 'tt_work op=review с verdict (approve, spec_change или changes), criteria по каждому критерию и conclusion. Код не меняй.' if run.get('phase')=='review'
                             else 'Если работа идёт дольше 40 минут — tt_work op=heartbeat. По окончании tt_work op=finish с результатами проверок и расходом токенов.'))
     if worker: lines.append('Твой worker во всех вызовах: %s.' % worker)
+    lines.append(sprints.RULE + ' Состав: tt_work op=sprint.')
     lines.append(LIMIT_RULE % (ref, run['id'], worker or '<id этой сессии>'))
     if autonomous(): lines.append(AUTONOMY_RULE)
     if (run.get('failover') or {}).get('handover'): lines.append(run['failover']['handover'])
@@ -904,6 +981,38 @@ def mark_launched(ref, run_id, info):
         save('workflow.json',s)
         return run
 
+
+def reserve_sprint(ref):
+    """До открытия процесса: атомарно занять место, общее для всех диспетчеров."""
+    with locked():
+        s=state(); tasks=snapshot()['tasks']
+        if not any(t['ref']==ref for t in tasks): raise ValueError('Задача не найдена')
+        sprints.admit(s, ref, tasks)
+        save('workflow.json',s)
+
+
+def confirm_main(s, t):
+    """Старый поток: проверяем ветку задачи в main, а не строку evidence/status."""
+    import subprocess
+    if t.get('pipeline'):
+        raise ValueError('В конвейере main подтверждает DoD этапа deploy_main')
+    if t.get('status')!='done': raise ValueError('Сначала завершите проверку задачи')
+    wt=task_branch(s,t['ref'])
+    if not wt or not wt.get('path') or not wt.get('branch'):
+        raise ValueError('Нет ветки исполнения: доведите задачу через конвейер до main')
+    import pipeline
+    project=read('projects.json',{})['projects'][t['project']]
+    main=pipeline.branches(wt['path'],project)['main']
+    def git(*args):
+        return subprocess.run(['git',*args],cwd=wt['path'],capture_output=True,text=True,timeout=15)
+    tip=git('rev-parse','--verify','refs/heads/'+wt['branch'])
+    target=git('rev-parse','--verify','refs/heads/'+main)
+    if tip.returncode or target.returncode or git('merge-base','--is-ancestor',tip.stdout.strip(),target.stdout.strip()).returncode:
+        raise ValueError('Ветка задачи ещё не влита в '+main)
+    receipt=dict(branch=wt['branch'], commit=tip.stdout.strip(), main=main, main_commit=target.stdout.strip(), at=now().isoformat())
+    s.setdefault('main_receipts',{})[t['ref']]=receipt
+    return receipt
+
 def pause_patch(s, t, run, event, at, by, checkpoint=None):
     """Пауза запуска по исчерпанию лимита токенов: метка и запуск остаются за исполнителем
     до возобновления, аренда продлена до него — задачу никто не перехватит."""
@@ -930,6 +1039,35 @@ def pause_patch(s, t, run, event, at, by, checkpoint=None):
         patch['pipeline']=pipe
     return patch
 
+def relays(run):
+    return len([p for p in (run.get('pauses') or []) + [run.get('paused') or {}] if p.get('relay')])
+
+def relay_patch(s, t, run, at, by, checkpoint):
+    """Эстафета (TT-91): пауза с возобновлением сразу и без сессии — сервер откроет новую сессию роли
+    (не --resume) с точкой остановки. Запуск и метка остаются за исполнителем."""
+    run['paused']=dict(reason='context', relay=True, relay_no=relays(run)+1, by=by, at=at.isoformat(),
+                       resume_at=at.isoformat(timespec='seconds'), checkpoint=(checkpoint or '')[:3000], session=None,
+                       old_session=(run.get('launch') or {}).get('session'))
+    patch=dict(status_note='↻ Эстафета: контекст сессии перерос потолок — свежая сессия с точки остановки')
+    if t.get('pipeline'):
+        import orchestra, copy
+        pipe=copy.deepcopy(t['pipeline'])
+        orchestra.journal(s, pipe, t['ref'], 'relay', '%s: эстафета №%d (%s) — свежая сессия; точка остановки: %s' % (
+            run.get('role') or run['id'], run['paused']['relay_no'], 'агент' if by=='agent' else 'сервер по журналу сессии',
+            (checkpoint or '')[:200]), run.get('role'), run.get('stage'))
+        patch['pipeline']=pipe
+    return patch
+
+def relay(ref, run_id, checkpoint, by='server'):
+    """Эстафета по решению сервера: сессия закончилась, а её контекст выше потолка — продолжать её дороже,
+    чем начать свежую. Возвращает паузу или None (не тот запуск, уже на паузе, эстафеты исчерпаны)."""
+    with locked():
+        s=state(); at=now()
+        run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status'] in ('queued','running')),None)
+        if not run or run.get('paused') or relays(run)>=MAX_RELAYS: return None
+        write_patches(s, {ref: relay_patch(s, task_for(ref), run, at, by, checkpoint)})
+        save('workflow.json',s); return run['paused']
+
 def note_limit(s, agent, until, at, kind='', ref=None):
     """У ИИ исчерпан лимит токенов до until: новые запуски и передачи его обходят."""
     lim=s.setdefault('provider_limits',{})
@@ -941,6 +1079,47 @@ def limited(s, agent, at=None):
     lim=((s if s is not None else state()).get('provider_limits') or {}).get(agent)
     until=parse_time(lim['until']) if lim else None
     return bool(until and until > (at or now()))
+
+
+def provider_succeeded(s, agent, observed_at):
+    """Подтверждённая работа снимает только предшествующий ей отказ провайдера."""
+    # Запись отказа не удаляется сразу (FR-016 п.5): лимит считается прошедшим, провайдер —
+    # восстанавливающимся (degraded), пока не наберётся 2 успеха с разрывом ≥60 с и ≥180 с после
+    # сброса. Подтверждённое восстановление снимает запись в provider_balance.sync.
+    entry = s.get('provider_limits', {}).get(agent)
+    failed_at = parse_time(entry.get('at')) if entry else None
+    if not entry or not failed_at or observed_at <= failed_at or observed_at > now():
+        return False
+    stamp = observed_at.isoformat()
+    if stamp in (entry.get('oks') or []):
+        return False                       # повторный callback того же успеха
+    entry['oks'] = (list(entry.get('oks') or []) + [stamp])[-5:]
+    until = parse_time(entry.get('until'))
+    if until and until > observed_at:
+        entry.update(until=stamp, cleared='успех после отказа: блокировка была устаревшей')
+    s.setdefault('provider_recoveries', {}).setdefault(agent, dict(at=stamp, reason='успешная работа ИИ'))
+    return True
+
+
+def provider_sync(cli=None):
+    """Режим провайдеров (FR-016): записать смену режима и снять подтверждённые восстановления."""
+    import provider_balance as pb
+    with locked():
+        s = state()
+        before = ((s.get('provider_modes') or [{}])[-1].get('mode'), json.dumps(s.get('provider_limits') or {}, sort_keys=True))
+        pb.sync(s, now(), cli)
+        if ((s.get('provider_modes') or [{}])[-1].get('mode'), json.dumps(s.get('provider_limits') or {}, sort_keys=True)) != before:
+            save('workflow.json', s)
+        return s['provider_modes'][-1]['mode']
+
+
+def mark_provider_available(agent, observed_at):
+    with locked():
+        s = state()
+        changed = provider_succeeded(s, agent, observed_at)
+        if changed:
+            save('workflow.json', s)
+        return changed
 
 def cli_ok(agent):
     try:
@@ -961,22 +1140,23 @@ def failover(s, t, run, at):
     и сложность. Нет свободного ИИ или передача выключена — None (запуск ждёт сброса лимита)."""
     if not settings(s).get('failover', True) or run['status'] not in ('queued','running'): return None
     src=run.get('agent') or (run.get('launch') or {}).get('agent')
-    if run.get('role'):
-        import orchestra, copy
-        order=orchestra.role_order(s, t, run['role'])
-    else:
-        order=list(PROVIDERS)
-    to=next((a for a in order if a!=src and not limited(s, a, at) and cli_ok(a)), None)
+    if src=='local_mimo': return None      # пилот LEARN-02: разработчик local_mimo не передаётся GPT/Claude (REQ-DEV-02/03)
+    import orchestra, copy, provider_balance as pb
+    # Повтор того же события (TC-49): запуск уже передан — второго нового запуска нет.
+    if any((r.get('failover') or {}).get('run')==run['id'] and r['status'] in ('queued','running') for r in s['runs']): return None
+    dec=pb.choose(s, t, run.get('role'), at, exclude=(src,), cli=cli_ok)
+    to=dec['selected'] if dec['selected'] in dec['eligible'] else None
     if not to: return None
     text=handover_text(src, run)
     run['pauses']=(run.get('pauses') or [])[-9:]+([dict(run.pop('paused'), handed_to=to)] if run.get('paused') else [])
     run.update(status='cancelled', finished_at=at.isoformat(), evidence='Передано %s: %s' % (PROVIDERS[to]['name'], text))
     info=dict(from_agent=src, run=run['id'], handover=text, at=at.isoformat())
     if run.get('role'):
-        route=orchestra.role_route(t, run['role'], to)
-        new=new_run(s, t['ref'], None, at)
+        route=orchestra.run_route(t, run, to)
+        new=new_run(s, t['ref'], None, at); dec['run_id']=new['id']
         new.update(role=run['role'], stage=run.get('stage'), gate=run.get('gate'), phase='role', agent=to, auto_launch=True,
                    packet=dict(route=route, phase='role'), failover=info)
+        if run.get('dual'): new['dual']=run['dual']             # второе ревью CRITICAL остаётся вторым мнением
         if run.get('problem'):
             new['problem']=run['problem']
             prob=orchestra.problem(s, run['problem'])
@@ -1002,18 +1182,53 @@ def failover(s, t, run, at):
             PROVIDERS[to]['name'], route['model'], route['effort'], PROVIDERS.get(src,{}).get('name',src)))
     return dict(run=new['id'], agent=to, model=route['model'], effort=route['effort'], patch=patch)
 
+def emergency_stop(s, at, origin, reason):
+    """Аварийная остановка: каждый открытый запуск — на паузу с точкой остановки, незакоммиченные
+    правки рабочей копии сохраняются коммитом WIP. Процессы завершает action после записи состояния.
+    Неоткрытые запуски не трогаются: при остановке их не откроет ни сервер, ни take/claim."""
+    import orchestra
+    tasks={t['ref']:t for t in snapshot()['tasks']}
+    out=[]; patches={}
+    who='владелец' if origin==oa.OWNER else 'агент'
+    for r in s['runs']:
+        if r.get('status') not in ('queued','running') or (r['status']=='queued' and not r.get('launched_at')): continue
+        t=tasks.get(r['ref']) or {}; launch=r.get('launch') or {}
+        wip=orchestra.autocommit(t.get('pipeline') or dict(worktree=launch.get('worktree')), r, 'WIP при аварийной остановке')
+        r['paused']=dict(reason='kill_switch', by=origin, at=at.isoformat(), resume_at=None, wip=wip,
+                         checkpoint=('Аварийная остановка (%s): %s. Правки сохранены %s.' % (
+                             who, reason, 'коммитом '+wip if wip else 'в рабочей копии (незакоммиченного не было)'))[:2000],
+                         session=(r.get('paused') or {}).get('session') or launch.get('session'), before=r.get('paused'))
+        if r['status']=='running': r['lease_until']=(at+timedelta(days=30)).isoformat()   # метку никто не перехватит
+        patches[r['ref']]=dict(status_note='⛔ Аварийная остановка: '+reason[:200])
+        out.append(dict(run=r['id'], ref=r['ref'], pid=launch.get('pid'), wip=wip))
+    write_patches(s, patches)
+    return out
+
 def failover_run(ref, run_id):
     """Сервер: после паузы по лимиту — передать задачу другому ИИ, если он свободен."""
     with locked():
         s=state(); at=now(); t=task_for(ref)
         run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref),None)
-        if not run: return None
+        if not run or not run.get('paused'): return None
+        reason = run['paused'].get('reason')
+        if reason != 'limit' and not (reason == 'context' and limited(s, run.get('agent'), at)): return None
+        pid=(run.get('launch') or {}).get('pid')
+        wip=None
+        if pid:
+            # TTU-009: один писатель на рабочую копию. Незакоммиченное прежнего ИИ — коммитом,
+            # его процесс закрывается после записи передачи.
+            import orchestra
+            wip=orchestra.autocommit(t.get('pipeline') or dict(worktree=(run.get('launch') or {}).get('worktree')), run, 'WIP перед передачей другому ИИ')
         out=failover(s, t, run, at)
         if not out: return None
+        if wip: out['wip']=wip
         write_patches(s, {ref: out.pop('patch')}); save('workflow.json',s)
-        return out
+    if pid:
+        import launcher
+        if launcher.alive(pid): launcher.terminate(pid)
+    return out
 
-def reroute_queued(ref, run_id):
+def reroute_queued(ref, run_id, unavailable=False):
     """Ждущий, ещё не открытый запуск закреплён за ИИ на лимите — сменить ИИ в самом запуске.
 
     Работы ещё не было, передавать нечего: ни нового запуска, ни отмены, ни заметки о передаче.
@@ -1023,18 +1238,16 @@ def reroute_queued(ref, run_id):
         run=next((r for r in s['runs'] if r['id']==run_id and r['ref']==ref and r['status']=='queued' and not r.get('launched_at')),None)
         if not run: return None
         src=run.get('agent')
-        if not limited(s, src, at): return src
+        if src=='local_mimo': return src      # без failover: ждёт свой runtime
+        if not unavailable and not limited(s, src, at): return src
         if not settings(s).get('failover', True): return None
-        if run.get('role'):
-            import orchestra
-            order=orchestra.role_order(s, t, run['role'])
-        else:
-            order=list(PROVIDERS)
-        to=next((a for a in order if a!=src and not limited(s, a, at) and cli_ok(a)), None)
+        import orchestra, provider_balance as pb
+        dec=pb.choose(s, t, run.get('role'), at, exclude=(src,), cli=cli_ok, run_id=run['id'])
+        to=dec['selected'] if dec['selected'] in dec['eligible'] else None
         if not to: return None
         patch={}
         if run.get('role'):
-            route=orchestra.role_route(t, run['role'], to)
+            route=orchestra.run_route(t, run, to)
             if t.get('pipeline') and run['role'] not in ('teamlead','resolver'):
                 import copy
                 pipe=copy.deepcopy(t['pipeline'])
@@ -1046,10 +1259,28 @@ def reroute_queued(ref, run_id):
             run['failover']=dict(from_agent=src, inplace=True, handover='')   # пропуск назначения задачи прежнему ИИ
         run['packet']=dict(run.get('packet') or {}, route=route)
         run['agent']=to
-        run['repins']=(run.get('repins') or [])[-9:]+[dict(at=at.isoformat(), from_agent=src, to=to, by='лимит токенов')]
+        run['repins']=(run.get('repins') or [])[-9:]+[dict(at=at.isoformat(), from_agent=src, to=to,
+            by='CLI недоступен' if unavailable else 'лимит токенов')]
+        run.pop('launch_error', None)
+        run.pop('launch_error_at', None)
         if patch: write_patches(s, {ref: patch})
         save('workflow.json',s)
         return to
+
+def environment_requests(s):
+    """Команды развёртывания окружений из projects.json, которые владелец ещё не одобрил (или они изменились)."""
+    import ci
+    out=[]
+    for key,p in (read('projects.json',{}).get('projects') or {}).items():
+        for env,d in ((ci.config(p).get('deploy') or {}).items()):
+            if not isinstance(d,dict) or not d.get('cmd'): continue
+            ok,why=rp.environment_ok(dict(s, policy={}), key, env, d)
+            if not ok:
+                fp=rp.env_fingerprint(d)
+                out.append(dict(id='e:%s/%s:%s' % (key,env,fp), kind='environment', ref=None, title='Окружение %s · %s' % (key,env),
+                                text='%s. Команда: %s%s' % (why, ' '.join(map(str,d['cmd']))[:300], ('; проверка: '+' '.join(map(str,d['health']))[:200]) if d.get('health') else ''),
+                                env_key=rp.env_key(key,env), fingerprint=fp, at=None))
+    return out
 
 def notifications(s, tasks):
     """Колокольчик: что ждёт именно владельца. Вопросы Решалы, релизы в пошаговом режиме, сбои запуска."""
@@ -1059,12 +1290,39 @@ def notifications(s, tasks):
             out.append(dict(id='q:'+p['id'], kind='question', ref=p['ref'], title=p.get('title') or byref.get(p['ref'],{}).get('title',''),
                             text=p.get('question'), why=p.get('why_owner'), options=[o.get('title') for o in p.get('options') or []],
                             problem=p['id'], at=p.get('decided_at') or p['at']))
-    if not autonomous(s):
-        for t in tasks:
-            pipe=t.get('pipeline') or {}
-            if pipe.get('stage')=='deploy_main' and (pipe.get('gates') or {}).get('release',{}).get('decision')=='approve' and not (pipe.get('approvals') or {}).get('release'):
-                out.append(dict(id='r:'+t['ref'], kind='release', ref=t['ref'], title=t['title'],
-                                text='Ворота тимлида «тест → main» пройдены — нужен ваш «да» на релиз в main', at=pipe['gates']['release'].get('at')))
+    k=rp.killed(s)
+    if k:
+        out.append(dict(id='k:'+(k.get('at') or ''), kind='kill_switch', ref=None, title='Аварийная остановка',
+                        text=rp.kill_reason(s), at=k.get('at')))
+    grant,why=rp.active_grant(s, '*', 'main', now())
+    if autonomous(s) and not grant:
+        out.append(dict(id='g:grant', kind='grant', ref=None, title='Полная автономия без гранта',
+                        text='Релизы в main ждут вашего «да»: %s. Выключите и включите полную автономию заново.' % why,
+                        at=(settings(s).get('autonomy_changed') or {}).get('at')))
+    import operation_ids as oi
+    for op in oi.pending(s):
+        out.append(dict(id='o:'+op['id'], kind='reconcile', ref=op.get('ref'), title='Прерванная операция '+(op.get('check') or ''),
+                        text='%s: процесс прервался во время действия, результат по Git не проверить. Проверьте сами: повторить или признать выполненной.' % op['id'],
+                        operation=op['id'], at=op.get('at')))
+    out.extend(environment_requests(s))
+    at=now()
+    for ref,b in ((s.get('delivery_sprints') or {}).get('blocked') or {}).items():
+        due=parse_time(b.get('recheck_at'))
+        if due and due<=at:     # FR-014 п.5: блокировка не прячется — срок перепроверки прошёл
+            out.append(dict(id='fb:%s:%s' % (ref, b.get('recheck_at')), kind='flow_block', ref=ref, title=byref.get(ref,{}).get('title',''),
+                            text='Внешняя блокировка с %s: %s. Ответственный: %s. Срок перепроверки прошёл — слот задачи по-прежнему занят.'
+                                 % ((b.get('since') or '')[:10], b.get('reason'), b.get('responsible')), at=b.get('recheck_at')))
+    for t in tasks:
+        pipe=t.get('pipeline') or {}
+        # Ждёт «да», пока нет подписанного одобрения: неподписанная (ручная или старая) запись не считается.
+        if pipe.get('stage')=='deploy_main' and (pipe.get('gates') or {}).get('release',{}).get('decision')=='approve'                 and not oa.verify((pipe.get('approvals') or {}).get('release')):
+            out.append(dict(id='r:'+t['ref'], kind='release', ref=t['ref'], title=t['title'],
+                            text='Ворота тимлида «тест → main» пройдены — нужен ваш «да» на релиз в main', at=pipe['gates']['release'].get('at')))
+        op_=pipe.get('oracle_pending')
+        if op_:
+            out.append(dict(id='q:%s:%s' % (t['ref'], op_.get('at')), kind='oracle', ref=t['ref'], title=t['title'],
+                            text=op_.get('detail') or 'Разработчик изменил эталон приёмки', at=op_.get('at'),
+                            why='эталон приёмки задаёт, что считать готовым; агент, который его меняет, проверяет сам себя'))
     for r in s.get('runs') or []:
         b=r.get('budget_alert')
         if b and r.get('status') in ('queued','running'):
@@ -1103,8 +1361,11 @@ def mark_paused(ref, run_id, event):
 
 def resume_due(at=None):
     at=at or now()
-    return [r for r in state()['runs'] if r.get('status') in ('queued','running') and r.get('paused')
-            and (parse_time(r['paused'].get('resume_at')) or at) <= at]
+    s = state()
+    if rp.killed(s): return []          # аварийная остановка: ничего не продолжаем
+    return [r for r in s['runs'] if r.get('status') in ('queued','running') and r.get('paused')
+            and ((parse_time(r['paused'].get('resume_at')) or at) <= at
+                 or (r['paused'].get('reason') == 'limit' and not limited(s, r.get('agent'), at)))]
 
 def mark_resumed(ref, run_id, info, by='server'):
     """Сессия продолжена после паузы: пауза уходит в историю, аренда — обычная."""
@@ -1114,7 +1375,8 @@ def mark_resumed(ref, run_id, info, by='server'):
         if not run: return None
         done=dict(run.pop('paused'), resumed_at=at.isoformat(), resumed_by=by, resumed_session=bool((info or {}).get('resumed')))
         run['pauses']=(run.get('pauses') or [])[-9:]+[done]
-        patch=dict(status_note='Возобновлено после лимита токенов: %s' % (run.get('role') or run.get('phase') or 'исполнение'))
+        patch=dict(status_note='%s: %s' % ('Эстафета — свежая сессия' if done.get('relay') else 'Возобновлено после лимита токенов',
+                                           run.get('role') or run.get('phase') or 'исполнение'))
         if run['status']=='running':
             until=(at+timedelta(minutes=settings(s)['lease_minutes'])).isoformat()
             run.update(lease_until=until, heartbeat_at=at.isoformat())
@@ -1125,8 +1387,9 @@ def mark_resumed(ref, run_id, info, by='server'):
         if t.get('pipeline'):
             import orchestra, copy
             pipe=copy.deepcopy(t['pipeline'])
-            orchestra.journal(s, pipe, ref, 'resumed', '%s: работа возобновлена после лимита токенов (%s)' % (
-                run.get('role') or run['id'], 'та же сессия' if (info or {}).get('resumed') else 'новая сессия' if info else by),
+            orchestra.journal(s, pipe, ref, 'resumed', '%s: работа возобновлена %s (%s)' % (
+                run.get('role') or run['id'], 'эстафетой' if done.get('relay') else 'после лимита токенов',
+                'та же сессия' if (info or {}).get('resumed') else 'новая сессия' if info else by),
                 run.get('role'), run.get('stage'))
             patch['pipeline']=pipe
         write_patches(s, {ref: patch}); save('workflow.json',s)
@@ -1141,7 +1404,9 @@ LIMIT_RULE=('Лимит токенов: если пришло предупреж
 def resume_prompt(t, run):
     """Первая реплика после паузы: та же сессия продолжает, новая — получает точку остановки."""
     pz=run.get('paused') or {}; worker=run.get('worker') or worker_id(run, run.get('agent') or 'claude')
-    lines=['Лимит токенов восстановлен — продолжай задачу TaskTreker %s с места остановки.' % t['ref']]
+    lines=['Эстафета: прежняя сессия этой роли переросла потолок контекста, это новая сессия с пустым контекстом. '
+           'Продолжай задачу TaskTreker %s с точки остановки; читай только нужное — по указателям паспорта.' % t['ref']
+           if pz.get('relay') else 'Лимит токенов восстановлен — продолжай задачу TaskTreker %s с места остановки.' % t['ref']]
     if pz.get('checkpoint'): lines.append('Точка остановки: %s' % pz['checkpoint'])
     if run['status']=='running':
         lines.append('Запуск %s уже твой (worker %s): claim не нужен. Сначала tt_work op=heartbeat ref=%s run=%s worker=%s, '
@@ -1186,7 +1451,12 @@ def autocheck_run(ref, run_id):
     project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
     ws=workspace(t['project'],project); repo=ws['active_copy'] or ws['path']
     base=wt.get('base') or autocheck._git(['rev-parse','--abbrev-ref','HEAD'],repo).stdout.strip()
-    result=autocheck.run_checks(repo, wt['path'], wt['branch'], base, t.get('scope'), project.get('verify'))
+    verify=project.get('verify')
+    if not verify:                         # SEC-003: без verify — шаг тестов CI проекта (ci или автоопределение)
+        import ci
+        step=next((st for st in ci.config(dict(project, path=wt['path'])).get('steps') or [] if st.get('kind','test')=='test'), None)
+        verify=step and [ci._subst(a, dict(repo=wt['path'], branch=wt['branch'])) for a in step.get('cmd') or []]
+    result=autocheck.run_checks(repo, wt['path'], wt['branch'], base, t.get('scope'), verify, verify_na=project.get('verify_na'))
     result['run']=run_id
     with locked():
         s=state(); at=now()
@@ -1299,10 +1569,94 @@ def expire(s, ref, at, by):
                      evidence='Аренда истекла без heartbeat; задачу перехватил '+by)
             return r
 
-def action(req):
+OWNER_ONLY = ('Это решение владельца: оно принимается только на доске TaskTreker, открытой ссылкой владельца '
+              '(py tools/pm.py owner-link в своём терминале)')
+# Остановка разрешена при аварийной остановке: она только сужает действия или не начинает новых.
+STOP_ALLOWED = {'flow_block','flow_unblock','reconcile','pause','cancel','fail','stop_all','resume_all','stop_project','settings','status','plan','update','focus','confirm_main'}
+
+def needs_owner(req):
+    """Решения владельца (TT3-014, TTU-018): политика, релиз, ответы, массовые действия."""
+    op=req.get('op')
+    if op=='learn':
+        import learn
+        return req.get('action') in learn.OWNER_ACTIONS
+    if op=='security': return req.get('action')=='triage'
+    if op in ('approve_release','approve_oracle','answer','resume_all','reconcile','release_slot','flow_exception'): return True
+    if op=='settings': return not req.get('preview')
+    if op in ('to_idea','start'): return not req.get('dry_run', True)
+    return False
+
+READ_OPS = {'adaptive','balance','flags','flow','sprint','list','models','queue','packet','doc','prompt','route','next','replay'}
+
+def action(req, origin=None):
+    """Запрос с operation_id идемпотентен (TT3-017): повтор возвращает прежний ответ и ничего
+    не выполняет второй раз; другой запрос под тем же id и одновременный второй — отказ."""
+    if isinstance(req, dict) and (origin or oa.AGENT)!=oa.OWNER and needs_owner(req):
+        import sec_audit                     # попытка агента сделать действие владельца — в журнал с цепочкой (A2-08)
+        sec_audit.record('owner_only_denied', 'op=%s action=%s changes=%s' % (req.get('op'), req.get('action'), sorted((req.get('changes') or {}).keys())),
+                         run=req.get('run'), agent=req.get('agent') or req.get('worker'), op=req.get('op'), ref=req.get('ref'))
+        raise ValueError(OWNER_ONLY)
+    if not isinstance(req, dict) or 'operation_id' not in req or req.get('op','list') in READ_OPS:
+        return _action(req, origin)
+    import operation_ids as oi
+    req=dict(req); op_id=req.pop('operation_id')
+    if (origin or oa.AGENT)!=oa.OWNER and needs_owner(req): raise ValueError(OWNER_ONLY)
+    key, cached = oi.claim_request(op_id, req, origin or oa.AGENT)
+    if cached is not None:
+        return dict(cached, replay=True, operation_id=op_id)
+    try:
+        out=_action(req, origin)
+    except BaseException:
+        oi.release_request(key); raise
+    oi.done_request(key, out)
+    return out
+
+def _action(req, origin=None):
+    """Единая точка изменения оперативного слоя. origin — кто просит: oa.OWNER только у доски
+    с токеном владельца (serve.py); CLI, MCP и любой вызов без origin — агент."""
+    origin=origin or oa.AGENT
+    if origin not in oa.ORIGINS: raise ValueError('Неизвестный источник запроса')
+    if not isinstance(req, dict): raise ValueError('Запрос — объект')
+    if origin!=oa.OWNER and needs_owner(req): raise ValueError(OWNER_ONLY)
     op=req.get('op','list')
     agent=req.get('agent') or None
     if agent is not None: check_executor(agent)
+    if op=='sprint':
+        with locked():
+            s=state(); tasks=snapshot()['tasks']
+            sprints.sync(s,tasks)
+            save('workflow.json',s)
+            return sprints.view(s,tasks,project=req.get('project') or None)
+    if op=='learn':
+        # Механизм развития агента (LEARN-01…09): чтение, синхронизация, причины, карточки, решения.
+        import learn
+        return learn.dispatch(req, origin or oa.AGENT)
+    if op=='security':
+        # Сканирование и триаж ИБ (SEC-012…014): снимок, находки, скан; снять находку — только владелец.
+        import security_triage
+        return security_triage.dispatch(req, origin or oa.AGENT)
+    if op=='adaptive':
+        # Адаптивные маршруты (FR-001): сводка по задачам конвейера или маршрут одной задачи (ref).
+        import adaptive_pipeline as ap, risk_policy as rpol
+        snap=snapshot(); conf=settings()
+        if req.get('ref'):
+            t=next((x for x in snap['tasks'] if x['ref']==req['ref']), None)
+            if not t: raise ValueError('Задача не найдена')
+            proj=read('projects.json',{}).get('projects',{}).get(t['project'],{})
+            cls=rpol.classify(t, tests=ap.tests_available(proj))
+            return dict(ref=t['ref'], now=ap.compile_plan(t, cls, None, (t.get('pipeline') or {}).get('needs')),
+                        stored=ap.route(t.get('pipeline')), adaptive_mode=ap.conf(conf)['adaptive_mode'])
+        return ap.summary([t for t in snap['tasks'] if t.get('pipeline')], conf)
+    if op=='balance':
+        # Баланс Claude/Codex (FR-015/016): режим, здоровье, доли принятой работы 7/30 дней, решения.
+        import provider_balance as pb
+        return pb.report(state(), pb.backlog(), now(), cli_ok)
+    if op=='flags':
+        import flags as ff
+        return dict(flags=ff.view(settings()), rule='Флаги по умолчанию выключены; меняет владелец (op=settings changes.flags); нереализованный не включается')
+    if op=='flow':
+        # flow_snapshot (FR-014 п.7): слоты, стадии, блокировки, причины запрета, shadow-отличия.
+        return fp.snapshot(state(), snapshot()['tasks'], now(), project=req.get('project') or None)
     if op=='list':
         snap=snapshot(); tasks=[t for t in snap['tasks'] if not req.get('project') or t['project']==req['project']]
         try: offset=max(0,int(req.get('offset') or 0)); limit=max(1,min(100,int(req.get('limit') or 20)))
@@ -1320,13 +1674,16 @@ def action(req):
                                 known_tokens=sum(known),usage_complete=len(known)==len(runs)))
         return dict(models=MODELS,providers=PROVIDERS,lineup=LINEUP,efforts=EFFORTS,policy=POLICY,settings=settings(),measurements=metrics)
     if op=='queue':
-        snap=snapshot(); byref={t['ref']:t for t in snap['tasks']}; at=now(); out=[]
-        for r in active(state()['runs']):
+        snap=snapshot(); byref={t['ref']:t for t in snap['tasks']}; at=now(); out=[]; s=state()
+        for r in active(s['runs']):
             t=byref.get(r['ref'],{})
             if req.get('project') and r['ref'].split('/')[0]!=req['project']: continue
             if agent and t.get('executor') not in (None,'',agent): continue
-            out.append(dict(r, executor=t.get('executor') or '', stale=r['status']=='running' and not lease_alive(r, at)))
+            out.append(dict(r, executor=t.get('executor') or '', sprint_hold=sprints.reason(s,r['ref'],byref),
+                            stale=r['status']=='running' and not lease_alive(r, at)))
         return out[:10]
+    if op=='replay':
+        return replay(state(), task_for(req.get('ref',''))['ref'], req.get('run'))
     if op=='packet':
         t=task_for(req.get('ref',''))
         role_run=next((r for r in state()['runs'] if r['id']==req.get('run') and r['ref']==t['ref'] and r.get('role')=='resolver'),None)
@@ -1360,22 +1717,28 @@ def action(req):
         if not isinstance(draft,dict): raise ValueError('route: нужен task с size, risk, work_type')
         keys=('size','risk','work_type','model_plan','task_type','title','why','acceptance','scope','depends_on','assessment',*TYPE_FIELDS)
         draft={k:draft.get(k) for k in keys if draft.get(k) not in (None,'',[])}
-        return dict(model_plan=model_plan(draft), efforts=EFFORTS, complexity=cx.assess(draft))
+        import adaptive_pipeline as ap, risk_policy as rpol
+        return dict(model_plan=model_plan(draft), efforts=EFFORTS, complexity=cx.assess(draft),
+                    adaptive=ap.compile_plan(draft, rpol.classify(draft), None))
     if op=='next':
         snap=snapshot(); at=now(); s=state(); out=[]
         for t in snap['tasks']:
             if req.get('project') and t['project']!=req['project']: continue
             if t['queued_run']: continue   # уже ждёт исполнителя: видна в queue
             if not ready(t, agent): continue
+            if sprints.reason(s,t['ref'],snap['tasks']): continue
             route=recommendation(t, agent=agent, default=snap['settings']['default_executor'])
             if review_required(t, route, s['runs']) or scope_conflict(t, snap['tasks'], s['runs'], at, req.get('worker')): continue
             out.append(dict(t, route=route))
-            if len(out)==5: break
+            sprints.admit(s,t['ref'],snap['tasks'])    # резерв только в локальном предпросмотре
+            if len(out)==4: break
         return out
     extra={}
     with locked():
         s=state(); at=now()
-        if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea','resolve','answer'):
+        if rp.killed(s) and op not in STOP_ALLOWED and not (op=='split' and req.get('dry_run', True)):
+            raise ValueError(rp.kill_reason(s))
+        if op in ('idea','handoff','return','escalate','gate','approve_release','approve_oracle','to_idea','resolve','answer'):
             import orchestra
             if op=='idea':
                 extra=orchestra.op_idea(s, req, at)
@@ -1401,12 +1764,59 @@ def action(req):
             s['focus']=list(dict.fromkeys(keys))
         elif op=='settings':
             changes=req.get('changes',{})
-            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent','failover','sessions_per_ai','wip_analysis'}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, sessions_per_ai, wip_analysis, autonomy')
+            if not isinstance(changes,dict) or set(changes)-{'default_executor','lease_minutes','reviewer','auto_merge','auto_launch_review','auto_pipeline','roles','max_sessions','autonomy','consent','failover','sessions_per_ai','wip_analysis','context_ceiling','environments','flags','dual_review','dual_analysis',*fp.DEFAULTS,*_balance_defaults()}: raise ValueError('Настройки: default_executor, lease_minutes, reviewer, auto_merge, auto_launch_review, auto_pipeline, roles, max_sessions, sessions_per_ai, wip_analysis, context_ceiling, autonomy, environments, flags, '+', '.join([*fp.DEFAULTS, *_balance_defaults()]))
+            if 'learning' in changes:
+                v=changes['learning']; projs=read('projects.json',{}).get('projects',{})
+                if not isinstance(v,dict) or set(v)-{'enabled','pilot_projects'} or ('enabled' in v and type(v['enabled']) is not bool) \
+                        or not isinstance(v.get('pilot_projects',[]),list) or set(v.get('pilot_projects',[]))-set(projs):
+                    raise ValueError('learning: {"enabled": bool (сбор опыта), "pilot_projects": [проекты, где разработчик — local_mimo]}')
+            if 'dual_review' in changes and changes['dual_review'] not in ('critical','off'):
+                raise ValueError('dual_review: critical (второе независимое ревью для задач CRITICAL, 07: A7-03) или off')
+            if 'dual_analysis' in changes and changes['dual_analysis'] not in ('critical','off'):
+                raise ValueError('dual_analysis: critical (второй независимый анализ другим ИИ для задач CRITICAL, 07: E2E-R05) или off')
+            if 'adaptive_mode' in changes and changes['adaptive_mode'] not in ('off','shadow','enforce'):
+                raise ValueError('adaptive_mode: off, shadow (маршрут считается, конвейер полный) или enforce (FR-001)')
+            if 'adaptive_fast_allow' in changes:
+                v=changes['adaptive_fast_allow']
+                if not isinstance(v,list) or set(v)-set(WORK_TYPES) or 'architecture' in v or 'research' in v:
+                    raise ValueError('adaptive_fast_allow: виды работы, которым разрешён FAST: docs, test, implementation')
+            if 'balance_mode' in changes and changes['balance_mode'] not in ('prefer','balanced'):
+                raise ValueError('balance_mode: prefer (порядок роли) или balanced (доли принятой работы, FR-015)')
+            if 'target_shares' in changes:
+                v=changes['target_shares']
+                if not isinstance(v,dict) or set(v)!=set(PROVIDERS) or any(type(x) not in (int,float) or not 0<=x<=1 for x in v.values()) or abs(sum(v.values())-1)>1e-6:
+                    raise ValueError('target_shares: {"claude": доля, "codex": доля}, от 0 до 1, сумма 1 (50/50, 60/40, только один ИИ)')
+                changes['target_shares']={k:float(x) for k,x in v.items()}
+            if 'affinity_bonus' in changes and (type(changes['affinity_bonus']) not in (int,float) or not 0<=changes['affinity_bonus']<=0.3):
+                raise ValueError('affinity_bonus: от 0 до 0.3 (вес предпочтения роли против долга доли)')
+            if 'role_affinity' in changes:
+                import pipeline as P
+                v=changes['role_affinity']
+                if not isinstance(v,dict) or any(r not in P.ROUTING or not isinstance(x,dict) or set(x)-{'eligible'}
+                                                 or not isinstance(x.get('eligible',[]),list) or not x.get('eligible') or set(x['eligible'])-set(PROVIDERS)
+                                                 for r,x in v.items()):
+                    raise ValueError('role_affinity: {роль: {"eligible": ["claude"|"codex", ...]}}')
+            if 'flags' in changes:
+                # Флаги TT3 (TT3-008): нереализованный не включается, связанный меняет свою настройку.
+                import flags as ff
+                expanded=ff.apply(changes.pop('flags'), settings(s))
+                if set(expanded)&set(changes)-{'flags'}: raise ValueError('flags и та же настройка в одном запросе — оставьте одно')
+                changes.update(expanded)
+            if 'flow_mode' in changes and changes['flow_mode'] not in fp.MODES: raise ValueError('flow_mode: batch (спринт до main) или rolling (слот на задачу, FR-014)')
+            for key,lo,hi in (('wip_global',1,20),('wip_per_project',1,10),('blocked_exception_limit',0,5)):
+                if key in changes and (type(changes[key])!=int or not lo<=changes[key]<=hi): raise ValueError('%s: от %d до %d' % (key,lo,hi))
+            if 'environments' in changes:
+                # Одобренные команды развёртывания: «проект/окружение» → отпечаток (null — отозвать).
+                v=changes['environments']
+                if not isinstance(v,dict) or any(not isinstance(k,str) or k.count('/')!=1 or not (x is None or (isinstance(x,str) and len(x)==16)) for k,x in v.items()):
+                    raise ValueError('environments: {"проект/окружение": отпечаток из 16 символов или null}')
+                merged={**(settings(s).get('environments') or {}), **v}
+                changes['environments']={k:x for k,x in merged.items() if x}
             if 'autonomy' in changes:
                 if changes['autonomy'] not in AUTONOMY: raise ValueError('autonomy: full (полная автономия) или step (пошаговое согласие)')
                 if changes['autonomy']=='full' and changes.pop('consent',None) is not True:
                     raise ValueError('Полная автономия включается только с явным согласием владельца (consent=true)')
-                changes['autonomy_changed']=dict(at=at.isoformat(), to=changes['autonomy'], by=req.get('by') or 'владелец')
+                changes['autonomy_changed']=dict(at=at.isoformat(), to=changes['autonomy'], by='владелец')
             changes.pop('consent',None)
             if 'max_sessions' in changes and (type(changes['max_sessions'])!=int or not 1<=changes['max_sessions']<=12): raise ValueError('max_sessions: от 1 до 12 одновременных сессий')
             if 'sessions_per_ai' in changes:
@@ -1416,17 +1826,63 @@ def action(req):
                 changes['sessions_per_ai']=dict(settings(s).get('sessions_per_ai') or {}, **v)
             if 'wip_analysis' in changes and (type(changes['wip_analysis'])!=int or not 1<=changes['wip_analysis']<=50):
                 raise ValueError('wip_analysis: от 1 до 50 задач в анализе на проект')
+            if 'context_ceiling' in changes and (type(changes['context_ceiling'])!=int or not (changes['context_ceiling']==0 or 40_000<=changes['context_ceiling']<=400_000)):
+                raise ValueError('context_ceiling: 0 (выключено) или от 40 000 до 400 000 токенов')
             if 'reviewer' in changes and changes['reviewer'] not in ('same','other',*PROVIDERS): raise ValueError('Ревьюер: same, other или ИИ')
             if 'roles' in changes:
                 import pipeline as P
                 if not isinstance(changes['roles'],dict) or any(r not in P.ROLES or a not in PROVIDERS for r,a in changes['roles'].items()):
                     raise ValueError('roles: {роль: claude|codex}')
                 changes['roles']=dict(settings(s).get('roles') or {}, **changes['roles'])
-            for key in ('auto_merge','auto_launch_review','auto_pipeline','failover'):
+            for key in ('auto_merge','auto_launch_review','auto_pipeline','failover','prefer_finish'):
                 if key in changes and type(changes[key])!=bool: raise ValueError(key+': true или false')
             if 'default_executor' in changes and changes['default_executor'] not in PROVIDERS: raise ValueError('Неизвестный ИИ по умолчанию')
             if 'lease_minutes' in changes and (type(changes['lease_minutes'])!=int or not 5<=changes['lease_minutes']<=480): raise ValueError('Аренда: от 5 до 480 минут')
+            diff=rp.preview(settings(s), {k:v for k,v in changes.items() if k!='autonomy_changed'})
+            if req.get('preview'):
+                return dict(ok=True, preview=diff, policy_version=rp.policy(s).get('version',0), applied=False)
             s.setdefault('settings',{}).update(changes)
+            if changes.get('autonomy')=='full':
+                # Согласие один раз на профиль: грант на локальный main, со сроком, без внешнего push.
+                rp.policy(s)['grant']=rp.issue_grant(at)
+            elif changes.get('autonomy')=='step':
+                rp.revoke_grant(s, at, 'владелец выключил полную автономию')
+            extra=dict(policy_version=rp.record(s, at, origin, diff), preview=diff)
+        elif op=='stop_all':
+            # Аварийная остановка (TT3-016). Включить может кто угодно: она только запрещает.
+            reason=(req.get('reason') or '').strip()
+            if len(reason)<5: raise ValueError('reason: почему останавливаем (не короче 5 символов)')
+            if rp.killed(s): raise ValueError(rp.kill_reason(s))
+            rp.policy(s)['kill_switch']=dict(on=True, at=at.isoformat(), by=origin, reason=reason[:300])
+            extra=dict(stopped=emergency_stop(s, at, origin, reason), kill_switch=rp.policy(s)['kill_switch'])
+            rp.record(s, at, origin, [dict(key='kill_switch', before=False, after=True)], 'kill_switch')
+        elif op=='reconcile':
+            import operation_ids as oi
+            extra=dict(operation=oi.resolve(s, req.get('operation') or '', req.get('decision'), at, origin))
+        elif op in ('release_slot','flow_exception','flow_block','flow_unblock'):
+            # Поток задач (FR-014): закрыть слот и исключение — только владелец; блокировку
+            # отмечает и исполнитель — она ничего не освобождает, только делает видимым.
+            ref=req.get('ref') or ''; tasks=snapshot()['tasks']
+            if not any(t['ref']==ref for t in tasks): raise ValueError('Задача не найдена: '+ref)
+            sprints.sync(s, tasks)
+            if op!='release_slot' and ref not in fp.open_refs(s, tasks) and op!='flow_exception':
+                raise ValueError('Задача %s не в потоке: слот не занят' % ref)
+            if op=='release_slot': extra=dict(slot=fp.release_slot(s, ref, req.get('reason'), tasks, at, origin))
+            elif op=='flow_exception':
+                extra=dict(exception=fp.add_exception(s, ref, req.get('kind'), req.get('reason'), req.get('expires_at'), at, origin))
+            elif op=='flow_block':
+                extra=dict(blocked=fp.block(s, ref, req.get('reason'), req.get('responsible'), req.get('recheck_at'), at, origin))
+            else: extra=dict(unblocked=fp.unblock(s, ref, at, origin))
+        elif op=='resume_all':
+            if not rp.killed(s): raise ValueError('Аварийная остановка не включена')
+            k=rp.policy(s)['kill_switch']
+            rp.policy(s)['kill_switch']=dict(k, on=False, released_at=at.isoformat())
+            resumed=[]
+            for r in s['runs']:
+                if r.get('status') in ('queued','running') and (r.get('paused') or {}).get('reason')=='kill_switch':
+                    r['paused']['resume_at']=at.isoformat(timespec='seconds'); resumed.append(r['id'])
+            extra=dict(resumed=resumed)
+            rp.record(s, at, origin, [dict(key='kill_switch', before=True, after=False)], 'kill_switch')
         elif op=='start':
             project=req.get('project'); snap=snapshot()
             if project not in snap['projects']: raise ValueError('Неизвестный проект')
@@ -1447,6 +1903,7 @@ def action(req):
                     r['auto_launch']=True
             byref={t['ref']:t for t in snap['tasks']}
             for p in plan['picks']:
+                sprints.admit(s,p['ref'],snap['tasks'])
                 if p['kind']=='role':   # роль конвейера: ждущий запуск переходит к выбранному ИИ
                     run=next(r for r in s['runs'] if r['id']==p['run'])
                     run.update(agent=p['agent'], batch=batch); continue
@@ -1481,6 +1938,10 @@ def action(req):
         else:
             ref=req.get('ref',''); t=task_for(ref)
             patch={}
+            if op=='confirm_main':
+                receipt=confirm_main(s,t)
+                sprints.sync(s,snapshot()['tasks']); save('workflow.json',s)
+                return dict(ok=True, main=receipt)
             if t.get('pipeline') and op in ('enqueue','take','complete','autocheck','repin','finish','fail') :
                 raise ValueError('Задача идёт по конвейеру: работу сдают через op=handoff с выполненным DoD, возвращают через op=return')
             if t.get('pipeline') and op=='status' and req.get('status') not in ('blocked','cancelled','queued'):
@@ -1502,6 +1963,7 @@ def action(req):
                 p=packet(ref, agent=agent or t.get('executor') or None)
                 if t.get('status') in ('done','cancelled','in_progress','review','blocked'): raise ValueError('Статус не допускает запуск')
                 if any(r['ref']==ref and r['status'] in ('queued','running') for r in s['runs']): raise ValueError('Задача уже запущена или ожидает исполнителя')
+                sprints.admit(s,ref,snapshot()['tasks'])
                 run=new_run(s, ref, p, at)
                 if agent: run['agent']=agent   # запуск с доски закреплён за выбранным ИИ
                 project=read('projects.json',{}).get('projects',{}).get(t['project'],{})
@@ -1545,6 +2007,9 @@ def action(req):
                 if target in ('blocked','cancelled') and not reason: raise ValueError('Укажите причину: она видна исполнителям и в истории')
                 if current=='done' and (target!='queued' or not reason): raise ValueError('Закрытую задачу можно только вернуть в «К выполнению» с причиной')
                 if len(reason)>1000: raise ValueError('Причина — до 1000 символов')
+                if target in ('in_progress','review'):
+                    sprints.admit(s,ref,snapshot()['tasks'])
+                if current=='done': s.get('main_receipts',{}).pop(ref,None)
                 for r in s['runs']:
                     if r['ref']!=ref or r['status'] not in ('queued','running'): continue
                     if r['status']=='running' and lease_alive(r, at) and target!='cancelled':
@@ -1572,25 +2037,35 @@ def action(req):
                         run['pauses']=(run.get('pauses') or [])[-9:]+[dict(run.pop('paused'), resumed_at=at.isoformat(), resumed_by='agent')]
                         patch['status_note']='Возобновлено после лимита токенов'
                     run.update(heartbeat_at=at.isoformat(), lease_until=until)
+                    provider_succeeded(s, run.get('agent'), at)
                     patch['claimed_by']=dict(t.get('claimed_by') or {}, agent=run.get('agent'), worker=run['worker'], run=run['id'], model=run.get('model'), lease_until=until)
                     patch['claimed_by'].pop('paused_until',None)
                 elif op=='pause':
                     if run['status']!='running': raise ValueError('Пауза — для выполняемого запуска')
                     if req.get('worker')!=run.get('worker'): raise ValueError('Ставит паузу принявший исполнитель')
                     if run.get('paused'): raise ValueError('Запуск уже на паузе до %s' % run['paused']['resume_at'])
-                    if req.get('reason','limit')!='limit': raise ValueError('reason: limit — пауза только по лимиту токенов')
+                    reason=req.get('reason') or 'limit'
+                    if reason not in ('limit','context'): raise ValueError('reason: limit — лимит токенов, context — потолок контекста (эстафета)')
                     cp=(req.get('checkpoint') or '').strip()
                     if len(cp)<20: raise ValueError('checkpoint: что сделано, что осталось и следующий шаг (не короче 20 символов)')
                     resets=req.get('resets_at')
                     if resets is not None and parse_time(str(resets).replace('Z','+00:00')) is None: raise ValueError('resets_at: время ISO 8601')
-                    if t.get('pipeline'):
-                        import orchestra
-                        orchestra.autocommit(t['pipeline'], run, 'WIP перед паузой по лимиту: '+cp)
-                    patch.update(pause_patch(s, t, run, dict(resets_at=resets, session=(run.get('launch') or {}).get('session')), at, 'agent', cp))
-                    extra=dict(paused=run['paused'])
-                    moved=failover(s, dict(t, **{k:v for k,v in patch.items() if k=='pipeline'}), run, at)
-                    if moved:
-                        patch.update(moved.pop('patch')); extra=dict(handed_to=moved)
+                    if reason=='context':
+                        if relays(run)>=MAX_RELAYS: raise ValueError('Эстафет в запуске уже %d — продолжай в этой сессии и сдай этап' % MAX_RELAYS)
+                        if t.get('pipeline'):
+                            import orchestra
+                            orchestra.autocommit(t['pipeline'], run, 'WIP перед эстафетой: '+cp)
+                        patch.update(relay_patch(s, t, run, at, 'agent', cp))
+                        extra=dict(relay=run['paused'], next='Остановись: сервер откроет свежую сессию этой роли с твоей точкой остановки.')
+                    else:
+                        if t.get('pipeline'):
+                            import orchestra
+                            orchestra.autocommit(t['pipeline'], run, 'WIP перед паузой по лимиту: '+cp)
+                        patch.update(pause_patch(s, t, run, dict(resets_at=resets, session=(run.get('launch') or {}).get('session')), at, 'agent', cp))
+                        extra=dict(paused=run['paused'])
+                        moved=failover(s, dict(t, **{k:v for k,v in patch.items() if k=='pipeline'}), run, at)
+                        if moved:
+                            patch.update(moved.pop('patch')); extra=dict(handed_to=moved)
                 elif op=='review':
                     import autocheck
                     if run['status']!='running' or run.get('phase')!='review': raise ValueError('Заключение принимает только выполняемый запуск ревью')
@@ -1682,7 +2157,11 @@ def action(req):
             else: raise ValueError('Неизвестная операция')
             write_patches(s, {ref:patch} if patch else {})
         save('workflow.json',s)
-    if op in ('idea','handoff','return','escalate','gate','approve_release','to_idea','resolve','answer'):
+    if op=='stop_all':
+        import launcher
+        for x in extra['stopped']:          # состояние уже сохранено: процессы завершаются последними
+            x['terminated']=launcher.terminate(x.get('pid'))
+    if op in ('idea','handoff','return','escalate','gate','approve_release','approve_oracle','to_idea','resolve','answer'):
         if job: spawn_pipejob(*job)
         return dict(ok=True, **extra)
     spawn=extra.pop('_autocheck',None)
@@ -1718,7 +2197,7 @@ def main(args=None):
     if refusal:
         print(refusal); return 2
     parser=argparse.ArgumentParser(description='Доски: list/next/packet; изменения через request JSON')
-    parser.add_argument('op',choices=['list','next','packet','queue','models','request','worktree','autocheck','pipejob']); parser.add_argument('value',nargs='?')
+    parser.add_argument('op',choices=['list','next','packet','queue','models','sprint','confirm_main','request','worktree','autocheck','pipejob']); parser.add_argument('value',nargs='?')
     parser.add_argument('--run',help='запуск для autocheck и pipejob')
     parser.add_argument('--role'); parser.add_argument('--stage')
     parser.add_argument('--agent',choices=sorted(PROVIDERS),help='ИИ, для которого строится маршрут (next, packet, queue)')

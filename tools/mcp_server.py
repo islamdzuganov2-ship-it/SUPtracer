@@ -180,6 +180,26 @@ def _check_project(key, allow_portfolio=True):
     raise ToolError("Нет проекта «%s». Проекты: %s" % (key, ", ".join(sorted(P)) or "—"))
 
 
+def scope_project():
+    """Проект ролевой сессии конвейера (SEC-016): из TASKTREKER_MCP_PROJECT или политики чтения запуска.
+    Сессия вне роли не ограничена — это ассистент владельца."""
+    p = os.environ.get("TASKTREKER_MCP_PROJECT")
+    if not p and role_mode():
+        try:
+            p = (json.loads(os.environ.get("TASKTREKER_READ_POLICY") or "{}").get("ref") or "").split("/")[0]
+        except ValueError:
+            p = ""
+    return p or None
+
+
+def _own(project):
+    """Ролевой сессии — только свой проект. Отказ называет причину, а не молчит."""
+    scope = scope_project()
+    if scope and project and project != scope:
+        raise ToolError("Сессия роли работает с проектом «%s»: данные проекта «%s» ей недоступны (SEC-016)" % (scope, project))
+    return scope or project
+
+
 def t_context(a):
     P = _projects()
     focus = a.get("project")
@@ -191,6 +211,16 @@ def t_context(a):
 
 
 def t_recall(a):
+    scope = _own(a.get("project"))
+    if scope_project():
+        rec = mem.get((a["query"] or "").strip())
+        if rec and rec.get("project") != scope:
+            raise ToolError("Запись относится к проекту «%s»: сессии роли проекта «%s» недоступна (SEC-016)" % (rec.get("project"), scope))
+        if not rec:
+            hits = [h for h in mem.search(a["query"], project=scope, limit=int(a.get("limit") or 8)) if h["project"] == scope]
+            if not hits:
+                raise ToolError("Ничего не найдено по «%s» в проекте %s." % (a["query"], scope))
+            return "\n".join("[%s] %s · %s\n    %s" % (h["id"], h["kind"], h["title"], h["digest"][:150]) for h in hits)
     ok, text = mem.recall_text(a["query"], budget=int(a.get("budget") or 4000),
                                full=bool(a.get("full")), project=a.get("project"),
                                cmd="tt_recall с id")
@@ -200,9 +230,10 @@ def t_recall(a):
 
 
 def t_search(a):
-    hits = mem.search(a["query"], project=a.get("project"), limit=int(a.get("limit") or 12))
-    if a.get("project"):
-        hits = [h for h in hits if h["project"] == a["project"]]
+    project = _own(a.get("project"))          # сессия роли ищет только в своём проекте (SEC-016)
+    hits = mem.search(a["query"], project=project, limit=int(a.get("limit") or 12))
+    if project:
+        hits = [h for h in hits if h["project"] == project]
     if not hits:
         return "Ничего не найдено по «%s»." % a["query"]
     return "\n".join("[%s] %s · %s · %s%s\n    %s" % (
@@ -211,6 +242,7 @@ def t_search(a):
 
 
 def t_remember(a):
+    _own(a.get("project"))                                # сессия проекта пишет только в свой проект (SEC-016)
     project = _check_project(a["project"])
     kind = a.get("kind") or "заметка"
     if kind not in mem.KINDS:
@@ -272,9 +304,13 @@ def t_reject(a):
 
 
 def t_ingest(a):
-    path = a["path"]
-    if not os.path.exists(path):
-        raise ToolError("Нет файла или каталога: %s" % path)
+    import path_policy, workflow
+    try:                                   # SEC-008: корни, realpath, ссылки и UNC — до чтения
+        path = path_policy.check(a["path"], str(workflow.data_dir()), _projects())
+    except ValueError as e:
+        import sec_audit
+        sec_audit.record('path_denied', str(e)[:300], op='tt_ingest')
+        raise ToolError(str(e))
     if a.get("project"):
         _check_project(a["project"], allow_portfolio=False)
     reports, out = _captured(ingest.run, [path], a.get("project"), bool(a.get("dry_run")),
@@ -306,15 +342,15 @@ HANDLERS = {"tt_context": t_context, "tt_recall": t_recall, "tt_search": t_searc
             "tt_ingest": t_ingest, "tt_tree": t_tree, "tt_projects": t_projects}
 
 INSTRUCTIONS += "\n6. Начни с tt_work op=queue agent=<claude|codex> (свой ИИ): там явные запросы запуска с доски. До реализации разложи новый запрос через op=plan: root, критерии, размер, риск, зависимости, по возможности scope (пути правки). Затем next agent=<свой ИИ> → take (ref, model, worker): take атомарно ставит метку claimed_by. Задачу с живой меткой другого ИИ не бери и её scope не правь; работай в ветке из packet.coordination.branch. Пока работаешь дольше аренды — heartbeat (ref, run, worker). finish требует доказательств проверок. Каталог, линейки ИИ и измерения: op=models; распределение проекта между ИИ: op=split (dry_run по умолчанию)."
-INSTRUCTIONS += "\n7. Конвейер: идею владельца из разговора заводи tt_work op=idea (project, title, text, source=claude|codex). Задачи конвейера ведут роли: твоё задание называет роль и скилл tt-<роль>; паспорт — op=packet с run; сдать этап — op=handoff с items по каждому пункту DoD (status done|na, evidence); не принятая передача возвращает список failed. Вернуть назад — op=return, блокер — op=escalate, тимлид решает ворота op=gate. Обычные take/finish/complete к задачам конвейера не применяются. Документы ветки задачи читай разделами: op=doc (ref, path) — оглавление с размером разделов, op=doc (ref, path, section) — один раздел."
+INSTRUCTIONS += "\n7. Конвейер: идею владельца из разговора заводи tt_work op=idea (project, title, text, source=claude|codex). Задачи конвейера ведут роли: твоё задание называет роль и скилл tt-<роль>; паспорт — op=packet с run; сдать этап — op=handoff с items по каждому пункту DoD (status done|na, evidence); не принятая передача возвращает список failed. Вернуть назад — op=return, блокер — op=escalate, тимлид решает ворота op=gate. Обычные take/finish/complete к задачам конвейера не применяются. Документы ветки задачи читай разделами: op=doc (ref, path) — оглавление с размером разделов, op=doc (ref, path, section) — один раздел; целиком — op=doc full=true why=<зачем>, по бюджету запуска."
 INSTRUCTIONS += "\n8. Лимит токенов: при предупреждении о скором исчерпании лимита закоммить незавершённое в ветку задачи, вызови tt_work op=pause (ref, run, worker, checkpoint — что сделано, что осталось, следующий шаг; можно resets_at) и остановись. Сервер продолжит ту же сессию после сброса лимита (без известного времени — через 5 часов); после «продолжай» — heartbeat, packet и работа с точки остановки."
 INSTRUCTIONS += "\n9. Проблема или ограничение (нет доступа, противоречие, блокер, не получается) — не жди и не спрашивай владельца: tt_work op=escalate (ref, run, worker, reason, tried, need). Её разберёт агент «Решала»: найдёт пути решения или сам позовёт владельца."
 TOOLS.append({"name": "tt_work", "title": "Планирование и исполнение задач",
-    "description": "Доски и экономное исполнение несколькими ИИ (claude, codex): list, queue, models, next, packet — с agent для маршрута своего ИИ; plan (project, tasks), focus (projects), settings (changes: default_executor, lease_minutes), update (ref, changes; в т.ч. executor, scope), enqueue (ref), take (ref, model, worker) — атомарно взять задачу и поставить метку занятости, claim (ref, run, worker, model) — принять запуск с доски, heartbeat (ref, run, worker, minutes) — продлить аренду, finish/fail/cancel (ref, run, worker, evidence, tokens), split (project, agents, dry_run; при dry_run=false можно передать assign {задача: ИИ} — записывается именно показанное, связная группа уходит одному ИИ) — распределить задачи между ИИ. plan: project обязателен (папка и репозиторий для ИИ), id можно не указывать — присвоится следующий в серии; task_type: dev_by_spec (spec_ref), analysis_spec (question, inputs, deliverable), decomposition (directions из списка направлений), direction_task (direction, deliverable); вместо root можно передать new_root {title, text} — запрос создастся в памяти проекта. packet содержит workspace: путь, активная копия, репозиторий. Каждая задача несёт model_plan: модель и effort для claude и для codex, проработанные при plan; ручная строка — update changes.model_plan.<ИИ>={model, effort, reason}, null — вернуть автоматический выбор; route (task) — план для черновика без записи; enqueue (ref, agent) закрепляет запуск за выбранным ИИ и возвращает prompt; prompt (ref) — задание ждущего запуска. Если packet.phase = assess — не реализуй: оцени и пришли assess (ref, run, worker, assessment {complexity, uncertainty, breadth: 1…5, reasons}); сервер назначит модель и поставит запуск исполнения. После finish в отдельной ветке сервер сам запускает автопроверку (коммиты, область, verify проекта, слияние) и ставит запуск ревью: в фазе review не меняй код, пришли review (ref, run, worker, verdict approve|changes|spec_change, criteria [{ok, note}] по каждому критерию, conclusion, при spec_change spec {deviation, proposal}); approve и spec_change сливают ветку и закрывают задачу, spec_change ещё создаёт задачу на изменение ТЗ. autocheck (ref) — повторить автопроверку. status (ref, status, reason) — ручной перенос: queued, in_progress, review, blocked, cancelled; для blocked и cancelled нужна причина. complete (ref, evidence) закрывает вручную проверенную задачу без активного запуска; нужны все acceptance_done. Задачу с живой меткой claimed_by другого ИИ не брать.",
+    "description": "Доски и экономное исполнение несколькими ИИ (claude, codex): list, queue, models, next, packet — с agent для маршрута своего ИИ; plan (project, tasks), focus (projects), settings — решение владельца на доске, через MCP только просмотр (changes, preview=true); любой изменяющий запрос может нести operation_id — повтор вернёт прежний ответ и ничего не выполнит второй раз; stop_all (reason) — аварийная остановка: новые действия запрещены, сессии сохраняются и закрываются, снимает только владелец; learn (action) — механизм развития локального разработчика local_mimo: status|report|card (метрики M01–M11 с числителем и знаменателем), returns, inspect (ref), classify (event, cause, evidence: ci:/test:/defect:/repro: — подтверждение только по машинному доказательству), propose_knowledge, candidates, gate — рекомендация (обучения нет, решение — владелец), check_split, models; verify_knowledge, reject_knowledge, decision_status, register_model, activate_model, register_eval — только владелец; adaptive — адаптивные маршруты FAST/STANDARD/CRITICAL: сводка или маршрут задачи (ref), что пропустил бы FAST, где дифф поднял маршрут; balance — баланс Claude/Codex: режим balanced/mono/paused_all, здоровье, доли принятой работы 7/30 дней, решения provider_decision; flags — флаги TT3: все выключены по умолчанию, меняет владелец; flow — снимок потока задач (FR-014): слоты, стадии, блокировки, причины запрета нового старта, shadow-отличия режимов batch/rolling; flow_block (ref, reason, responsible, recheck_at) / flow_unblock (ref) — внешняя блокировка: видна, слот не освобождает; release_slot и flow_exception — решение владельца; update (ref, changes; в т.ч. executor, scope), enqueue (ref), take (ref, model, worker) — атомарно взять задачу и поставить метку занятости, claim (ref, run, worker, model) — принять запуск с доски, heartbeat (ref, run, worker, minutes) — продлить аренду, finish/fail/cancel (ref, run, worker, evidence, tokens), split (project, agents, dry_run; при dry_run=false можно передать assign {задача: ИИ} — записывается именно показанное, связная группа уходит одному ИИ) — распределить задачи между ИИ. plan: project обязателен (папка и репозиторий для ИИ), id можно не указывать — присвоится следующий в серии; task_type: dev_by_spec (spec_ref), analysis_spec (question, inputs, deliverable), decomposition (directions из списка направлений), direction_task (direction, deliverable); вместо root можно передать new_root {title, text} — запрос создастся в памяти проекта. packet содержит workspace: путь, активная копия, репозиторий. Каждая задача несёт model_plan: модель и effort для claude и для codex, проработанные при plan; ручная строка — update changes.model_plan.<ИИ>={model, effort, reason}, null — вернуть автоматический выбор; route (task) — план для черновика без записи; enqueue (ref, agent) закрепляет запуск за выбранным ИИ и возвращает prompt; prompt (ref) — задание ждущего запуска. Если packet.phase = assess — не реализуй: оцени и пришли assess (ref, run, worker, assessment {complexity, uncertainty, breadth: 1…5, reasons}); сервер назначит модель и поставит запуск исполнения. После finish в отдельной ветке сервер сам запускает автопроверку (коммиты, область, verify проекта, слияние) и ставит запуск ревью: в фазе review не меняй код, пришли review (ref, run, worker, verdict approve|changes|spec_change, criteria [{ok, note}] по каждому критерию, conclusion, при spec_change spec {deviation, proposal}); approve и spec_change сливают ветку и закрывают задачу, spec_change ещё создаёт задачу на изменение ТЗ. autocheck (ref) — повторить автопроверку. status (ref, status, reason) — ручной перенос: queued, in_progress, review, blocked, cancelled; для blocked и cancelled нужна причина. complete (ref, evidence) закрывает вручную проверенную задачу без активного запуска; нужны все acceptance_done. Задачу с живой меткой claimed_by другого ИИ не брать.",
     "inputSchema": _schema({"op": STR, "project": STR, "ref": STR, "run": STR,
         "worker": STR, "model": STR, "evidence": STR, "tokens": {"type":"integer"},
         "agent": {"type":"string", "enum":["claude","codex"]}, "minutes": {"type":"integer"},
-        "agents": {"type":"array", "items":STR}, "dry_run": {"type":"boolean"},
+        "agents": {"type":"array", "items":STR}, "dry_run": {"type":"boolean"}, "preview": {"type":"boolean"}, "operation_id": STR, "operation": STR, "responsible": STR, "recheck_at": STR, "expires_at": STR, "kind": STR,
         "assign": {"type":"object"},
         "task": {"type":"object"}, "assessment": {"type":"object"}, "status": STR, "reason": STR,
         "verdict": STR, "criteria": {"type":"array", "items":{"type":"object"}}, "conclusion": STR, "spec": {"type":"object"},
@@ -325,16 +361,31 @@ TOOLS.append({"name": "tt_work", "title": "Планирование и испо�
         "defects": {"type":"array", "items":{"type":"object"}}, "fixes": {"type":"object"},
         "tasks": {"type":"array", "items":{"type":"object"}},
         "projects": {"type":"array", "items":STR}, "changes":{"type":"object"},
-        "path": STR, "section": STR, "code": STR, "recipe": {"type":"object"}, "contract_group": STR,
-        "priority": STR, "offset": {"type":"integer"}, "limit": {"type":"integer"}}, ["op"]),
+        "path": STR, "section": STR, "code": STR, "full": {"type":"boolean"}, "why": STR, "recipe": {"type":"object"}, "contract_group": STR,
+        "priority": STR, "offset": {"type":"integer"}, "limit": {"type":"integer"},
+        # op=learn (LEARN-01…09): действие и его поля
+        "action": STR, "event": STR, "cause": STR, "id": STR, "by": STR, "since": STR, "until": STR, "work_type": STR,
+        "size": STR, "model_config_id": STR, "confirmed": {"type":"boolean"}, "corrective_action": STR, "description": STR,
+        "contributing": {"type":"array", "items":STR}, "preconditions": {"type":"object"}, "scope": {"type":"array", "items":STR},
+        "applicability": STR, "solution": STR, "not_when": STR, "commit": STR, "refs": {"type":"array", "items":STR},
+        "name": STR, "purpose": STR, "config": {"type":"object"}, "health": {"type":"boolean"}, "endpoint": STR, "context_limit": {"type":"integer"}, "runtime_version": STR,
+        "knowledge_applied": {"type":"array", "items":STR},
+        # договор сдачи (07: A1-03…A1-06, A7-01) и причина решения Решалы (AG-RES-04)
+        "schema_version": STR, "ac_matrix": {"type":"object"}, "reviewed_sha": STR, "comparison": {"type":"object"},
+        "assumptions": {"type":"array", "items":STR}, "questions": {"type":"array", "items":STR},
+        "conflicts": {"type":"array", "items":STR}, "unverified": {"type":"array", "items":STR},
+        "cause_kind": STR, "probe": STR}, ["op"]),
     "annotations": dict(WRITE, idempotentHint=False, title="Планирование и исполнение")})
 # Сессия роли конвейера (Л1): в списке только tt_work и tt_recall с короткими описаниями.
 # Полный список с инструкциями — ~5 тыс. токенов в начале каждого хода сессии роли, а ей нужен один инструмент.
 ROLE_WORK = ("Конвейер TaskTreker для роли. claim (ref, run, worker, model); packet (ref, run) — паспорт роли, запрашивай один раз; "
-             "doc (ref, path) — указатель документа: разделы, вес, коды требований; doc (ref, path, section|code) — один раздел; "
+             "doc (ref, path) — указатель документа: разделы, вес, коды требований; doc (ref, path, section|code) — один раздел; doc (ref, run, path, full=true, why) — целиком, с обоснованием; "
              "heartbeat; handoff (ref, run, worker, summary, items {id: {status: done|na, evidence}}); return (to_stage, defects); "
-             "escalate (reason, tried, need); pause (checkpoint); gate — тимлид; resolve — Решала. Аргументы — в задании и паспорте.")
-ROLE_INSTRUCTIONS = ("TaskTreker: ты в сессии роли конвейера. Работай через tt_work по заданию; документы читай указателем и разделами (op=doc), "
+             "escalate (reason, tried, need); pause (checkpoint; reason=context — эстафета: свежая сессия с точки остановки); gate — тимлид; resolve — Решала. Аргументы — в задании и паспорте.")
+INSTRUCTIONS += "\n10. Спринт у каждого проекта свой — максимум 4 задачи на всех агентов; задачи других проектов его не занимают. Новые задачи проекта ждут влития всего его состава в main; done, отмена, пауза и сброс токенов места не освобождают. op=sprint — состав и ожидание main. Для старого потока op=confirm_main (ref) проверяет Git; в конвейере main подтверждается DoD деплоя."
+ROLE_WORK += " op=sprint — состав общего спринта (до 4 задач); новые задачи только после main всего состава."
+ROLE_WORK += " op=replay (ref, run) — сохранённый вход запуска, его отпечаток input_hash и след решений."
+ROLE_INSTRUCTIONS = ("TaskTreker: спринт проекта максимум 4 задачи; новые — только после main всего состава проекта (op=sprint). Ты в сессии роли конвейера. Работай через tt_work по заданию; документы читай указателем и разделами (op=doc), "
                      "прочитанное не перечитывай; этап сдавай op=handoff.")
 
 
@@ -346,25 +397,34 @@ def listed_tools():
     if not role_mode():
         return TOOLS
     keep = {t["name"]: t for t in TOOLS if t["name"] in ("tt_work", "tt_recall")}
-    return [dict(keep["tt_work"], description=ROLE_WORK), keep["tt_recall"]]
+    work = keep["tt_work"]; schema = work["inputSchema"]
+    # Ролевой сессии поля разбора опыта (op=learn) не нужны: это аналитика владельца. Проверка входа — по полной схеме.
+    slim = dict(schema, properties={k: v for k, v in schema["properties"].items() if k not in LEARN_ONLY})
+    return [dict(work, description=ROLE_WORK, inputSchema=slim), keep["tt_recall"]]
+
+
+LEARN_ONLY = ("action", "event", "cause", "id", "by", "since", "until", "work_type", "size", "model_config_id", "confirmed",
+              "corrective_action", "description", "contributing", "preconditions", "scope", "applicability", "solution",
+              "not_when", "commit", "refs", "name", "purpose", "config", "health", "endpoint", "context_limit", "runtime_version")
 
 
 def instructions():
     return ROLE_INSTRUCTIONS if role_mode() else INSTRUCTIONS
 
 
-OWNER_SETTINGS = {'autonomy', 'consent', 'max_sessions', 'auto_merge', 'failover', 'roles', 'sessions_per_ai', 'wip_analysis'}
-
-
 def t_work(a):
-    """Решения владельца ИИ через MCP не принимает: согласие на автономию, лимит сессий,
-    автослияние, одобрение релиза, массовый перенос в «Идея» — только на доске."""
-    import workflow
-    op = a.get('op')
-    if op in ('approve_release', 'answer') or (op == 'to_idea' and a.get('dry_run') is False) or \
-            (op == 'settings' and OWNER_SETTINGS & set((a.get('changes') or {}))):
+    """Решения владельца ИИ через MCP не принимает: настройки и политика, одобрение релиза, ответы,
+    снятие аварийной остановки, массовые действия — только на доске. Решает само ядро
+    (workflow.needs_owner): MCP всегда источник «агент», список здесь не дублируется."""
+    import workflow, owner_auth as oa
+    scope = scope_project()
+    if scope:                              # SEC-016: роль не трогает задачи и проекты других проектов
+        _own(a.get("project"))
+        if a.get("ref"):
+            _own(str(a["ref"]).split("/")[0])
+    if workflow.needs_owner(a):
         raise ToolError('Это решение владельца: оно принимается только на доске TaskTreker')
-    return json.dumps(workflow.action(a), ensure_ascii=False)
+    return json.dumps(workflow.action(a, origin=oa.AGENT), ensure_ascii=False)
 HANDLERS['tt_work'] = t_work
 
 
@@ -394,6 +454,9 @@ def _validate(tool, args):
 
 def call_tool(name, args):
     tool = next(t for t in TOOLS if t["name"] == name)
+    if role_mode() and name not in {t["name"] for t in listed_tools()}:
+        # Неперечисленный инструмент не вызывается в обход списка ролевой сессии (SEC-016).
+        return {"content": [{"type": "text", "text": "Инструмент %s недоступен сессии роли" % name}], "isError": True}
     try:
         _validate(tool, args or {})
         text = HANDLERS[name](args or {})

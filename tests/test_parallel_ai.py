@@ -50,9 +50,9 @@ class ParallelAITests(DataCase):
 
     def test_default_executor_setting(self):
         self.plan(dict(id='AL-03'))
-        w.action(dict(op='settings',changes={'default_executor':'claude'}))
+        w.action(dict(op='settings',changes={'default_executor':'claude'}), origin='owner')
         self.assertEqual(w.task_for('alpha-api/AL-03')['route']['model'],'claude-haiku-5-5')
-        with self.assertRaises(ValueError): w.action(dict(op='settings',changes={'default_executor':'x'}))
+        with self.assertRaises(ValueError): w.action(dict(op='settings',changes={'default_executor':'x'}), origin='owner')
 
     def test_unassigned_task_shows_both_alternatives(self):
         self.plan(dict(id='AL-03'))

@@ -8,6 +8,11 @@ from base import DataCase
 
 
 class Memory(DataCase):
+    def test_boolean_frontmatter_title_does_not_break_index(self):
+        r = self.rec('да')
+        self.assertIsInstance(self.t.memory.read(self.t.memory.record_path(r['id']))['title'], str)
+        self.t.memory.build_index()
+
     def rec(self, title, body="Тело записи достаточной длины для дайджеста.", **kw):
         kw.setdefault("project", "alpha-api")
         kw.setdefault("kind", "решение")

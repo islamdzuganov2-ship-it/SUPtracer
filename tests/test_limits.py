@@ -19,21 +19,22 @@ def iso(dt):
 
 class LimitTests(DataCase):
     def setUp(self):
-        super().setUp(); self.projects()
+        DataCase.setUp(self); self.projects()   # общий с RelayTests
         (Path(self.data)/'memory').mkdir(exist_ok=True)
         w.save('memory/index.json', {'records': [{'id': 'request', 'project': 'alpha-api'}]})
         self.home = Path(self.tmp)/'home'
         self.env = mock.patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.home/'claude'), 'CODEX_HOME': str(self.home/'codex')})
         self.env.start()
+        serve._auto_attempts.clear()
         w.action(dict(op='plan', project='alpha-api', tasks=[dict(
             id='AL-03', title='Правка', why='Нужна', root='request', size='S', priority='🟡', risk='low',
             work_type='implementation', acceptance=['Тест проходит'], depends_on=[])]))
         self.ref = 'alpha-api/AL-03'
         # Пауза и возобновление проверяются без передачи другому ИИ; передача — в своих тестах ниже.
-        w.action(dict(op='settings', changes=dict(failover=False)))
+        w.action(dict(op='settings', changes=dict(failover=False)), origin='owner')
 
     def tearDown(self):
-        self.env.stop(); super().tearDown()
+        self.env.stop(); DataCase.tearDown(self)
 
     def claude_log(self, sid, rows):
         path = self.home/'claude'/'projects'/'C--work'/(sid + '.jsonl')
@@ -151,6 +152,124 @@ class LimitTests(DataCase):
         self.assertEqual(cmd[1:3], ['resume', 'cx']); self.assertIn('workspace-write', cmd)
         self.assertEqual(cmd[-1], 'p')
 
+    def test_successful_heartbeat_clears_provider_limit(self):
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='worker', model='claude-haiku-5-5'))
+        w.mark_paused(self.ref, 'RUN-1', dict(resets_at=None))
+        w.action(dict(op='heartbeat', ref=self.ref, run='RUN-1', worker='worker'))
+        self.assertFalse(w.limited(None, 'claude'))
+        self.assertNotIn('paused', w.state()['runs'][0])
+
+    def test_launch_alone_does_not_prove_provider_available(self):
+        self.launched_run()
+        w.mark_paused(self.ref, 'RUN-1', dict(resets_at=None))
+        w.mark_resumed(self.ref, 'RUN-1', dict(pid=9, resumed=True))
+        self.assertTrue(w.limited(None, 'claude'))
+
+    def test_older_success_does_not_clear_newer_limit(self):
+        at = w.now()
+        s = w.state()
+        w.note_limit(s, 'codex', at + timedelta(hours=1), at)
+        w.save('workflow.json', s)
+        self.assertFalse(w.mark_provider_available('codex', at - timedelta(seconds=1)))
+        self.assertFalse(w.mark_provider_available('codex', at + timedelta(hours=2)))
+        self.assertTrue(w.limited(None, 'codex'))
+
+    def test_success_log_clears_limit_and_resumes_before_fallback_deadline(self):
+        self.launched_run()
+        w.mark_paused(self.ref, 'RUN-1', dict(resets_at=None))
+        self.claude_log('sess-1', [dict(type='assistant', timestamp=iso(w.now()),
+            message=dict(usage=dict(output_tokens=10)))])
+        with mock.patch.object(launcher, 'launch', return_value=dict(pid=9, exe='claude.exe', session='sess-1', resumed=True)):
+            result = serve.limits_once()
+        self.assertEqual(result['resumed'], ['RUN-1'])
+        self.assertFalse(w.limited(None, 'claude'))
+
+    def test_paused_run_retries_alternate_when_it_becomes_available(self):
+        self.launched_run()
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
+        at = w.now()
+        s = w.state()
+        w.note_limit(s, 'codex', at + timedelta(minutes=1), at)
+        w.save('workflow.json', s)
+        w.mark_paused(self.ref, 'RUN-1', dict(resets_at=(at + timedelta(hours=1)).isoformat()))
+        with mock.patch.object(w, 'cli_ok', return_value=True):
+            self.assertEqual(serve.limits_once()['handed'], [])
+            with mock.patch.object(w, 'now', return_value=at + timedelta(minutes=3)):
+                result = serve.limits_once()
+                self.assertEqual(result['handed'][0]['agent'], 'codex')
+                self.assertEqual(serve.limits_once()['handed'], [])
+        self.assertEqual(len(w.state()['runs']), 2)
+        self.assertEqual(w.state()['runs'][0]['status'], 'cancelled')
+
+    def test_failover_does_not_cancel_concurrently_resumed_run(self):
+        self.launched_run()
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
+        w.mark_paused(self.ref, 'RUN-1', dict(resets_at=None))
+        w.mark_resumed(self.ref, 'RUN-1', dict(pid=9, resumed=True))
+        with mock.patch.object(w, 'cli_ok', return_value=True):
+            self.assertIsNone(w.failover_run(self.ref, 'RUN-1'))
+        self.assertEqual(len(w.state()['runs']), 1)
+
+    def test_missing_cli_reroutes_same_run_and_launches_next_ai(self):
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
+        w.action(dict(op='enqueue', ref=self.ref, agent='claude'))
+        s = w.state(); s['runs'][0]['auto_launch'] = True; w.save('workflow.json', s)
+        serve._auto_attempts.clear()
+        with mock.patch.object(w, 'cli_ok', side_effect=lambda agent: agent == 'codex'), \
+             mock.patch.object(serve, 'launch_session', side_effect=[launcher.CLIUnavailable('missing Claude'), {}]) as launch:
+            self.assertEqual(serve.dispatch_once(), [])
+            self.assertEqual(w.state()['runs'][0]['agent'], 'codex')
+            self.assertEqual(serve.dispatch_once(), ['RUN-1'])
+            self.assertEqual(launch.call_args.args[0]['agent'], 'codex')
+        self.assertEqual(len(w.state()['runs']), 1)
+
+    def test_launcher_classifies_missing_cli(self):
+        with mock.patch.object(launcher, 'find_cli', return_value=None):
+            with self.assertRaises(launcher.CLIUnavailable):
+                launcher.launch('claude', 'claude-haiku-5-5', 'medium', 'test', self.tmp)
+
+    def test_codex_success_evidence_ignores_old_work_and_later_errors(self):
+        run = self.launched_run('codex')
+        since = w.now()
+        path = self.home / 'codex-success.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        def append(at, error=None):
+            row = dict(type='event_msg', timestamp=iso(at), payload=dict(type='task_complete', error=error))
+            with path.open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(row) + '\n')
+        with mock.patch.object(limits, 'session_of', return_value=('session', path)):
+            append(since - timedelta(seconds=1))
+            self.assertIsNone(limits.success_at(run, since))
+            later = since + timedelta(seconds=1)
+            append(later)
+            self.assertEqual(limits.success_at(run, since), later)
+            append(later + timedelta(seconds=1), dict(codex_error_info='usage_limit_exceeded'))
+            self.assertIsNone(limits.success_at(run, since))
+
+    def test_missing_both_clis_does_not_loop_or_create_runs(self):
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
+        w.action(dict(op='enqueue', ref=self.ref, agent='claude'))
+        s = w.state(); s['runs'][0]['auto_launch'] = True; w.save('workflow.json', s)
+        serve._auto_attempts.clear()
+        with mock.patch.object(w, 'cli_ok', return_value=False), \
+             mock.patch.object(serve, 'launch_session', side_effect=launcher.CLIUnavailable('missing CLI')) as launch:
+            serve.dispatch_once(); serve.dispatch_once()
+            self.assertEqual(launch.call_count, 1)
+        self.assertEqual(w.state()['runs'][0]['agent'], 'claude')
+        self.assertEqual(len(w.state()['runs']), 1)
+
+    def test_approval_failure_is_not_rerouted(self):
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
+        w.action(dict(op='enqueue', ref=self.ref, agent='claude'))
+        s = w.state(); s['runs'][0]['auto_launch'] = True; w.save('workflow.json', s)
+        serve._auto_attempts.clear()
+        with mock.patch.object(serve, 'launch_session', side_effect=PermissionError('approval rejected')), \
+             mock.patch.object(w, 'reroute_queued') as reroute:
+            serve.dispatch_once()
+            reroute.assert_not_called()
+        self.assertEqual(w.state()['runs'][0]['agent'], 'claude')
+
     def test_limit_rule_in_prompts_and_skills(self):
         import skills
         import pipeline as P
@@ -163,7 +282,7 @@ class LimitTests(DataCase):
     # --- передача другому ИИ по лимиту (TT-79)
 
     def test_failover_hands_task_to_free_ai_with_its_route(self):
-        w.action(dict(op='settings', changes=dict(failover=True)))
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
         self.launched_run()
         w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
         with mock.patch.object(w, 'cli_ok', return_value=True):
@@ -188,7 +307,7 @@ class LimitTests(DataCase):
         self.assertEqual(w.task_for(self.ref)['claimed_by']['agent'], 'codex')
 
     def test_no_free_ai_means_waiting_for_reset(self):
-        w.action(dict(op='settings', changes=dict(failover=True)))
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
         self.launched_run()
         w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
         s = w.state(); w.note_limit(s, 'codex', datetime.now(timezone.utc) + timedelta(hours=2), datetime.now(timezone.utc)); w.save('workflow.json', s)
@@ -197,8 +316,20 @@ class LimitTests(DataCase):
         self.assertIn('paused', r)
         self.assertEqual(w.state()['runs'][0]['status'], 'running')
 
+    def test_context_relay_can_change_provider_if_source_is_limited(self):
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='worker', model='claude-haiku-5-5'))
+        w.action(dict(op='pause', reason='context', ref=self.ref, run='RUN-1', worker='worker',
+                      checkpoint='ТЗ сохранено, следующим шагом проверить контракт API'))
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
+        s = w.state(); w.note_limit(s, 'claude', w.now()+timedelta(hours=1), w.now()); w.save('workflow.json', s)
+        with mock.patch.object(w, 'cli_ok', return_value=True):
+            out = serve.limits_once()
+        self.assertEqual(out['handed'][0]['agent'], 'codex')
+        self.assertIn('ТЗ сохранено', w.state()['runs'][-1]['failover']['handover'])
+
     def test_server_detected_limit_hands_over(self):
-        w.action(dict(op='settings', changes=dict(failover=True)))
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
         self.launched_run()
         w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
         self.claude_log('sess-1', [self.limit_row(datetime.now(timezone.utc), resets=int(datetime.now(timezone.utc).timestamp()) + 3600)])
@@ -211,7 +342,7 @@ class LimitTests(DataCase):
 
     def test_unlaunched_run_switches_ai_in_place(self):
         # Неоткрытый запуск ИИ на лимите меняет ИИ сам, без новых запусков (раньше — сотни передач).
-        w.action(dict(op='settings', changes=dict(failover=True)))
+        w.action(dict(op='settings', changes=dict(failover=True)), origin='owner')
         w.action(dict(op='enqueue', ref=self.ref, agent='claude'))
         s = w.state(); w.note_limit(s, 'claude', datetime.now(timezone.utc) + timedelta(hours=1), datetime.now(timezone.utc)); w.save('workflow.json', s)
         with mock.patch.object(w, 'cli_ok', return_value=True):
@@ -227,10 +358,116 @@ class LimitTests(DataCase):
         w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='codex-1', model=runs[0]['packet']['route']['model']))
 
     def test_watch_keeps_session_that_still_writes(self):
-        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)))
+        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)), origin='owner')
         self.launched_run()
         path = self.claude_log('sess-1', [dict(type='user', timestamp=iso(datetime.now(timezone.utc)))])
         s = w.state(); s['runs'][0]['launch']['pid'] = 999999; s['runs'][0]['launch']['at'] = s['runs'][0]['launched_at'] = '2026-01-01T00:00:00+00:00'; w.save('workflow.json', s)
         with mock.patch.object(launcher, 'alive', return_value=False), mock.patch.object(serve, 'open_session') as op:
-            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[]))           # журнал свежий — сессия жива
+            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[], relayed=[]))   # журнал свежий — сессия жива
         op.assert_not_called()
+
+
+class RelayTests(DataCase):
+    """Эстафета (TT-91): контекст сессии роли перерос потолок — свежая сессия с точки остановки."""
+    claude_log = LimitTests.claude_log
+    launched_run = LimitTests.launched_run
+    tearDown = LimitTests.tearDown
+
+    def setUp(self):
+        LimitTests.setUp(self)
+        serve._auto_attempts.clear()            # отметки «уже пробовали» живут в модуле между тестами
+
+    def usage_row(self, ctx, text='Сделан раздел FR, дальше API'):
+        return dict(type='assistant', requestId='r%d' % ctx, timestamp=iso(datetime.now(timezone.utc)),
+                    message=dict(model='claude-opus-5-5', content=[dict(type='text', text=text)],
+                                 usage=dict(input_tokens=1, cache_creation_input_tokens=100, cache_read_input_tokens=ctx, output_tokens=5)))
+
+    def test_agent_relay_opens_fresh_session_with_checkpoint(self):
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
+        r = w.action(dict(op='pause', reason='context', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                          checkpoint='SRS: разделы 1–4 готовы, осталось API; читать docs/tasks/AL-03/BRD.md раздел 3'))
+        self.assertTrue(r['relay']['relay']); self.assertIsNone(r['relay']['session'])
+        self.assertEqual([x['id'] for x in w.resume_due()], ['RUN-1'])                  # сразу, без ожидания
+        with mock.patch.object(launcher, 'launch', return_value=dict(pid=9, exe='claude.exe', session='sess-2')) as launch,              mock.patch.object(limits, 'detect', return_value=None):
+            self.assertEqual(serve.limits_once()['resumed'], ['RUN-1'])
+        self.assertIsNone(launch.call_args.kwargs['resume'])                            # новая сессия, не --resume
+        prompt = launch.call_args.args[3]
+        self.assertIn('Эстафета', prompt); self.assertIn('BRD.md раздел 3', prompt); self.assertIn('claim не нужен', prompt)
+        run = w.state()['runs'][0]
+        self.assertTrue(run['pauses'][-1]['relay']); self.assertEqual(w.relays(run), 1)
+        self.assertIn('Эстафета', w.task_for(self.ref)['status_note'])
+
+    def test_relays_are_limited_per_run(self):
+        self.launched_run()
+        w.action(dict(op='claim', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1', model='claude-haiku-5-5'))
+        s = w.state(); s['runs'][0]['pauses'] = [dict(relay=True)] * w.MAX_RELAYS; w.save('workflow.json', s)
+        with self.assertRaisesRegex(ValueError, 'Эстафет'):
+            w.action(dict(op='pause', reason='context', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                          checkpoint='Сделано много, осталось немного, следующий шаг — тест'))
+        with self.assertRaisesRegex(ValueError, 'reason'):
+            w.action(dict(op='pause', reason='устал', ref=self.ref, run='RUN-1', worker='claude-cli:RUN-1',
+                          checkpoint='Сделано много, осталось немного, следующий шаг — тест'))
+
+    def test_server_relays_ended_session_above_ceiling(self):
+        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)), origin='owner')
+        self.launched_run()
+        path = self.claude_log('sess-1', [self.usage_row(20000), self.usage_row(120000, 'Готовы FR-1…FR-9, осталось API')])
+        os.utime(path, (1, 1))                                                          # журнал давно не пишется
+        s = w.state(); r0 = s['runs'][0]
+        r0.update(role='system_analyst', stage='analysis'); r0['launch'].update(pid=999999, at='2026-01-01T00:00:00+00:00')
+        r0['launched_at'] = '2026-01-01T00:00:00+00:00'; w.save('workflow.json', s)
+        with mock.patch.object(launcher, 'alive', return_value=False), mock.patch.object(serve, 'open_session') as op:
+            self.assertEqual(serve.watch_once()['relayed'], ['RUN-1'])
+        op.assert_not_called()
+        pz = w.state()['runs'][0]['paused']
+        self.assertEqual((pz['by'], pz['relay']), ('server', True)); self.assertIn('осталось API', pz['checkpoint'])
+        w.action(dict(op='settings', changes=dict(context_ceiling=0)), origin='owner')                  # выключено — эстафет нет
+        self.assertFalse(serve.relay_due(dict(w.state()['runs'][0], paused=None)))
+
+    def test_ceiling_setting_is_validated(self):
+        w.action(dict(op='settings', changes=dict(context_ceiling=120000)), origin='owner')
+        self.assertEqual(w.settings()['context_ceiling'], 120000)
+        with self.assertRaises(ValueError):
+            w.action(dict(op='settings', changes=dict(context_ceiling=1000)), origin='owner')
+
+    def test_hook_reminds_once_per_level(self):
+        import read_guard
+        path = self.claude_log('sess-h', [self.usage_row(95000)])
+        env = {'TASKTREKER_CEILING': '90000', 'TASKTREKER_READS': str(Path(self.tmp) / 'reads'),
+               'TASKTREKER_RELAY': 'tt_work op=pause reason=context ref=a run=b worker=c checkpoint="…"'}
+        hit = lambda: read_guard.decide(dict(hook_event_name='PostToolUse', session_id='H', transcript_path=str(path)))
+        with mock.patch.dict(os.environ, env):
+            note = hit()['hookSpecificOutput']
+            self.assertEqual(note['hookEventName'], 'PostToolUse')
+            self.assertIn('95 тыс', note['additionalContext']); self.assertIn('reason=context ref=a', note['additionalContext'])
+            self.assertIsNone(hit())                                                    # второй раз — молчит
+            self.claude_log('sess-h', [self.usage_row(130000)])
+            self.assertIsNotNone(hit())                                                 # 130% — напоминает снова
+        self.assertIsNone(hit())                                                        # без потолка — молчит
+
+    def test_hook_warns_about_run_budget_inside_session(self):
+        import read_guard
+        path = self.claude_log('sess-b', [self.usage_row(40000), self.usage_row(40000), self.usage_row(50000)])
+        env = {'TASKTREKER_BUDGET': '100000', 'TASKTREKER_READS': str(Path(self.tmp) / 'reads')}
+        hit = lambda: read_guard.decide(dict(hook_event_name='PostToolUse', session_id='B', transcript_path=str(path)))
+        with mock.patch.dict(os.environ, env):
+            self.assertIsNone(hit())                                  # r40000 повтором не считается: 90 тыс. < 100 тыс.
+            self.claude_log('sess-b', [self.usage_row(20000)])
+            self.assertIn('ориентира роли', hit()['hookSpecificOutput']['additionalContext'])
+            self.assertIsNone(hit())
+            self.claude_log('sess-b', [self.usage_row(60000)])
+            self.assertIn('op=escalate', hit()['hookSpecificOutput']['additionalContext'])   # 150%
+            self.assertEqual(read_guard.load('B')['b_total'], 170424)   # 4 разных ответа: контекст + 106
+
+    def test_profile_sums_sessions_of_a_run(self):
+        import tokens
+        self.launched_run()
+        self.claude_log('sess-1', [self.usage_row(15000), self.usage_row(95000)])
+        self.claude_log('sess-2', [self.usage_row(16000)])
+        s = w.state(); r0 = s['runs'][0]
+        r0['launches'] = [dict(agent='claude', session='sess-1', at=r0['launched_at']), dict(agent='claude', session='sess-2')]
+        r0['launch']['session'] = 'sess-2'; w.save('workflow.json', s)
+        p = tokens.profile(w.state()['runs'][0])
+        self.assertEqual((p['sessions'], p['turns'], p['start'], p['peak']), (2, 3, 15101, 95101))
+

@@ -21,12 +21,12 @@ class AutonomyTests(DataCase):
         self.ref = 'alpha-api/AL-03'
 
     def full(self):
-        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)))
+        w.action(dict(op='settings', changes=dict(autonomy='full', consent=True)), origin='owner')
 
     def test_consent_required_and_owner_only(self):
         self.assertEqual(w.settings()['autonomy'], 'step')
         with self.assertRaisesRegex(ValueError, 'согласием'):
-            w.action(dict(op='settings', changes=dict(autonomy='full')))
+            w.action(dict(op='settings', changes=dict(autonomy='full')), origin='owner')
         self.full()
         st = w.settings()
         self.assertEqual((st['autonomy'], st['autonomy_changed']['to']), ('full', 'full'))
@@ -87,7 +87,7 @@ class AutonomyTests(DataCase):
     def test_step_mode_only_marks_closed_window(self):
         self.launched()
         with mock.patch.object(launcher, 'alive', return_value=False), mock.patch.object(serve, 'open_session') as op:
-            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[]))
+            self.assertEqual(serve.watch_once(), dict(nudged=[], lost=[], relayed=[]))
         op.assert_not_called()
         self.assertIn('закрыто', w.state()['runs'][0]['launch_error'])
         self.assertEqual(w.open_sessions(w.state()['runs']), 0)           # закрытое окно место не занимает
@@ -101,7 +101,7 @@ class AutonomyTests(DataCase):
         self.assertEqual((rs['problem'], rs['agent']), (r['problem'], 'codex'))
         model = w.action(dict(op='packet', ref=self.ref, run=rs['id']))['route']['model']
         w.action(dict(op='claim', ref=self.ref, run=rs['id'], worker='x1', model=model))
-        w.action(dict(op='resolve', ref=self.ref, run=rs['id'], worker='x1', decision='continue',
+        w.action(dict(op='resolve', cause='Причина видна в журнале запуска и паспорте задачи', cause_kind='hypothesis', probe='Перезапуск роли покажет, повторится ли сбой сессии', ref=self.ref, run=rs['id'], worker='x1', decision='continue',
                       options=[dict(title='Поднять локальную копию базы из фикстур'), dict(title='Замокать клиента базы в тестах')],
                       notes='Фикстуры уже есть в репозитории, это быстрее и надёжнее',
                       instructions='Подними локальную копию из tests/fixtures и прогоняй тесты на ней'))

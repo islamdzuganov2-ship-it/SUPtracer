@@ -253,6 +253,33 @@ def session_of(run):
     return None, None
 
 
+def success_at(run, since):
+    """Время успешного ответа после отказа, по журналу именно этой сессии."""
+    _, path = session_of(run)
+    if not path:
+        return None
+    latest = None
+    agent = (run.get('launch') or {}).get('agent') or run.get('agent')
+    for line in tail_lines(path):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        at = stamp(row.get('timestamp'))
+        if not at or at <= since:
+            continue
+        if agent == 'claude' and row.get('type') == 'assistant':
+            if row.get('error'):
+                latest = None
+            elif ((row.get('message') or {}).get('usage') or {}).get('output_tokens', 0) > 0:
+                latest = at
+        elif agent == 'codex' and row.get('type') == 'event_msg':
+            event = row.get('payload') or {}
+            if event.get('type') == 'task_complete':
+                latest = None if event.get('error') else at
+    return latest
+
+
 def detect(run):
     """Событие лимита в сессии запуска после его последнего (воз)обновления, иначе None."""
     session, path = session_of(run)

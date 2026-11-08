@@ -55,21 +55,38 @@ class ReadGuardTests(unittest.TestCase):
                                       tool_input=dict(file_path=str(path), **extra)))
 
     def test_repeat_full_read_of_unchanged_file_is_denied(self):
-        f = Path(self.tmp) / 'a.py'; f.write_text('print(1)\n', encoding='utf-8')
+        small = Path(self.tmp) / 'b.py'; small.write_text('print(1)\n', encoding='utf-8')
+        self.assertIsNone(self.read(small)); self.assertIsNone(self.read(small))   # мелкий повтор дешевле отказа
+        body = 'x = 1\n' * 2000
+        f = Path(self.tmp) / 'a.py'; f.write_text(body + 'print(1)\n', encoding='utf-8')
         self.assertIsNone(self.read(f))
         out = self.read(f)
         self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('уже прочитан', out['hookSpecificOutput']['permissionDecisionReason'])
         self.assertIsNone(self.read(f, offset=1, limit=5))           # фрагмент — можно
-        time.sleep(0.01); f.write_text('print(2)\n', encoding='utf-8')
+        time.sleep(0.01); f.write_text(body + 'print(2)\n', encoding='utf-8')
         self.assertIsNone(self.read(f))                              # файл изменился — можно
         st = read_guard.load('S1'); self.assertEqual(st['denied'], 1); self.assertGreater(st['saved_tokens'], 0)
+
+    def test_full_read_follows_role_and_complexity_policy(self):
+        big = '# BRD\n' + ''.join('## Раздел %d BR-%d\n%s\n' % (i, i, 'текст требования ' * 60) for i in range(1, 9))
+        brd = self.docs / 'BRD.md'; brd.write_text(big, encoding='utf-8')
+        pol = lambda **kw: mock.patch.dict(os.environ, {'TASKTREKER_READ_POLICY': json.dumps(dict(dict(free=3000, budget=20000, tier=1, primary=[]), **kw))})
+        with pol():
+            out = self.read(brd)['hookSpecificOutput']['permissionDecisionReason']
+            self.assertIn('класс сложности 1', out); self.assertIn('~20 тыс', out)
+        with pol(free=8000, tier=3):
+            self.assertIsNone(self.read(brd))                        # сложная задача: порог выше — читается целиком
+        time.sleep(0.01); brd.write_text(big + '\n', encoding='utf-8')   # изменился — не повтор прочитанного
+        with pol(primary=['docs/tasks/T-1/BRD.md']):
+            self.assertIsNone(self.read(Path(self.tmp) / 'docs' / 'tasks' / 'T-1' / 'BRD.md'))   # вход этапа роли
 
     def test_big_foreign_document_gets_index_instead_of_text(self):
         big = '# BRD\n' + ''.join('## Раздел %d BR-%d\n%s\n' % (i, i, 'текст требования ' * 60) for i in range(1, 9))
         brd = self.docs / 'BRD.md'; brd.write_text(big, encoding='utf-8')
         out = self.read(brd)['hookSpecificOutput']['permissionDecisionReason']
-        self.assertIn('целиком не читай', out); self.assertIn('2 Раздел 1 BR-1', out); self.assertIn('offset', out)
+        self.assertIn('без причины не читается', out); self.assertIn('2 Раздел 1 BR-1', out); self.assertIn('offset', out)
+        self.assertIn('full=true why=', out)                         # путь к полному чтению с обоснованием
         own = self.docs / 'SRS.md'; own.write_text(big, encoding='utf-8')
         self.assertIsNone(self.read(own))                            # свой артефакт роль читает
         small = self.docs / 'HLD.md'; small.write_text('# HLD\nкоротко\n', encoding='utf-8')
@@ -167,6 +184,47 @@ class ProfileTests(DataCase):
         self.assertEqual(p['total'], 3 * 111 + 65000)
         s = tokens.summary([dict(p, role='qa', agent='claude', lean=True)])
         self.assertEqual((s[0]['start_mode'], s[0]['runs']), ('лёгкий', 1))
+        self.assertEqual(p['series'], [15101, 20101, 30101])        # контекст каждого хода — для кривой дашборда
+        self.assertEqual(p['read_at'], [0, 1])
+        synth = json.dumps(dict(type='assistant', requestId='z', message=dict(model='<synthetic>', content=[], usage=dict(
+            input_tokens=0, cache_creation_input_tokens=0, cache_read_input_tokens=0, output_tokens=0))))
+        with open(home / 'projects' / 'p' / 'S1.jsonl', 'a', encoding='utf-8') as fh:
+            fh.write(synth + '\n')
+        with mock.patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(home), 'TASKTREKER_READS': str(Path(self.tmp) / 'r')}):
+            p = tokens.profile(dict(launch=dict(agent='claude', session='S1')))
+        self.assertEqual((p['turns'], p['series'][-1]), (3, 30101))   # служебная запись клиента — не ход
+
+
+class TokviewTests(unittest.TestCase):
+    """Раздел «Токены ролей»: сводки считаются из профилей запусков, без журналов."""
+    def rows(self):
+        import tokview
+        base = dict(project='p', stage='analysis', lean=False, index=False, budget=None, relays=0, justified=0, saved=0,
+                    start=20000, turns=10, cache_read=0, peak=0, at='2026-10-20')
+        return tokview, [dict(base, run='R1', ref='p/T1', role='system_analyst', week='2026-W43', total=1_000_000, accepted=True),
+                         dict(base, run='R2', ref='p/T2', role='system_analyst', week='2026-W43', total=3_000_000, accepted=False),
+                         dict(base, run='R3', ref='p/T3', role='system_analyst', week='2026-W44', total=1_000_000, accepted=True,
+                              lean=True, start=8000),
+                         dict(base, run='R4', ref='p/T4', role='system_analyst', week='2026-W44', total=1_200_000, accepted=True)]
+
+    def test_tokens_per_accepted_handoff_count_failed_runs(self):
+        tv, rows = self.rows()
+        ph = {(x['role'], x['week']): x for x in tv.per_handoff(rows)}
+        self.assertEqual(ph[('system_analyst', '2026-W43')]['per'], 4_000_000)     # 4 млн на одну принятую сдачу
+        self.assertEqual(ph[('system_analyst', '')]['per'], 6_200_000 // 3)
+        self.assertEqual(tv.summary(rows)['kpi']['per'], 6_200_000 // 3)
+
+    def test_before_after_and_outliers(self):
+        tv, rows = self.rows()
+        lean = tv.compare(rows)[0]['roles'][0]
+        self.assertEqual((lean['before']['n'], lean['after']['n'], lean['after']['start']), (3, 1, 8000))
+        self.assertEqual([o['run'] for o in tv.outliers(rows)], ['R2'])                  # 3 млн ≥ 2 × медиана 1,1 млн
+        self.assertEqual(tv.matrix(rows)[0]['n'], 4)
+
+    def test_squeeze_keeps_peak_and_marks(self):
+        import tokview
+        pts, marks, step = tokview.squeeze(list(range(300)), [0, 150, 299], limit=100)
+        self.assertEqual((len(pts), step, pts[-1], marks), (100, 3, 299, [0, 50, 99]))
 
 
 if __name__ == '__main__':

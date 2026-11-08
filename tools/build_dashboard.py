@@ -288,6 +288,24 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .btn.primary:hover{filter:brightness(1.07);color:#fff}
 .btn[disabled]{opacity:.55;cursor:progress}
+/* ---------- раздел «Задачи» (taskview.js) ---------- */
+.tv-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 12px;font-size:13px;color:var(--ink2)}
+.tv-bar .btn.on{border-color:var(--accent);color:var(--accent);font-weight:600}
+.tv-bar .btn[disabled]{cursor:default}
+.tv-note{font-size:12px;color:var(--ink3)}
+#taskview .card-viz{margin-bottom:14px;overflow-x:auto}
+#taskview table.pf td,#taskview table.pf th{font-size:12.5px;vertical-align:top}
+/* ---------- раздел «Токены ролей» (tokview.js) ---------- */
+#tokview .card-viz{margin-bottom:14px;overflow-x:auto}
+#tokview table.pf td,#tokview table.pf th{font-size:12.5px;vertical-align:top}
+#tokview svg{display:block;width:100%;height:auto}
+/* ---------- карточка «Качество ИИ-разработчика» (learnview.js) ---------- */
+#learnview .lv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:8px 0 12px}
+#learnview .lv-m{border:1px solid var(--line,#ddd);border-radius:8px;padding:8px 10px;cursor:help}
+#learnview .lv-m small{display:block;opacity:.75;font-size:12px}
+#learnview .lv-m b{font-size:18px}
+#learnview table.pf td{font-size:12.5px;vertical-align:top}
+#learnview .lv-status{display:inline-block;padding:2px 8px;border-radius:10px;border:1px solid var(--line,#ccc);font-size:12px}
 select.sel{background:var(--panel);border:1px solid var(--line);color:var(--ink2);border-radius:8px;
   padding:7px 9px;font-size:13px;font-family:inherit}
 .rlog{margin:10px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;
@@ -371,6 +389,43 @@ def slim_usage(usage):
     return usage
 
 
+def taskview_snapshot():
+    """Факт по задачам на момент сборки (окно 24 ч): файл дашборда без сервера показывает его,
+    сервер досок — живой /api/taskview с выбором окна."""
+    try:
+        import taskview
+        return taskview.build(hours=24)
+    except Exception as e:   # noqa: BLE001 — дашборд собирается и без этого раздела
+        return {"error": str(e)}
+
+
+def tokview_snapshot():
+    """Токены ролей (tokview.py): профили запусков по журналам сессий и сводки по проектам."""
+    try:
+        import tokview
+        return tokview.build()
+    except Exception as e:   # noqa: BLE001 — дашборд собирается и без этого раздела
+        return {"error": str(e)}
+
+
+def learnview_snapshot():
+    """Качество ИИ-разработчика (learn.py, LEARN-08): метрики пилота и возвраты — только чтение журнала."""
+    try:
+        import learn
+        return learn.snapshot()
+    except Exception as e:   # noqa: BLE001 — дашборд собирается и без этого раздела
+        return {"error": str(e)}
+
+
+def secview_snapshot():
+    """Безопасность (security_triage, SEC-012…014): последние сканы, NOT_RUN, открытые находки — только чтение."""
+    try:
+        import security_triage
+        return security_triage.snapshot()
+    except Exception as e:   # noqa: BLE001 — дашборд собирается и без этого раздела
+        return {"error": str(e)}
+
+
 def main():
     import taskstate
     import workflow
@@ -393,6 +448,10 @@ def main():
         "inbox": load("inbox.json", {"items": []}),
         "context": context_stats(),
         "fresh": freshness(),
+        "taskview": taskview_snapshot(),
+        "tokview": tokview_snapshot(),
+        "learnview": learnview_snapshot(),
+        "secview": secview_snapshot(),
     }
     # HTML закрывает script без учёта регистра, даже внутри JSON-строки.
     blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
@@ -406,6 +465,10 @@ def main():
         + "<script>\n" + read_tool("charts.js") + "\n</script>\n"
         + "<script>\n" + read_tool("tree.js") + "\n</script>\n"
         + "<script>\n" + read_tool("projview.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("taskview.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("tokview.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("learnview.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("secview.js") + "\n</script>\n"
         + "<script>\n" + read_tool("app.js") + "\n</script>\n"
         + "<script>\n" + read_tool("board_extras.js") + "\n</script>\n"
         + "<script>\n" + read_tool("boards.js") + "\n</script>\n"

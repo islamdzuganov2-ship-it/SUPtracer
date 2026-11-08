@@ -24,12 +24,13 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import filekinds as fk  # noqa: E402
+import role_quality  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(os.environ.get('TASKTREKER_DATA') or ROOT / 'data')
 WINDOW = timedelta(hours=5)
 PROVIDERS = ('claude', 'codex')
-ANALYSIS_ROLES = ('system_analyst', 'solution_architect', 'designer', 'marketer')
+ANALYSIS_ROLES = ('product_owner', 'system_analyst', 'solution_architect', 'designer', 'marketer')   # правки после анализа — поздние изменения ТЗ
 
 
 def load(name, default):
@@ -551,6 +552,8 @@ def quality(key, p, wf, repo):
         defects=defect_summary(defects),
         roles=role_rows,
         agents=agent_summary(role_rows, defects, runs),
+        role_quality=role_quality.collect([t for t in tasks if t.get('pipeline')],
+                                          [x for x in wf.get('problems') or [] if str(x.get('ref', '')).startswith(key + '/')]),
     )
 
 

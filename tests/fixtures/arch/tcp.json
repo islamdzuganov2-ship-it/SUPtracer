@@ -1,0 +1,7 @@
+[{"LocalAddress":"127.0.0.1","LocalPort":8787,"RemoteAddress":"0.0.0.0","RemotePort":0,"State":"Listen","OwningProcess":4100,"Created":"2026-11-08T10:00:05.0000000Z"},
+ {"LocalAddress":"0.0.0.0","LocalPort":8000,"RemoteAddress":"0.0.0.0","RemotePort":0,"State":"Listen","OwningProcess":4200,"Created":"2026-11-08T09:00:00.0000000Z"},
+ {"LocalAddress":"::","LocalPort":8000,"RemoteAddress":"::","RemotePort":0,"State":"Listen","OwningProcess":4200,"Created":"2026-11-08T09:00:00.0000000Z"},
+ {"LocalAddress":"::1","LocalPort":5432,"RemoteAddress":"::","RemotePort":0,"State":"Listen","OwningProcess":4300,"Created":"2026-11-08T08:00:00.0000000Z"},
+ {"LocalAddress":"192.0.2.10","LocalPort":51234,"RemoteAddress":"198.51.100.7","RemotePort":443,"State":"Established","OwningProcess":4100,"Created":"2026-11-08T10:01:00.0000000Z"},
+ {"LocalAddress":"0.0.0.0","LocalPort":9000,"RemoteAddress":"0.0.0.0","RemotePort":0,"State":"Listen","OwningProcess":4400,"Created":"2026-11-08T07:00:00.0000000Z"},
+ {"LocalAddress":"0.0.0.0","LocalPort":135,"RemoteAddress":"0.0.0.0","RemotePort":0,"State":"Listen","OwningProcess":1100,"Created":null}]

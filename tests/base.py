@@ -104,8 +104,12 @@ class DataCase(unittest.TestCase):
         self._env = os.environ.get("TASKTREKER_DATA")
         os.environ["TASKTREKER_DATA"] = self.data
         self.t = load_tools()
+        import owner_auth                      # ключ владельца теста — свой, не настоящий (TT-104)
+        owner_auth._path = os.path.join(self.tmp, "owner.key")
 
     def tearDown(self):
+        import owner_auth
+        owner_auth._path = None
         if self._env is None:
             os.environ.pop("TASKTREKER_DATA", None)
         else:

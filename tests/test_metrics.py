@@ -156,7 +156,8 @@ class TeamTests(DataCase):
         self.assertEqual((r['developer']['returns'], r['developer']['dod_rejects'], r['developer']['dod_top']), (1, 1, [('dev-tests', 1)]))
         self.assertIn('пустого списка', r['developer']['reasons'][0]['reason'])
         # Предстоит: AL-1 — разработка и дальше; AL-2 — всё с идеи, дизайн и маркетинг «возможно».
-        self.assertEqual((r['developer']['upcoming'], r['qa']['upcoming'], r['product_owner']['upcoming']), (2, 2, 1))
+        # QA у AL-2 — дважды: ранний тест-дизайн в анализе и тестирование (07: GAP-AG-003).
+        self.assertEqual((r['developer']['upcoming'], r['qa']['upcoming'], r['product_owner']['upcoming']), (2, 3, 1))
         self.assertEqual((r['designer']['maybe'], r['marketer']['maybe']), (1, 1))
         self.assertEqual(r[M.EXECUTOR]['upcoming'], 1)
         merged = M.merge_team([t, t])

@@ -177,10 +177,37 @@ def t_usage_mapping():
     P = load("projects.json")["projects"]
     U = load("usage.json")["projects"]
     mapped = {usage_key(P, U, k) for k in P}
-    orphan = [k for k in U if k not in mapped]
-    return ["расход проекта %s ($%.0f) ни к чему не привязан — добавь проект в projects.json, "
-            "допиши каталог в usage_paths проекта, к которому относится работа, "
-            "или поправь project_key_from_cwd в collect_usage.py" % (k, U[k]["usd"]) for k in orphan]
+    outside, bad = outside_portfolio()
+    orphan = [k for k in U if k not in mapped and k not in outside]
+    return bad + ["расход проекта %s ($%.0f) ни к чему не привязан — добавь проект в projects.json, "
+                  "допиши каталог в usage_paths проекта, к которому относится работа, "
+                  "или поправь project_key_from_cwd в collect_usage.py; разовая сессия не о проекте — "
+                  "решением владельца в outside_portfolio" % (k, U[k]["usd"]) for k in orphan]
+
+
+def outside_portfolio():
+    """Сессии вне портфеля — решение владельца (projects.json → outside_portfolio: {ключ: {why, date}}).
+    Только названные ключи и только с причиной и датой: общего «заглушить всё» нет."""
+    raw = load("projects.json").get("outside_portfolio") or {}
+    ok, bad = {}, []
+    if not isinstance(raw, dict):
+        return ok, ["outside_portfolio: ожидается {ключ расхода: {why, date}}"]
+    for k, v in raw.items():
+        v = v if isinstance(v, dict) else {}
+        if len((v.get("why") or "").strip()) < 10 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v.get("date") or "")):
+            bad.append("outside_portfolio/%s: нужны why (почему не проект, от 10 символов) и date (ГГГГ-ММ-ДД)" % k)
+        else:
+            ok[k] = v
+    return ok, bad
+
+
+@check("расход вне портфеля виден (решение владельца)")
+def t_usage_outside():
+    """Не провал, а след: исключённый расход остаётся в отчёте отдельной строкой, с суммой и причиной."""
+    U = load("usage.json")["projects"]
+    outside, _ = outside_portfolio()
+    return ["%s ($%.0f): %s — с %s" % (k, (U.get(k) or {}).get("usd") or 0, v["why"], v["date"])
+            for k, v in sorted(outside.items())]
 
 
 @check("оценка затрат покрывает весь бэклог")
@@ -406,17 +433,36 @@ def t_unit_tests():
         return ["нет каталога tests/ — тесты потеряны"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     env.pop("TASKTREKER_DATA", None)
-    try:
-        r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", tests, "-p", "test_*.py"],
-                           cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=600, stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return ["тесты не уложились в 10 минут"]
-    tail = (r.stderr or r.stdout).strip().splitlines()
-    if r.returncode != 0:
-        fails = [l for l in tail if l.startswith(("FAIL:", "ERROR:"))]
-        return (fails[:10] or tail[-5:]) + [tail[-1] if tail else "код возврата %d" % r.returncode]
-    return []
+    # Модули — отдельными процессами параллельно: каждый тест на своём временном каталоге, общий набор
+    # перерос 10 минут последовательного прогона. Состав тестов и предел времени те же.
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    mods = sorted(f[:-3] for f in os.listdir(tests) if f.startswith("test_") and f.endswith(".py"))
+    deadline = time.monotonic() + 600
+
+    def one(mod):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return mod, None
+        try:
+            r = subprocess.run([sys.executable, "-m", "unittest", mod], cwd=tests, env=env, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=left, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return mod, None
+        return mod, r
+
+    with ThreadPoolExecutor(max_workers=max(2, min(6, (os.cpu_count() or 2) - 1))) as ex:
+        results = list(ex.map(one, mods))
+    slow = [m for m, r in results if r is None]
+    if slow:
+        return ["тесты не уложились в 10 минут: " + ", ".join(slow[:8])]
+    out = []
+    for mod, r in results:
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout).strip().splitlines()
+            fails = [l for l in tail if l.startswith(("FAIL:", "ERROR:"))]
+            out += (fails[:10] or tail[-5:]) + ["%s: %s" % (mod, tail[-1] if tail else "код возврата %d" % r.returncode)]
+    return out[:30]
 
 
 @check("рабочее дерево чистое")
@@ -428,11 +474,11 @@ def t_git_clean():
 
 
 TESTS = [t_json_parses, t_required_fields, t_readiness, t_project_routes, t_backlog, t_paths,
-         t_usage_mapping, t_estimates, t_comments, t_competitors, t_no_secrets,
+         t_usage_mapping, t_usage_outside, t_estimates, t_comments, t_competitors, t_no_secrets,
          t_pricing_fresh, t_quality, t_memory, t_memory_index, t_inbox,
          t_dashboard_builds, t_unit_tests, t_git_clean]
 
-SOFT = {t_git_clean}  # предупреждение, а не провал
+SOFT = {t_git_clean, t_usage_outside}  # предупреждение, а не провал
 
 
 def main():

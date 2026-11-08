@@ -188,3 +188,26 @@ class SprintIntegration(DataCase):
         receipt = w.confirm_main(s, t)
         self.assertEqual(receipt['commit'], receipt['main_commit'])
         self.assertTrue(sp.in_main(s, t))
+
+    def test_confirm_main_without_launch_uses_task_branch_by_name(self):
+        """Задача, взятая без запуска с доски: ветка ai/<ИИ>/<номер> в репозитории проекта, та же проверка git."""
+        repo = Path(self.tmp) / 'repos' / 'alpha-api'
+        def git(*args):
+            return subprocess.run(['git', '-c', 'user.name=test', '-c', 'user.email=t@t', *args],
+                                  cwd=repo, capture_output=True, check=True)
+        git('init', '-q', '-b', 'main')
+        (repo / 'a.txt').write_text('base')
+        git('add', '.'); git('commit', '-qm', 'base')
+        doc = self.projects(); doc['projects']['alpha-api']['path'] = str(repo); self.jwrite('projects.json', doc)
+        t = dict(ref='alpha-api/T-7', project='alpha-api', status='done')
+        s = {'runs': []}
+        with self.assertRaises(ValueError): w.confirm_main(s, t)          # ветки нет — подтверждать нечем
+        git('checkout', '-qb', 'ai/claude/t-7'); (repo / 'a.txt').write_text('x'); git('commit', '-qam', 'чужая правка')
+        git('checkout', '-q', 'main'); git('merge', '-q', '--no-ff', 'ai/claude/t-7', '-m', 'merge')
+        with self.assertRaises(ValueError): w.confirm_main(s, t)          # в ветке нет коммита задачи
+        git('checkout', '-q', 'ai/claude/t-7'); (repo / 'a.txt').write_text('y'); git('commit', '-qam', 'T-7: правка')
+        with self.assertRaises(ValueError): w.confirm_main(s, t)          # коммит задачи ещё не в main
+        git('checkout', '-q', 'main'); git('merge', '-q', '--no-ff', 'ai/claude/t-7', '-m', 'merge T-7')
+        receipt = w.confirm_main(s, t)
+        self.assertEqual(receipt['branch'], 'ai/claude/t-7')
+        self.assertTrue(sp.in_main(s, t))

@@ -991,6 +991,26 @@ def reserve_sprint(ref):
         save('workflow.json',s)
 
 
+def named_branch(t, project):
+    """Задача, взятая без запуска с доски (take из сессии владельца), не оставляет записи о рабочей копии.
+    Тогда ветка ищется по соглашению ai/<ИИ>/<номер задачи> в репозитории проекта — и только если ровно одна
+    такая ветка есть и в ней есть коммит с номером задачи. Строке evidence система не верит: дальше та же
+    проверка git, что и для запуска."""
+    import subprocess
+    path=project.get('path')
+    if not path or not os.path.isdir(path):
+        raise ValueError('Нет ветки исполнения: доведите задачу через конвейер до main')
+    tid=t['ref'].split('/',1)[1]
+    def git(*args):
+        return subprocess.run(['git',*args],cwd=path,capture_output=True,text=True,timeout=15)
+    found=[b for b in ('ai/%s/%s' % (p, tid.lower()) for p in PROVIDERS)
+           if not git('rev-parse','--verify','--quiet','refs/heads/'+b).returncode]
+    if len(found)!=1:
+        raise ValueError('Нет ветки исполнения: доведите задачу через конвейер до main')
+    if not git('log','--format=%s','-F','--grep='+tid,'refs/heads/'+found[0]).stdout.strip():
+        raise ValueError('В ветке %s нет коммитов задачи %s' % (found[0], tid))
+    return dict(path=path, branch=found[0])
+
 def confirm_main(s, t):
     """Старый поток: проверяем ветку задачи в main, а не строку evidence/status."""
     import subprocess
@@ -998,10 +1018,10 @@ def confirm_main(s, t):
         raise ValueError('В конвейере main подтверждает DoD этапа deploy_main')
     if t.get('status')!='done': raise ValueError('Сначала завершите проверку задачи')
     wt=task_branch(s,t['ref'])
-    if not wt or not wt.get('path') or not wt.get('branch'):
-        raise ValueError('Нет ветки исполнения: доведите задачу через конвейер до main')
-    import pipeline
     project=read('projects.json',{})['projects'][t['project']]
+    if not wt or not wt.get('path') or not wt.get('branch'):
+        wt=named_branch(t, project)
+    import pipeline
     main=pipeline.branches(wt['path'],project)['main']
     def git(*args):
         return subprocess.run(['git',*args],cwd=wt['path'],capture_output=True,text=True,timeout=15)

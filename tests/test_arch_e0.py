@@ -101,14 +101,15 @@ class Capabilities(unittest.TestCase):
 
 
 class Flag(unittest.TestCase):                                            # TTN-010
-    def test_flag_registered_off_and_cannot_be_enabled_yet(self):
+    def test_flag_registered_off_by_default_and_enabled_by_owner(self):
+        # TT-136: модуль реализован (P0 + вкладка), поэтому флаг можно включить; по умолчанию он выключен.
         self.assertIn('network_architecture_enabled', ff.REGISTRY)
+        self.assertTrue(ff.REGISTRY['network_architecture_enabled']['implemented'])
         self.assertFalse(ff.enabled('network_architecture_enabled', {}))
-        with self.assertRaisesRegex(ValueError, 'не реализован'):
-            ff.apply(dict(network_architecture_enabled=True), {})
-        # Запись в обход владельца не включает модуль, пока у него нет реализации; выключение — откат без потерь.
-        self.assertFalse(ff.enabled('network_architecture_enabled', dict(flags=dict(network_architecture_enabled=True))))
-        self.assertEqual(ff.apply(dict(network_architecture_enabled=False), {}), dict(flags={}))
+        on = ff.apply(dict(network_architecture_enabled=True), {})
+        self.assertTrue(ff.enabled('network_architecture_enabled', on))
+        # Выключение — откат без потерь.
+        self.assertEqual(ff.apply(dict(network_architecture_enabled=False), on), dict(flags={}))
 
 
 class ArchApi(unittest.TestCase):                                         # TTN-004

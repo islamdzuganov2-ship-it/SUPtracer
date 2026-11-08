@@ -538,8 +538,8 @@ document.getElementById('cards').addEventListener('click', async e => {
 });
 
 /* ======================= вкладки и тема ======================= */
-const PAGES = ['dash', 'tree', 'proj', 'boards'];
-function showTab(which) {
+const PAGES = ['dash', 'tree', 'proj', 'boards', 'arch'];
+function showTab(which, query) {
   const cur = PAGES.includes(which) ? which : 'dash';
   PAGES.forEach(p => {
     document.getElementById('page-' + p).hidden = (p !== cur);
@@ -563,11 +563,13 @@ function showTab(which) {
   } else TREEVIEW.close();
   if (cur === 'dash' && window.PROJVIEW) PROJVIEW.shown();   // графики меряют ширину видимой страницы
   try { history.replaceState(null, '', '#' + cur); } catch (e) {}
+  // «Архитектура систем» держит своё состояние в адресе (#arch?view=…&node=…) и пишет его сама.
+  if (cur === 'arch' && window.ARCHVIEW) ARCHVIEW.shown(query || '');
 }
 // Тема — до первой вкладки: древо читает её при открытии.
 try { const s = localStorage.getItem('tt-theme'); if (s) document.documentElement.setAttribute('data-theme', s); } catch (e) {}
 PAGES.forEach(p => document.getElementById('tab-' + p).onclick = () => showTab(p));
-showTab((location.hash || '').replace('#', ''));
+showTab(...(location.hash || '').replace('#', '').split('?'));
 
 const t = document.getElementById('theme');
 t.onclick = () => {

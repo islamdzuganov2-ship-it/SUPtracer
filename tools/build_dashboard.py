@@ -109,9 +109,9 @@ h1{font-size:25px;margin:0 0 4px;letter-spacing:-.4px;font-weight:650}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
 
 /* вкладки */
-.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:20px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:20px;overflow-x:auto;scrollbar-width:thin}
 .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--ink2);
-  font:inherit;font-size:14.5px;padding:9px 15px;cursor:pointer;margin-bottom:-1px;border-radius:6px 6px 0 0}
+  font:inherit;font-size:14.5px;padding:9px 15px;cursor:pointer;margin-bottom:-1px;border-radius:6px 6px 0 0;white-space:nowrap;flex-shrink:0}
 .tab:hover{color:var(--ink);background:var(--panel2)}
 .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
 .page[hidden]{display:none}
@@ -469,6 +469,7 @@ def main():
         + "<script>\n" + read_tool("tokview.js") + "\n</script>\n"
         + "<script>\n" + read_tool("learnview.js") + "\n</script>\n"
         + "<script>\n" + read_tool("secview.js") + "\n</script>\n"
+        + "<script>\n" + read_tool("archview.js") + "\n</script>\n"
         + "<script>\n" + read_tool("app.js") + "\n</script>\n"
         + "<script>\n" + read_tool("board_extras.js") + "\n</script>\n"
         + "<script>\n" + read_tool("boards.js") + "\n</script>\n"

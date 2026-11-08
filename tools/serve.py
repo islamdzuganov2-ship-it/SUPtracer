@@ -556,7 +556,7 @@ def start_project(req, origin=None):
 
 
 # Запуск окон ИИ, старт проекта и подключение к ассистентам — действия владельца (TTU-018).
-OWNER_PATHS = ("/api/launch", "/api/start", "/api/connect")
+OWNER_PATHS = ("/api/launch", "/api/start", "/api/connect", "/api/arch/scan", "/api/arch/seed")
 OWNER_REFUSAL = ("Это действие владельца: откройте доску ссылкой владельца — её печатает "
                  "py tools/pm.py owner-link в вашем терминале")
 
@@ -673,14 +673,44 @@ class Handler(BaseHTTPRequestHandler):
         if os.path.exists(inv):
             with open(inv, encoding="utf-8") as f:
                 snap = json.load(f)
-        code, body = arch_acl.handle(path, parse_qs(urlparse(self.path).query), who, snap)
+        import arch_api
+        query = parse_qs(urlparse(self.path).query)
+        got = arch_api.handle(path[len("/api/arch/"):], query, who, base=os.environ.get("TASKTREKER_DATA"),
+                              scan_state=arch_api.SCAN.snapshot())
+        if got is not None:
+            return self.send_json(*got)
+        code, body = arch_acl.handle(path, query, who, snap)
         return self.send_json(code, body)
+
+    def arch_action(self, path, req):
+        """Действия владельца на вкладке «Архитектура систем»: сбор снимка (только чтение ОС, Docker и AST
+        кода) и внесение процесса из документа. Флаг выключен — 409, как и у чтения."""
+        import flags, workflow, arch_acl, arch_api
+        if not flags.enabled("network_architecture_enabled", workflow.state().get("settings")):
+            return self.send_json(409, {"ok": False, "disabled": True,
+                                        "error": "модуль «Архитектура систем» выключен (network_architecture_enabled)"})
+        who = arch_acl.principal("owner")
+        base = os.environ.get("TASKTREKER_DATA")
+        try:
+            if path == "/api/arch/seed":
+                return self.send_json(200, {"ok": True, "data": arch_api.seed(str(req.get("name") or ""), who, base)})
+            with open(os.path.join(base or os.path.join(ROOT, "data"), "projects.json"), encoding="utf-8") as f:
+                projects = json.load(f).get("projects", {})
+            keys = arch_api.scan_keys(req, projects)
+            if not arch_api.SCAN.start(projects, keys, base):
+                return self.send_json(409, {"ok": False, "error": "сбор уже идёт"})
+            return self.send_json(202, {"ok": True, "data": dict(started=True, repos=keys)})
+        except PermissionError:
+            return self.send_json(404, {"ok": False, "error": arch_acl.NOT_FOUND})
+        except (ValueError, KeyError, OSError) as e:
+            return self.send_json(400, {"ok": False, "error": str(e)})
 
     def do_POST(self):
         if not self.local_only():
             return
         path = self.path.split("?")[0]
-        if path not in ("/api/refresh", "/api/connect", "/api/work", "/api/launch", "/api/start"):
+        if path not in ("/api/refresh", "/api/connect", "/api/work", "/api/launch", "/api/start",
+                        "/api/arch/scan", "/api/arch/seed"):
             return self.send_json(404, {"ok": False, "error": "нет такого адреса"})
         import session_auth as sa
         refused = sa.origin_ok(self.headers, self.server.server_address[1])
@@ -705,6 +735,8 @@ class Handler(BaseHTTPRequestHandler):
             req = {}
         if not isinstance(req, dict):
             req = {}
+        if path in ("/api/arch/scan", "/api/arch/seed"):
+            return self.arch_action(path, req)
         if path == "/api/launch":
             try:
                 return self.send_json(200, {"ok": True, "data": launch_session(req)})

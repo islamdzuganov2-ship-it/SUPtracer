@@ -37,10 +37,10 @@ REGISTRY = {
     'tt3_failure_triage': dict(title='Разбор сбоев', stage='E4', implemented=False),
     'tt3_learning': dict(title='Обучение на истории', stage='E5', implemented=False),
     'tt3_training': dict(title='Дообучение моделей', stage='E5', implemented=False),
-    # TT-ARCH-001 §12: модуль «Архитектура систем». В E0 есть только отчёт возможностей и закрытый адрес
-    # /api/arch/; граф и коллекторы — E1+, до них флаг включить нельзя.
-    'network_architecture_enabled': dict(title='Модуль «Архитектура систем» (TT-ARCH-001)', stage='ARCH-E1',
-                                         implemented=False),
+    # TT-ARCH-001 §12: модуль «Архитектура систем». P0 — снимок ОС/Docker, граф кода, процессы и трассировка
+    # (TT-133…135); вкладка доски — TT-136. Включает владелец; выключенный флаг закрывает и чтение, и сбор.
+    'network_architecture_enabled': dict(title='Модуль «Архитектура систем» (TT-ARCH-001)', stage='ARCH-P1',
+                                         implemented=True),
 }
 
 

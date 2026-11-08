@@ -1,0 +1,43 @@
+{
+ "project": "tasktreker",
+ "key": "pipeline",
+ "name": "Конвейер задачи: от идеи до main",
+ "goal": "Идея владельца доходит до main только через анализ, ревью и тестирование без открытых дефектов",
+ "owner_role": "владелец",
+ "trigger": "идея владельца",
+ "outcome": "задача влита в main",
+ "source": {"kind": "doc", "ref": "docs/КОНВЕЙЕР.md", "revision": "88540649c00d2d0f213dfb2e111174314caead08"},
+ "refs": ["FR-014"],
+ "steps": [
+  {"key": "start", "type": "start", "name": "Идея владельца"},
+  {"key": "idea", "type": "task", "name": "Идея", "actor": "Product Owner"},
+  {"key": "analysis", "type": "task", "name": "Анализ", "actor": "Системный аналитик, Solution-архитектор"},
+  {"key": "gate_analysis", "type": "gateway_exclusive", "name": "Ворота «анализ → разработка»", "actor": "ИИ-тимлид"},
+  {"key": "dev", "type": "task", "name": "Разработка", "actor": "Разработчик"},
+  {"key": "review", "type": "task", "name": "Ревью", "actor": "Ревьюер"},
+  {"key": "gate_review", "type": "gateway_exclusive", "name": "Решение ревью"},
+  {"key": "deploy_test", "type": "task", "name": "Деплой в тест", "actor": "DevOps-инженер"},
+  {"key": "qa", "type": "task", "name": "Тестирование", "actor": "QA-инженер"},
+  {"key": "gate_main", "type": "gateway_exclusive", "name": "Ворота «тест → main»", "actor": "ИИ-тимлид"},
+  {"key": "owner_yes", "type": "manual", "name": "«Да» владельца", "actor": "владелец"},
+  {"key": "deploy_main", "type": "task", "name": "Деплой в main", "actor": "DevOps-инженер"},
+  {"key": "done", "type": "end", "name": "Влито в main"}
+ ],
+ "flows": [
+  {"from": "start", "to": "idea"},
+  {"from": "idea", "to": "analysis"},
+  {"from": "analysis", "to": "gate_analysis"},
+  {"from": "gate_analysis", "to": "dev", "kind": "conditional", "condition": "DoD анализа выполнен"},
+  {"from": "gate_analysis", "to": "analysis", "kind": "conditional", "condition": "анализ возвращён"},
+  {"from": "dev", "to": "review"},
+  {"from": "review", "to": "gate_review"},
+  {"from": "gate_review", "to": "deploy_test", "kind": "conditional", "condition": "одобрено"},
+  {"from": "gate_review", "to": "dev", "kind": "conditional", "condition": "возврат с дефектами"},
+  {"from": "deploy_test", "to": "qa"},
+  {"from": "qa", "to": "gate_main"},
+  {"from": "gate_main", "to": "owner_yes", "kind": "conditional", "condition": "нет открытых дефектов"},
+  {"from": "gate_main", "to": "dev", "kind": "conditional", "condition": "дефекты QA"},
+  {"from": "owner_yes", "to": "deploy_main"},
+  {"from": "deploy_main", "to": "done"}
+ ]
+}
